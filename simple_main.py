@@ -10,9 +10,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SCAN_SECONDS = 30
 FAST_MOVE_PCT = 12
-EARLY_VOLUME = 50_000
-FAST_VOLUME = 150_000
-MOMO_VOLUME = 300_000
+EARLY_VOLUME = 50000
+FAST_VOLUME = 150000
+MOMO_VOLUME = 300000
 COOLDOWN_SECONDS = 300
 
 price_history = defaultdict(lambda: deque(maxlen=20))
@@ -20,79 +20,72 @@ last_alert_time = {}
 
 
 def send_alert(msg):
-    print(f"[TELEGRAM] {msg}")
+    print(f"[ALERT] {msg}", flush=True)
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[WARNING] Telegram not configured")
+        print("[WARNING] Telegram not set", flush=True)
         return
 
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-        timeout=10
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"[ERROR] Telegram: {e}", flush=True)
 
 
 def get_movers():
-    if not FMP_API_KEY:
-        print("[ERROR] Missing FMP_API_KEY")
-        return []
-
-    url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
+    print("[INFO] Fetching movers...", flush=True)
 
     try:
+        url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
         r = requests.get(url, timeout=10)
         data = r.json()
 
-        symbols = []
-        for item in data[:50]:
-            symbol = item.get("symbol")
-            if symbol:
-                symbols.append(symbol)
+        symbols = [x["symbol"] for x in data[:30] if "symbol" in x]
+
+        print(f"[INFO] Movers: {symbols}", flush=True)
 
         return symbols
 
     except Exception as e:
-        print(f"[ERROR] Movers: {e}")
+        print(f"[ERROR] Movers: {e}", flush=True)
         return []
 
 
 def get_quote(symbol):
-    if not FINNHUB_API_KEY:
-        print("[ERROR] Missing FINNHUB_API_KEY")
-        return None
-
     try:
         r = requests.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": symbol, "token": FINNHUB_API_KEY},
             timeout=10
         )
+        d = r.json()
 
-        data = r.json()
+        price = d.get("c")
+        prev = d.get("pc")
 
-        price = data.get("c")
-        previous_close = data.get("pc")
-
-        if not price or not previous_close:
+        if not price or not prev:
             return None
 
         price = float(price)
-        previous_close = float(previous_close)
+        prev = float(prev)
 
-        if price <= 0 or previous_close <= 0:
+        if price <= 0 or prev <= 0:
             return None
 
-        daily_pct = ((price - previous_close) / previous_close) * 100
+        pct = ((price - prev) / prev) * 100
 
-        return price, daily_pct
+        return price, pct
 
     except Exception as e:
-        print(f"[ERROR] Quote {symbol}: {e}")
+        print(f"[ERROR] Quote {symbol}: {e}", flush=True)
         return None
 
 
-def get_30m_volume(symbol):
+def get_volume(symbol):
     now = int(time.time())
     start = now - 1800
 
@@ -109,15 +102,15 @@ def get_30m_volume(symbol):
             timeout=10
         )
 
-        data = r.json()
+        d = r.json()
 
-        if data.get("s") != "ok":
+        if d.get("s") != "ok":
             return 0
 
-        return int(sum(data.get("v", [])))
+        return int(sum(d.get("v", [])))
 
     except Exception as e:
-        print(f"[ERROR] Volume {symbol}: {e}")
+        print(f"[ERROR] Volume {symbol}: {e}", flush=True)
         return 0
 
 
@@ -126,87 +119,62 @@ def can_alert(symbol):
     return symbol not in last_alert_time or now - last_alert_time[symbol] > COOLDOWN_SECONDS
 
 
-def mark_alerted(symbol):
+def mark_alert(symbol):
     last_alert_time[symbol] = time.time()
 
 
-def check_fast_move(symbol, price, daily_pct, volume):
-    now = time.time()
-    price_history[symbol].append((now, price))
+def check(symbol, price, daily_pct, volume):
+    price_history[symbol].append((time.time(), price))
 
     quick_pct = 0
-
     if len(price_history[symbol]) >= 2:
         old_price = price_history[symbol][0][1]
         if old_price > 0:
             quick_pct = ((price - old_price) / old_price) * 100
 
-    move_pct = max(daily_pct, quick_pct)
+    move = max(daily_pct, quick_pct)
 
-    if move_pct < FAST_MOVE_PCT:
-        return
-
-    if volume < EARLY_VOLUME:
-        return
-
-    if not can_alert(symbol):
+    if move < FAST_MOVE_PCT or volume < EARLY_VOLUME or not can_alert(symbol):
         return
 
     if volume >= MOMO_VOLUME:
-        label = "🔥 MOMO RUNNER"
+        tag = "🔥 MOMO"
     elif volume >= FAST_VOLUME:
-        label = "🚨 FAST MOVE"
+        tag = "🚨 FAST"
     else:
-        label = "⚠️ EARLY SPIKE"
+        tag = "⚠️ EARLY"
 
-    print(f"[TRIGGER] {symbol} {label} +{move_pct:.1f}%")
+    print(f"[TRIGGER] {symbol} {tag} {move:.1f}%", flush=True)
 
-    msg = (
-        f"{label}\n"
-        f"{symbol}\n"
-        f"Move: +{move_pct:.1f}%\n"
-        f"Daily: +{daily_pct:.1f}%\n"
-        f"Quick: +{quick_pct:.1f}%\n"
-        f"Price: ${price:.4f}\n"
-        f"30m Volume: {volume:,}"
-    )
-
-    send_alert(msg)
-    mark_alerted(symbol)
+    send_alert(f"{tag} {symbol} +{move:.1f}% | Vol {volume:,}")
+    mark_alert(symbol)
 
 
 def run():
-    print("🚀 SCANNER STARTED — MOVERS ONLY")
-    send_alert("🚀 SCANNER STARTED — MOVERS ONLY / +12% alerts active")
+    print("TEST LOG — NEW FILE RUNNING", flush=True)
+    print("🚀 MOVERS SCANNER STARTED", flush=True)
 
     while True:
-        print("\n===== NEW MOVERS SCAN =====")
+        print("\n===== NEW SCAN =====", flush=True)
 
         symbols = get_movers()
-        print(f"[INFO] Scanning {len(symbols)} movers only")
 
-        for symbol in symbols:
-            quote = get_quote(symbol)
-
-            if not quote:
-                print(f"[SKIP] {symbol} no quote")
+        for s in symbols:
+            q = get_quote(s)
+            if not q:
+                print(f"[SKIP] {s}", flush=True)
                 continue
 
-            price, daily_pct = quote
-            volume = get_30m_volume(symbol)
+            price, pct = q
+            vol = get_volume(s)
 
-            print(
-                f"[SCAN] {symbol:<6} | "
-                f"Price ${price:<8.4f} | "
-                f"Daily {daily_pct:>6.1f}% | "
-                f"Vol30m {volume:>8,}"
-            )
+            print(f"[SCAN] {s} | {pct:.1f}% | Vol {vol:,}", flush=True)
 
-            check_fast_move(symbol, price, daily_pct, volume)
+            check(s, price, pct, vol)
 
             time.sleep(0.5)
 
-        print("[SCAN] Movers cycle complete")
+        print("[DONE] Cycle complete", flush=True)
         time.sleep(SCAN_SECONDS)
 
 
