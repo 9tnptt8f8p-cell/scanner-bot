@@ -602,6 +602,14 @@ if __name__ == "__main__":
     web_thread.start()
 
     time.sleep(2)
+print("[BOOT] sending telegram test...")
 
-    print("[BOOT] starting scanner")
-    run_scanner()
+test_sent = send_telegram("✅ BOT STARTED — TELEGRAM TEST")
+
+if test_sent:
+    print("[BOOT] Telegram working")
+else:
+    print("[BOOT] Telegram FAILED")
+
+print("[BOOT] starting scanner")
+run_scanner()
