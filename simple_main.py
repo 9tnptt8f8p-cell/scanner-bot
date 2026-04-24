@@ -28,7 +28,6 @@ REQUEST_TIMEOUT_SECONDS = 10
 DEFAULT_PORT = 10000
 
 FINNHUB_QUOTE_URL = "https://finnhub.io/api/v1/quote"
-FINNHUB_CANDLE_URL = "https://finnhub.io/api/v1/stock/candle"
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 TELEGRAM_API_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -84,8 +83,6 @@ class ScanResult:
     price: float
     previous_close: float
     percent_gain: float
-    volume_5m: int
-    avg_volume_5m: int
     score: int
     reason: str
     catalyst: str
@@ -187,7 +184,7 @@ def run_scanner() -> None:
             if result is not None:
                 results.append(result)
 
-        ranked = sorted(results, key=lambda item: (item.score, item.percent_gain, item.volume_5m), reverse=True)
+        ranked = sorted(results, key=lambda item: (item.score, item.percent_gain, item.price), reverse=True)
 
         if ranked:
             top_lines = " | ".join(
@@ -229,15 +226,16 @@ def scan_ticker(session: requests.Session, ticker: str, api_key: str) -> ScanRes
     if quote is None:
         return None
 
+    now_timestamp = time.time()
+    quote_timestamp = safe_int(quote.get("t"))
+    if quote_timestamp == 0 or now_timestamp - quote_timestamp > 15 * 60:
+        print(f"[SCAN] Skipping {ticker}: stale quote", flush=True)
+        return None
+
     price = safe_float(quote.get("c"))
     previous_close = safe_float(quote.get("pc"))
     if price <= 0 or previous_close <= 0:
         print(f"[SCAN] Skipping {ticker}: invalid live quote", flush=True)
-        return None
-
-    latest_5m_volume, avg_5m_volume = fetch_5m_volume_stats(session=session, ticker=ticker, api_key=api_key)
-    if latest_5m_volume <= 0:
-        print(f"[SCAN] Skipping {ticker}: dead 5-minute volume", flush=True)
         return None
 
     news_items = fetch_company_news(session=session, ticker=ticker, api_key=api_key)
@@ -248,7 +246,6 @@ def scan_ticker(session: requests.Session, ticker: str, api_key: str) -> ScanRes
     print(f"[RISK] {ticker} dilution={'yes' if dilution_risk else 'no'}", flush=True)
 
     percent_gain = ((price - previous_close) / previous_close) * 100
-    volume_score = 2 if latest_5m_volume >= max(25_000, int(avg_5m_volume * 1.8)) else 0
 
     score = 0
     reasons: list[str] = []
@@ -267,10 +264,6 @@ def scan_ticker(session: requests.Session, ticker: str, api_key: str) -> ScanRes
         score += 1
         reasons.append("under $20")
 
-    if volume_score > 0:
-        score += volume_score
-        reasons.append("5m volume surge")
-
     if catalyst_score > 0:
         score += 2
         reasons.append("real catalyst")
@@ -288,8 +281,6 @@ def scan_ticker(session: requests.Session, ticker: str, api_key: str) -> ScanRes
         price=price,
         previous_close=previous_close,
         percent_gain=percent_gain,
-        volume_5m=latest_5m_volume,
-        avg_volume_5m=avg_5m_volume,
         score=max(0, min(score, 10)),
         reason=reason_text,
         catalyst=catalyst_text,
@@ -317,46 +308,6 @@ def fetch_quote(session: requests.Session, ticker: str, api_key: str) -> dict[st
     if not isinstance(payload, dict):
         return None
     return payload
-
-
-def fetch_5m_volume_stats(session: requests.Session, ticker: str, api_key: str) -> tuple[int, int]:
-    now = datetime.now(timezone.utc)
-    from_timestamp = int((now - timedelta(hours=6)).timestamp())
-    to_timestamp = int(now.timestamp())
-
-    try:
-        response = session.get(
-            FINNHUB_CANDLE_URL,
-            params={
-                "symbol": ticker,
-                "resolution": "5",
-                "from": from_timestamp,
-                "to": to_timestamp,
-                "token": api_key,
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as error:
-        print(f"[ERROR] {ticker}: 5-minute candle request failed: {error}", flush=True)
-        return 0, 0
-    except ValueError as error:
-        print(f"[ERROR] {ticker}: 5-minute candle JSON decode failed: {error}", flush=True)
-        return 0, 0
-
-    volumes = payload.get("v", []) if isinstance(payload, dict) else []
-    if not isinstance(volumes, list):
-        return 0, 0
-
-    cleaned = [safe_int(item) for item in volumes if safe_int(item) > 0]
-    if not cleaned:
-        return 0, 0
-
-    latest = cleaned[-1]
-    baseline = cleaned[-13:-1] if len(cleaned) > 1 else cleaned
-    average = max(1, int(sum(baseline) / len(baseline))) if baseline else latest
-    return latest, average
 
 
 def fetch_company_news(session: requests.Session, ticker: str, api_key: str) -> list[dict[str, Any]]:
@@ -516,3 +467,4 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
     threading.Thread(target=run_web, daemon=True).start()
     scanner_loop()
+
