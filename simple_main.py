@@ -32,17 +32,16 @@ def home():
 def health():
     return "OK"
 
-
 def get_chat_ids():
     ids = []
 
     if TELEGRAM_CHAT_IDS:
-        ids.extend([x.strip() for x in TELEGRAM_CHAT_IDS.split(",") if x.strip()])
+        ids += [x.strip() for x in TELEGRAM_CHAT_IDS.split(",") if x.strip()]
 
     if TELEGRAM_CHAT_ID:
         ids.append(TELEGRAM_CHAT_ID.strip())
 
-    return list(set(ids))
+    return ids
 
 
 def send_telegram(message):
