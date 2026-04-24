@@ -1,10 +1,16 @@
+[4/24/2026 7:56 AM] Blackmonday: import os
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+[4/24/2026 8:03 AM] Blackmonday: import os
 import time
 import requests
 
-TELEGRAM_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 WATCHLIST = ["SOUN", "RGTI", "AKAN"]
+
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -13,6 +19,7 @@ def send_telegram(message):
         requests.post(url, data=data)
     except:
         print("Telegram failed")
+
 
 def run_scanner():
     print("Running scan...")
@@ -25,7 +32,8 @@ Bot is running.
 """
         send_telegram(message)
 
- if name == "__main__":
+
+if name == "__main__":
     send_telegram("✅ Bot started")
 
     while True:
