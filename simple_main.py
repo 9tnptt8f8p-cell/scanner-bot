@@ -613,3 +613,5 @@ else:
 
 print("[BOOT] starting scanner")
 run_scanner()
+print("[BOOT] simple_main quote-only build 2026-04-24", flush=True)
+
