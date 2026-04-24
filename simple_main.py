@@ -82,7 +82,7 @@ def get_movers():
         return []
 
     try:
-        url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
+        url = f"https://financialmodelingprep.com/stable/biggest-gainers?apikey={FMP_API_KEY}"
         r = requests.get(url, timeout=10)
         data = r.json()
 
