@@ -139,8 +139,11 @@ else:
     print("[BOOT] Telegram FAILED")
 
 print("[BOOT] starting scanner")
-run_scanner()
+def run_scanner():
+    print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] Watchlist: {', '.join(WATCHLIST)}", flush=True)
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
-    run_scanner()
+
+  if not FINNHUB_API_KEY:
+        print("[BOOT] Missing FINNHUB_API_KEY. Scanner cannot start.", flush=True)
+        return
 
