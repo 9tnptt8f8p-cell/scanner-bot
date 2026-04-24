@@ -43,7 +43,31 @@ def health():
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[ALERT LOCAL]", message)
-        return
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    try:
+        r = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
+            timeout=10
+        )
+
+        if r.status_code == 200:
+            return True
+
+        print(f"[TELEGRAM FAILED] {r.status_code} {r.text}")
+        print("[ALERT LOCAL]", message)
+        return False
+
+    except Exception as e:
+        print(f"[TELEGRAM ERROR] {e}")
+        print("[ALERT LOCAL]", message)
+        return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
@@ -516,10 +540,14 @@ def run_scanner():
         for result in results:
             ticker = result["ticker"]
 
-            if result["score"] >= MIN_SCORE and ticker not in already_alerted:
-                send_telegram(build_alert(result))
-                already_alerted.add(ticker)
-                print(f"[ALERT SENT] {ticker} score {result['score']}/10")
+           if result["score"] >= MIN_SCORE and ticker not in already_alerted:
+    sent = send_telegram(build_alert(result))
+
+    if sent:
+        already_alerted.add(ticker)
+        print(f"[ALERT SENT] {ticker} score {result['score']}/10")
+    else:
+        print(f"[ALERT FAILED] {ticker} score {result['score']}/10")
             else:
                 print(f"[NO ALERT] {ticker} score {result['score']}/10")
 
