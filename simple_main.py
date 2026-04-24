@@ -5,6 +5,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict, deque
 
+print("✅ NEW SIMPLE_MAIN.PY LOADED — MOVERS ONLY", flush=True)
+
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -20,10 +22,6 @@ COOLDOWN_SECONDS = 300
 price_history = defaultdict(lambda: deque(maxlen=20))
 last_alert_time = {}
 
-
-# ======================
-# FAKE WEB SERVER FOR RENDER FREE WEB SERVICE
-# ======================
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -42,15 +40,11 @@ def start_web_server():
     server.serve_forever()
 
 
-# ======================
-# TELEGRAM
-# ======================
-
 def send_alert(msg):
     print(f"[ALERT] {msg}", flush=True)
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[WARNING] Telegram not set", flush=True)
+        print("[WARNING] Telegram not configured", flush=True)
         return
 
     try:
@@ -63,12 +57,8 @@ def send_alert(msg):
         print(f"[ERROR] Telegram: {e}", flush=True)
 
 
-# ======================
-# MOVERS FROM FMP
-# ======================
-
 def get_movers():
-    print("[INFO] Fetching movers...", flush=True)
+    print("[INFO] Fetching movers from FMP...", flush=True)
 
     if not FMP_API_KEY:
         print("[ERROR] Missing FMP_API_KEY", flush=True)
@@ -77,21 +67,27 @@ def get_movers():
     try:
         url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
         r = requests.get(url, timeout=10)
+        print(f"[FMP STATUS] {r.status_code}", flush=True)
+
         data = r.json()
 
-        symbols = [x["symbol"] for x in data[:30] if "symbol" in x]
+        if not isinstance(data, list):
+            print(f"[FMP ERROR DATA] {data}", flush=True)
+            return []
 
-        print(f"[INFO] Movers: {symbols}", flush=True)
+        symbols = []
+        for item in data[:30]:
+            symbol = item.get("symbol")
+            if symbol:
+                symbols.append(symbol)
+
+        print(f"[INFO] Movers only: {symbols}", flush=True)
         return symbols
 
     except Exception as e:
         print(f"[ERROR] Movers: {e}", flush=True)
         return []
 
-
-# ======================
-# FINNHUB DATA
-# ======================
 
 def get_quote(symbol):
     if not FINNHUB_API_KEY:
@@ -105,10 +101,9 @@ def get_quote(symbol):
             timeout=10
         )
 
-        d = r.json()
-
-        price = d.get("c")
-        prev = d.get("pc")
+        data = r.json()
+        price = data.get("c")
+        prev = data.get("pc")
 
         if not price or not prev:
             return None
@@ -120,7 +115,6 @@ def get_quote(symbol):
             return None
 
         daily_pct = ((price - prev) / prev) * 100
-
         return price, daily_pct
 
     except Exception as e:
@@ -145,21 +139,17 @@ def get_volume(symbol):
             timeout=10
         )
 
-        d = r.json()
+        data = r.json()
 
-        if d.get("s") != "ok":
+        if data.get("s") != "ok":
             return 0
 
-        return int(sum(d.get("v", [])))
+        return int(sum(data.get("v", [])))
 
     except Exception as e:
         print(f"[ERROR] Volume {symbol}: {e}", flush=True)
         return 0
 
-
-# ======================
-# ALERT LOGIC
-# ======================
 
 def can_alert(symbol):
     now = time.time()
@@ -170,11 +160,10 @@ def mark_alert(symbol):
     last_alert_time[symbol] = time.time()
 
 
-def check(symbol, price, daily_pct, volume):
+def check_fast_move(symbol, price, daily_pct, volume):
     price_history[symbol].append((time.time(), price))
 
     quick_pct = 0
-
     if len(price_history[symbol]) >= 2:
         old_price = price_history[symbol][0][1]
         if old_price > 0:
@@ -198,8 +187,6 @@ def check(symbol, price, daily_pct, volume):
     else:
         tag = "⚠️ EARLY SPIKE"
 
-    print(f"[TRIGGER] {symbol} {tag} +{move_pct:.1f}%", flush=True)
-
     msg = (
         f"{tag}\n"
         f"{symbol}\n"
@@ -214,18 +201,12 @@ def check(symbol, price, daily_pct, volume):
     mark_alert(symbol)
 
 
-# ======================
-# MAIN SCANNER
-# ======================
-
 def run_scanner():
-    print("TEST LOG — NEW FILE RUNNING", flush=True)
-    print("🚀 MOVERS SCANNER STARTED", flush=True)
-
+    print("🚀 MOVERS-ONLY SCANNER STARTED", flush=True)
     send_alert("🚀 Scanner started — movers only / +12% alerts active")
 
     while True:
-        print("\n===== NEW MOVERS SCAN =====", flush=True)
+        print("\n===== NEW MOVERS-ONLY SCAN =====", flush=True)
 
         symbols = get_movers()
 
@@ -247,11 +228,10 @@ def run_scanner():
                 flush=True
             )
 
-            check(symbol, price, daily_pct, volume)
-
+            check_fast_move(symbol, price, daily_pct, volume)
             time.sleep(0.5)
 
-        print("[DONE] Cycle complete", flush=True)
+        print("[DONE] Movers-only cycle complete", flush=True)
         time.sleep(SCAN_SECONDS)
 
 
