@@ -129,7 +129,17 @@ def heartbeat_loop() -> None:
 
 
 def scanner_loop() -> None:
-    print(f"[BOOT] Scanner started | {BUILD_TAG}", flush=True)
+    print("[BOOT] sending TELEGRAM TEST...")
+
+test_sent = send_telegram("✅ TEST ALERT FROM RENDER")
+
+if test_sent:
+    print("[BOOT] Telegram SUCCESS")
+else:
+    print("[BOOT] Telegram FAILED")
+
+print("[BOOT] starting scanner")
+run_scanner()
     print(f"[BOOT] Watchlist: {', '.join(WATCHLIST)}", flush=True)
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     run_scanner()
