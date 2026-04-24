@@ -1,452 +1,412 @@
 import os
 import time
 import requests
-import threading
-from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from collections import defaultdict, deque
+from flask import Flask
+from threading import Thread
+from dotenv import load_dotenv
 
-print("✅ BOT LOADED — ALL MOVERS / 30%+ / NEWS / DILUTION / VOLUME SPIKE", flush=True)
+load_dotenv()
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-FMP_API_KEY = os.getenv("FMP_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SCAN_SECONDS = 30
-MIN_DAILY_GAIN = 30
+MIN_GAIN = 30
+MIN_SCORE = 7
+SCAN_SLEEP = 60
 
-FAST_MOVE_PCT = 12
-EARLY_VOLUME = 50_000
-FAST_VOLUME = 150_000
-MOMO_VOLUME = 300_000
-COOLDOWN_SECONDS = 300
-
-NEAR_100_PCT = 80
-FULL_100_PCT = 100
-MEGA_RUNNER_COOLDOWN = 900
-
-VOLUME_SPIKE_MULTIPLIER = 3
-MIN_SPIKE_VOLUME = 100_000
-VOLUME_COOLDOWN = 300
-
-price_history = defaultdict(lambda: deque(maxlen=20))
-volume_history = defaultdict(lambda: deque(maxlen=10))
-last_alert_time = {}
-mega_runner_alerted = {}
-volume_alerted = {}
-SEC_TICKER_CACHE = None
+WATCHLIST = [
+    "MXL", "SCNI", "LINT", "CAST", "ATOM", "LIDR", "ONMD", "WYHG", "ENVB",
+    "AKAN", "AUUD", "PAPL", "SOUN", "RGTI", "SKLZ", "EUDA"
+]
 
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot running")
+# ----------------------------
+# Render health server
+# ----------------------------
 
-    def log_message(self, format, *args):
-        return
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot alive"
+
+def run_health_server():
+    port = int(os.getenv("PORT", 10000))
+    print(f"[WEB] basic health server listening on port {port}")
+    app.run(host="0.0.0.0", port=port)
 
 
-def start_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("", port), Handler)
-    print(f"[WEB] Server running on port {port}", flush=True)
-    server.serve_forever()
+# ----------------------------
+# Telegram alerts
+# ----------------------------
 
-
-def send_alert(msg):
-    print(f"[ALERT] {msg}", flush=True)
-
+def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[WARNING] Telegram not configured", flush=True)
+        print("[ALERT]", message)
         return
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=10,
-        )
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message
+        }, timeout=10)
     except Exception as e:
-        print(f"[ERROR] Telegram: {e}", flush=True)
+        print(f"[TELEGRAM ERROR] {e}")
 
 
-def get_movers():
-    print("[INFO] Fetching biggest gainers from FMP stable endpoint...", flush=True)
+# ----------------------------
+# Finnhub quote
+# ----------------------------
 
-    if not FMP_API_KEY:
-        print("[ERROR] Missing FMP_API_KEY", flush=True)
-        return []
+def get_quote(ticker):
+    url = "https://finnhub.io/api/v1/quote"
+    params = {
+        "symbol": ticker,
+        "token": FINNHUB_API_KEY
+    }
 
     try:
-        url = f"https://financialmodelingprep.com/stable/biggest-gainers?apikey={FMP_API_KEY}"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, params=params, timeout=10)
         data = r.json()
 
-        if not isinstance(data, list):
-            print(f"[FMP ERROR DATA] {data}", flush=True)
-            return []
+        price = float(data.get("c") or 0)
+        prev_close = float(data.get("pc") or 0)
 
-        symbols = []
-        for item in data[:100]:
-            symbol = item.get("symbol")
-            if symbol:
-                symbols.append(symbol)
-
-        print(f"[INFO] Gainers returned: {len(symbols)}", flush=True)
-        return symbols
-
-    except Exception as e:
-        print(f"[ERROR] Movers: {e}", flush=True)
-        return []
-
-
-def get_quote(symbol):
-    try:
-        r = requests.get(
-            "https://finnhub.io/api/v1/quote",
-            params={"symbol": symbol, "token": FINNHUB_API_KEY},
-            timeout=10,
-        )
-
-        data = r.json()
-        price = data.get("c")
-        prev = data.get("pc")
-
-        if not price or not prev:
+        if price <= 0 or prev_close <= 0:
             return None
 
-        price = float(price)
-        prev = float(prev)
+        daily_gain = ((price - prev_close) / prev_close) * 100
 
-        if price <= 0 or prev <= 0:
-            return None
-
-        daily_pct = ((price - prev) / prev) * 100
-        return price, daily_pct
+        return {
+            "ticker": ticker,
+            "price": price,
+            "prev_close": prev_close,
+            "daily_gain": daily_gain,
+            "raw": data
+        }
 
     except Exception as e:
-        print(f"[ERROR] Quote {symbol}: {e}", flush=True)
+        print(f"[QUOTE ERROR] {ticker}: {e}")
         return None
 
 
-def get_volume(symbol):
-    now = int(time.time())
-    start = now - 1800
+# ----------------------------
+# Volume fix system
+# ----------------------------
+
+def get_volume_data(ticker, quote_data):
+    """
+    Fixes Vol30m = 0 issue.
+
+    Finnhub quote endpoint often does NOT provide true intraday volume.
+    So this function prevents the bot from blindly killing every ticker
+    just because Vol30m is missing.
+
+    It:
+    - checks multiple possible volume keys
+    - falls back safely
+    - flags volume as unconfirmed instead of hard-skipping
+    """
+
+    raw = quote_data.get("raw", {})
+
+    vol_30m = (
+        raw.get("vol_30m")
+        or raw.get("volume_30m")
+        or raw.get("v30")
+        or quote_data.get("vol_30m")
+        or 0
+    )
+
+    daily_volume = (
+        raw.get("volume")
+        or raw.get("daily_volume")
+        or raw.get("v")
+        or quote_data.get("volume")
+        or 0
+    )
 
     try:
-        r = requests.get(
-            "https://finnhub.io/api/v1/stock/candle",
-            params={
-                "symbol": symbol,
-                "resolution": "1",
-                "from": start,
-                "to": now,
-                "token": FINNHUB_API_KEY,
-            },
-            timeout=10,
-        )
-
-        data = r.json()
-
-        if data.get("s") != "ok":
-            return 0
-
-        return int(sum(data.get("v", [])))
-
-    except Exception as e:
-        print(f"[ERROR] Volume {symbol}: {e}", flush=True)
-        return 0
-
-
-def get_news_rank(symbol):
-    today = datetime.utcnow().date()
-    start = today - timedelta(days=3)
+        vol_30m = int(float(vol_30m))
+    except:
+        vol_30m = 0
 
     try:
-        r = requests.get(
-            "https://finnhub.io/api/v1/company-news",
-            params={
-                "symbol": symbol,
-                "from": start.isoformat(),
-                "to": today.isoformat(),
-                "token": FINNHUB_API_KEY,
-            },
-            timeout=10,
-        )
+        daily_volume = int(float(daily_volume))
+    except:
+        daily_volume = 0
 
+    estimated = False
+
+    # Fallback: estimate 30m volume from daily volume if available
+    if vol_30m == 0 and daily_volume > 0:
+        vol_30m = int(daily_volume / 13)
+        estimated = True
+
+    volume_missing = vol_30m == 0
+
+    return {
+        "vol_30m": vol_30m,
+        "daily_volume": daily_volume,
+        "volume_missing": volume_missing,
+        "estimated": estimated
+    }
+
+
+# ----------------------------
+# News / catalyst check
+# ----------------------------
+
+def get_news_catalyst(ticker):
+    url = "https://finnhub.io/api/v1/company-news"
+    today = time.strftime("%Y-%m-%d")
+    params = {
+        "symbol": ticker,
+        "from": today,
+        "to": today,
+        "token": FINNHUB_API_KEY
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
         news = r.json()
 
-        if not isinstance(news, list) or not news:
-            return "D", "No clear news found"
+        if not isinstance(news, list) or len(news) == 0:
+            return "none", "No fresh catalyst found"
 
-        headline = news[0].get("headline", "Headline unavailable")
-        text = headline.lower()
+        headline = news[0].get("headline", "").lower()
 
-        a_words = [
-            "fda", "approval", "contract", "partnership", "acquisition",
-            "merger", "patent", "positive", "phase", "trial", "award",
-            "launch", "record revenue"
-        ]
+        if "earnings" in headline or "results" in headline:
+            return "earnings", "Fresh earnings / results catalyst"
+        if "patent" in headline:
+            return "patent", "Fresh patent catalyst"
+        if "contract" in headline or "agreement" in headline:
+            return "contract", "Fresh contract / agreement catalyst"
+        if "fda" in headline or "trial" in headline:
+            return "biotech", "Fresh biotech / FDA catalyst"
+        if "lawsuit" in headline or "damages" in headline or "jury" in headline:
+            return "legal", "Fresh legal catalyst"
 
-        b_words = [
-            "earnings", "revenue", "growth", "guidance", "expands",
-            "agreement", "collaboration", "order"
-        ]
-
-        if any(w in text for w in a_words):
-            return "A", headline
-
-        if any(w in text for w in b_words):
-            return "B", headline
-
-        return "C", headline
+        return "news", news[0].get("headline", "Fresh news catalyst")
 
     except Exception as e:
-        print(f"[ERROR] News {symbol}: {e}", flush=True)
-        return "D", "News check failed"
+        print(f"[NEWS ERROR] {ticker}: {e}")
+        return "unknown", "News check failed"
 
 
-def load_sec_tickers():
-    global SEC_TICKER_CACHE
+# ----------------------------
+# Dilution / trap check
+# ----------------------------
 
-    if SEC_TICKER_CACHE is not None:
-        return SEC_TICKER_CACHE
-
-    try:
-        r = requests.get(
-            "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "movers-scanner/1.0 contact@example.com"},
-            timeout=10,
-        )
-
-        data = r.json()
-        mapping = {}
-
-        for _, item in data.items():
-            ticker = item.get("ticker", "").upper()
-            cik = str(item.get("cik_str", "")).zfill(10)
-            if ticker and cik:
-                mapping[ticker] = cik
-
-        SEC_TICKER_CACHE = mapping
-        return mapping
-
-    except Exception as e:
-        print(f"[ERROR] SEC ticker map: {e}", flush=True)
-        SEC_TICKER_CACHE = {}
-        return {}
-
-
-def get_dilution_rank(symbol):
-    dilution_words = [
-        "offering", "registered direct", "private placement", "atm",
-        "at-the-market", "shelf", "s-1", "f-1", "warrant",
-        "convertible", "securities purchase agreement", "prospectus",
-        "resale", "equity line"
+def check_dilution_risk(text):
+    danger_words = [
+        "offering",
+        "registered direct",
+        "securities purchase agreement",
+        "warrant",
+        "atm",
+        "shelf",
+        "f-1",
+        "s-1",
+        "convertible",
+        "pipe",
+        "reverse split"
     ]
 
-    try:
-        cik = load_sec_tickers().get(symbol.upper())
+    text = text.lower()
 
-        if not cik:
-            return "C", "Could not verify SEC filings"
+    hits = [word for word in danger_words if word in text]
 
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    if hits:
+        return True, hits
 
-        r = requests.get(
-            url,
-            headers={"User-Agent": "movers-scanner/1.0 contact@example.com"},
-            timeout=10,
-        )
-
-        data = r.json()
-        recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])[:20]
-        descriptions = recent.get("primaryDocDescription", [])[:20]
-
-        combined = " ".join(forms + descriptions).lower()
-
-        high_risk_forms = ["s-1", "f-1", "424b", "424b5", "s-3", "f-3"]
-
-        if any(form in combined for form in high_risk_forms):
-            return "D", "High risk — recent registration/prospectus-type filing found"
-
-        if any(word in combined for word in dilution_words):
-            return "C", "Possible risk — dilution/offering language found"
-
-        return "A", "No obvious recent dilution filing found"
-
-    except Exception as e:
-        print(f"[ERROR] Dilution {symbol}: {e}", flush=True)
-        return "C", "Dilution check failed"
+    return False, []
 
 
-def can_alert(symbol):
-    now = time.time()
-    return symbol not in last_alert_time or now - last_alert_time[symbol] > COOLDOWN_SECONDS
+# ----------------------------
+# Scoring engine
+# ----------------------------
 
+def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
+    score = 0
+    reasons = []
+    risk_flags = []
 
-def mark_alert(symbol):
-    last_alert_time[symbol] = time.time()
+    ticker = quote["ticker"]
+    gain = quote["daily_gain"]
+    price = quote["price"]
 
+    # Percent gain scoring
+    if gain >= 75:
+        score += 3
+        reasons.append("75%+ move")
+    elif gain >= 50:
+        score += 2
+        reasons.append("50%+ move")
+    elif gain >= 30:
+        score += 1
+        reasons.append("30%+ move")
 
-def can_mega_alert(symbol):
-    now = time.time()
-    return symbol not in mega_runner_alerted or now - mega_runner_alerted[symbol] > MEGA_RUNNER_COOLDOWN
+    # Volume scoring
+    vol_30m = volume_info["vol_30m"]
 
-
-def mark_mega_alert(symbol):
-    mega_runner_alerted[symbol] = time.time()
-
-
-def can_volume_alert(symbol):
-    now = time.time()
-    return symbol not in volume_alerted or now - volume_alerted[symbol] > VOLUME_COOLDOWN
-
-
-def mark_volume_alert(symbol):
-    volume_alerted[symbol] = time.time()
-
-
-def check_volume_spike(symbol, price, daily_pct, volume):
-    volume_history[symbol].append(volume)
-
-    if len(volume_history[symbol]) < 5:
-        return
-
-    avg_vol = sum(volume_history[symbol]) / len(volume_history[symbol])
-
-    if avg_vol <= 0:
-        return
-
-    if volume < MIN_SPIKE_VOLUME:
-        return
-
-    if volume < avg_vol * VOLUME_SPIKE_MULTIPLIER:
-        return
-
-    if not can_volume_alert(symbol):
-        return
-
-    send_alert(
-        f"📊 VOLUME SPIKE\n"
-        f"{symbol}\n"
-        f"Daily: +{daily_pct:.1f}%\n"
-        f"Price: ${price:.4f}\n"
-        f"30m Volume: {volume:,}\n"
-        f"Avg Seen Volume: {int(avg_vol):,}\n"
-        f"Spike: {volume / avg_vol:.1f}x"
-    )
-
-    mark_volume_alert(symbol)
-
-
-def check_fast_move(symbol, price, daily_pct, volume):
-    price_history[symbol].append((time.time(), price))
-
-    quick_pct = 0
-    if len(price_history[symbol]) >= 2:
-        old_price = price_history[symbol][0][1]
-        if old_price > 0:
-            quick_pct = ((price - old_price) / old_price) * 100
-
-    move_pct = max(daily_pct, quick_pct)
-
-    if move_pct < FAST_MOVE_PCT or volume < EARLY_VOLUME or not can_alert(symbol):
-        return
-
-    if volume >= MOMO_VOLUME:
-        tag = "🔥 MOMO RUNNER"
-    elif volume >= FAST_VOLUME:
-        tag = "🚨 FAST MOVE"
+    if volume_info["volume_missing"]:
+        risk_flags.append("missing volume data")
     else:
-        tag = "⚠️ EARLY SPIKE"
+        if vol_30m >= 100_000:
+            score += 2
+            reasons.append("strong volume")
+        elif vol_30m >= 25_000:
+            score += 1
+            reasons.append("some volume")
 
-    news_rank, news_text = get_news_rank(symbol)
-    dilution_rank, dilution_text = get_dilution_rank(symbol)
+    if volume_info["estimated"]:
+        risk_flags.append("volume estimated")
 
-    send_alert(
-        f"{tag}\n"
-        f"{symbol}\n"
-        f"Move: +{move_pct:.1f}%\n"
-        f"Daily: +{daily_pct:.1f}%\n"
-        f"Quick: +{quick_pct:.1f}%\n"
-        f"Price: ${price:.4f}\n"
-        f"30m Volume: {volume:,}\n\n"
-        f"News Rank: {news_rank}\n"
-        f"News: {news_text}\n\n"
-        f"Dilution Rank: {dilution_rank}\n"
-        f"Dilution: {dilution_text}"
-    )
+    # Catalyst scoring
+    if catalyst_type not in ["none", "unknown"]:
+        score += 2
+        reasons.append("fresh catalyst")
+    else:
+        risk_flags.append("no clear catalyst")
 
-    mark_alert(symbol)
+    # Price sanity
+    if price < 1:
+        risk_flags.append("sub-$1 stock")
+    elif price > 50:
+        risk_flags.append("high price mover")
+
+    # Dilution check from catalyst text/headline
+    has_dilution, dilution_hits = check_dilution_risk(catalyst_text)
+
+    if has_dilution:
+        score -= 2
+        risk_flags.append("dilution risk: " + ", ".join(dilution_hits))
+
+    # Safety rule: do not let missing volume create fake high score
+    if volume_info["volume_missing"] and score >= 7:
+        score -= 2
+        risk_flags.append("score reduced: volume unconfirmed")
+
+    return {
+        "ticker": ticker,
+        "price": price,
+        "gain": gain,
+        "score": score,
+        "reasons": reasons,
+        "risk_flags": risk_flags,
+        "catalyst_type": catalyst_type,
+        "catalyst_text": catalyst_text,
+        "vol_30m": vol_30m,
+        "daily_volume": volume_info["daily_volume"]
+    }
 
 
-def check_mega_runner(symbol, price, daily_pct, volume):
-    if daily_pct < NEAR_100_PCT or not can_mega_alert(symbol):
-        return
+# ----------------------------
+# Alert message
+# ----------------------------
 
-    tag = "💯 100%+ RUNNER" if daily_pct >= FULL_100_PCT else "🚀 NEAR 100% RUNNER"
+def build_alert(result):
+    reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
+    risks = ", ".join(result["risk_flags"]) if result["risk_flags"] else "none"
 
-    news_rank, news_text = get_news_rank(symbol)
-    dilution_rank, dilution_text = get_dilution_rank(symbol)
+    return f"""
+🚨 MOMENTUM ALERT
 
-    send_alert(
-        f"{tag}\n"
-        f"{symbol}\n"
-        f"Daily Move: +{daily_pct:.1f}%\n"
-        f"Price: ${price:.4f}\n"
-        f"30m Volume: {volume:,}\n\n"
-        f"News Rank: {news_rank}\n"
-        f"News: {news_text}\n\n"
-        f"Dilution Rank: {dilution_rank}\n"
-        f"Dilution: {dilution_text}"
-    )
+{result['ticker']} | Score: {result['score']}/10
+Price: ${result['price']:.4f}
+Daily Gain: {result['gain']:.1f}%
+Vol30m: {result['vol_30m']:,}
 
-    mark_mega_alert(symbol)
+Catalyst: {result['catalyst_type']}
+{result['catalyst_text']}
 
+Reasons: {reasons}
+Risk: {risks}
+""".strip()
+
+
+# ----------------------------
+# Scanner loop
+# ----------------------------
 
 def run_scanner():
-    print("🚀 SCANNER STARTED", flush=True)
-    send_alert("🚀 Scanner started — all FMP gainers / 30%+ / +12% alerts / volume spike / 100% tracker")
+    print("[BOOT] Scanner started")
+
+    if not FINNHUB_API_KEY:
+        print("[BOOT] Missing FINNHUB_API_KEY. Scanner cannot start.")
+        return
+
+    already_alerted = set()
 
     while True:
-        print("\n===== NEW ALL-MOVERS SCAN =====", flush=True)
+        results = []
 
-        symbols = get_movers()
+        print("[SCAN] Starting cycle")
 
-        for symbol in symbols:
-            quote = get_quote(symbol)
+        for ticker in WATCHLIST:
+            quote = get_quote(ticker)
 
             if not quote:
-                print(f"[SKIP] {symbol} no quote", flush=True)
+                print(f"[SKIP] {ticker} no quote")
                 continue
 
-            price, daily_pct = quote
+            gain = quote["daily_gain"]
+            price = quote["price"]
 
-            if daily_pct < MIN_DAILY_GAIN:
-                print(f"[FILTER] {symbol} skipped — daily gain {daily_pct:.1f}% under {MIN_DAILY_GAIN}%", flush=True)
-                continue
-
-            volume = get_volume(symbol)
+            volume_info = get_volume_data(ticker, quote)
 
             print(
-                f"[SCAN] {symbol:<6} | Price ${price:<8.4f} | Daily {daily_pct:>6.1f}% | Vol30m {volume:>8,}",
-                flush=True,
+                f"[SCAN] {ticker:<6} | Price ${price:<8.4f} | "
+                f"Daily {gain:6.1f}% | Vol30m {volume_info['vol_30m']:>8,}"
             )
 
-            check_volume_spike(symbol, price, daily_pct, volume)
-            check_fast_move(symbol, price, daily_pct, volume)
-            check_mega_runner(symbol, price, daily_pct, volume)
+            if gain < MIN_GAIN:
+                print(f"[FILTER] {ticker} skipped — daily gain {gain:.1f}% under {MIN_GAIN}%")
+                continue
 
-            time.sleep(0.5)
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
-        print("[DONE] All-movers cycle complete", flush=True)
-        time.sleep(SCAN_SECONDS)
+            result = score_ticker(
+                quote=quote,
+                volume_info=volume_info,
+                catalyst_type=catalyst_type,
+                catalyst_text=catalyst_text
+            )
 
+            results.append(result)
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+
+        if results:
+            top_line = " | ".join(
+                [f"{r['ticker']} {r['score']}/10 ${r['price']:.2f}" for r in results[:5]]
+            )
+            print(f"[SCAN] Top ranked: {top_line}")
+
+        for result in results:
+            ticker = result["ticker"]
+
+            if result["score"] >= MIN_SCORE and ticker not in already_alerted:
+                send_telegram(build_alert(result))
+                already_alerted.add(ticker)
+                print(f"[ALERT SENT] {ticker} score {result['score']}/10")
+            else:
+                print(f"[NO ALERT] {ticker} score {result['score']}/10")
+
+        print("[SCAN] Cycle complete")
+        print("[HEARTBEAT] alive")
+
+        time.sleep(SCAN_SLEEP)
+
+
+# ----------------------------
+# Start bot
+# ----------------------------
 
 if __name__ == "__main__":
-    threading.Thread(target=start_web_server, daemon=True).start()
+    Thread(target=run_health_server, daemon=True).start()
     run_scanner()
