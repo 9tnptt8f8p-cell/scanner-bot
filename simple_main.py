@@ -1,8 +1,8 @@
-[4/24/2026 7:56 AM] Blackmonday: import os
+
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-[4/24/2026 8:03 AM] Blackmonday: import os
+
 import time
 import requests
 
