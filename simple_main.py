@@ -28,10 +28,10 @@ last_alert_time = {}
 # ======================
 
 def send_alert(message):
-    print(message)
+    print(f"[TELEGRAM] {message}")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ALERT] Missing Telegram config")
+        print("[WARNING] Telegram not configured")
         return
 
     try:
@@ -41,7 +41,7 @@ def send_alert(message):
             timeout=10
         )
     except Exception as e:
-        print(f"[ALERT ERROR] {e}")
+        print(f"[ERROR][ALERT] {e}")
 
 
 # ======================
@@ -50,7 +50,7 @@ def send_alert(message):
 
 def get_top_movers():
     if not FMP_API_KEY:
-        print("[BOOT] Missing FMP_API_KEY")
+        print("[ERROR] Missing FMP_API_KEY")
         return []
 
     url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
@@ -68,15 +68,18 @@ def get_top_movers():
         return symbols
 
     except Exception as e:
-        print(f"[GAINERS ERROR] {e}")
+        print(f"[ERROR][GAINERS] {e}")
         return []
 
 
 def get_symbols_to_scan():
     symbols = get_top_movers()
 
+    print("\n==================== NEW SCAN ====================")
     print(f"[SYMBOLS] Scanning {len(symbols)} movers")
-    print(symbols)
+
+    if not symbols:
+        print("[WARNING] No movers returned")
 
     return symbols
 
@@ -113,7 +116,7 @@ def get_quote(symbol):
         }
 
     except Exception as e:
-        print(f"[QUOTE ERROR] {symbol}: {e}")
+        print(f"[ERROR][QUOTE] {symbol}: {e}")
         return None
 
 
@@ -143,7 +146,7 @@ def get_30m_volume(symbol):
         return int(sum(volumes)) if volumes else 0
 
     except Exception as e:
-        print(f"[VOLUME ERROR] {symbol}: {e}")
+        print(f"[ERROR][VOLUME] {symbol}: {e}")
         return 0
 
 
@@ -182,6 +185,8 @@ def check_fast_move(symbol, price, daily_pct, volume):
     else:
         label = "⚠️ EARLY SPIKE"
 
+    print(f"[ALERT] {symbol} TRIGGERED {label} (+{move_pct:.1f}%)")
+
     msg = (
         f"{label}\n"
         f"{symbol}\n"
@@ -202,14 +207,12 @@ def check_fast_move(symbol, price, daily_pct, volume):
 
 def run():
     if not FINNHUB_API_KEY:
-        print("[BOOT] Missing FINNHUB_API_KEY")
+        print("[ERROR] Missing FINNHUB_API_KEY")
         return
 
-    send_alert("✅ LIVE SCANNER ACTIVE — movers + 12% alerts")
+    send_alert("🚀 SCANNER STARTED — live movers / 12% alerts active")
 
     while True:
-        print("\n[SCAN] New cycle")
-
         symbols = get_symbols_to_scan()
 
         for symbol in symbols:
@@ -221,12 +224,18 @@ def run():
             daily_pct = quote["daily_pct"]
             volume = get_30m_volume(symbol)
 
-            print(f"{symbol} ${price:.2f} | {daily_pct:.1f}% | Vol {volume:,}")
+            print(
+                f"[SCAN] {symbol:<6} | "
+                f"Price: ${price:<8.4f} | "
+                f"Daily: {daily_pct:>6.1f}% | "
+                f"Vol30m: {volume:>8,}"
+            )
 
             check_fast_move(symbol, price, daily_pct, volume)
 
             time.sleep(0.5)
 
+        print("[SCAN] Cycle complete")
         time.sleep(SCAN_SECONDS)
 
 
