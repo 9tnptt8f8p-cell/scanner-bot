@@ -36,7 +36,6 @@ def send_telegram(message):
         print("[ERROR] Telegram failed:", e, flush=True)
 
 
-# Track recent alerts to avoid spam
 last_alert_time = {}
 
 TICKERS = [
@@ -64,7 +63,10 @@ def score_ticker(price, prev_close):
     pct = ((price - prev_close) / prev_close) * 100
     score = 0
 
-    if pct >= 10:
+    # 🔥 improved scoring
+    if pct >= 20:
+        score += 4
+    elif pct >= 10:
         score += 3
     elif pct >= 5:
         score += 2
@@ -102,13 +104,14 @@ def run_scanner():
             best_score = score
             best = (ticker, price, pct, score)
 
-    if best and best_score >= 7:
+    # 🔥 alert threshold lowered to 6
+    if best and best_score >= 6:
         ticker, price, pct, score = best
 
         now = time.time()
         last_time = last_alert_time.get(ticker, 0)
 
-        if now - last_time > 1800:  # 30 min cooldown
+        if now - last_time > 1800:
             msg = (
                 f"🚨 {ticker}\n"
                 f"Price: {price}\n"
@@ -143,7 +146,7 @@ def scanner_loop():
     while True:
         print("[HEARTBEAT] alive", flush=True)
         run_scanner()
-        time.sleep(15)  # fast testing
+        time.sleep(60)  # 🔥 slower = no rate limit
 
 
 if __name__ == "__main__":
