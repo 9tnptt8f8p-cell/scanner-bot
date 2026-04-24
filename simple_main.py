@@ -7,18 +7,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOOT_MARKER = "auto-gainers 12pct news+dilution v1"
+BOOT_MARKER = "tight 27pct spike scanner v1"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Supports one or both:
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
-MIN_GAIN = 12
-MIN_SCORE = 4
+MIN_GAIN = 27
+MIN_SCORE = 6
 SCAN_SLEEP = 180
-ALERT_COOLDOWN_SECONDS = 900
-MAX_GAINERS = 50
+ALERT_COOLDOWN_SECONDS = 1800
+MAX_GAINERS = 40
+MAX_ALERTS_PER_CYCLE = 3
+
+MIN_VOLUME = 500_000
+MAX_PRICE = 100
 
 app = Flask(__name__)
 
@@ -32,16 +38,18 @@ def home():
 def health():
     return "OK"
 
+
 def get_chat_ids():
     ids = []
 
     if TELEGRAM_CHAT_IDS:
-        ids += [x.strip() for x in TELEGRAM_CHAT_IDS.split(",") if x.strip()]
+        ids.extend([x.strip() for x in TELEGRAM_CHAT_IDS.split(",") if x.strip()])
 
     if TELEGRAM_CHAT_ID:
         ids.append(TELEGRAM_CHAT_ID.strip())
 
-    return ids
+    # remove duplicates
+    return list(dict.fromkeys(ids))
 
 
 def send_telegram(message):
@@ -64,7 +72,10 @@ def send_telegram(message):
                 timeout=10
             )
 
-            print(f"[TELEGRAM RESPONSE] chat={chat_id} status={r.status_code} body={r.text}", flush=True)
+            print(
+                f"[TELEGRAM RESPONSE] chat={chat_id} status={r.status_code} body={r.text}",
+                flush=True
+            )
 
             if r.status_code != 200:
                 success = False
@@ -80,11 +91,6 @@ def send_telegram(message):
 
 
 def get_percent_gainers():
-    """
-    No watchlist.
-    Pulls live Yahoo day gainers and keeps only 12%+ movers.
-    """
-
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
     params = {
@@ -130,17 +136,27 @@ def get_percent_gainers():
             if price <= 0:
                 continue
 
-            if gain >= MIN_GAIN:
-                movers.append({
-                    "ticker": ticker,
-                    "price": price,
-                    "gain": gain,
-                    "volume": volume
-                })
+            if gain < MIN_GAIN:
+                continue
+
+            if volume < MIN_VOLUME:
+                print(f"[FILTER] {ticker} skipped — volume {volume:,} under {MIN_VOLUME:,}", flush=True)
+                continue
+
+            if price > MAX_PRICE:
+                print(f"[FILTER] {ticker} skipped — price ${price:.2f} over ${MAX_PRICE}", flush=True)
+                continue
+
+            movers.append({
+                "ticker": ticker,
+                "price": price,
+                "gain": gain,
+                "volume": volume
+            })
 
         movers.sort(key=lambda x: x["gain"], reverse=True)
 
-        print(f"[GAINERS] Found {len(movers)} movers over {MIN_GAIN}%:", flush=True)
+        print(f"[GAINERS] Found {len(movers)} qualified movers over {MIN_GAIN}%:", flush=True)
         print("[GAINERS] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
 
         return movers
@@ -157,6 +173,7 @@ def get_news_catalyst(ticker):
     today = time.strftime("%Y-%m-%d")
 
     url = "https://finnhub.io/api/v1/company-news"
+
     params = {
         "symbol": ticker,
         "from": today,
@@ -213,9 +230,7 @@ def check_dilution_risk(text):
     ]
 
     text = str(text).lower()
-    hits = [word for word in danger_words if word in text]
-
-    return hits
+    return [word for word in danger_words if word in text]
 
 
 def score_mover(mover, catalyst_type, catalyst_text):
@@ -236,14 +251,14 @@ def score_mover(mover, catalyst_type, catalyst_text):
     elif gain >= 50:
         score += 3
         reasons.append("50%+ gainer")
-    elif gain >= 30:
+    elif gain >= 27:
         score += 2
-        reasons.append("30%+ gainer")
-    elif gain >= 12:
-        score += 1
-        reasons.append("12%+ spike")
+        reasons.append("27%+ spike")
 
-    if volume >= 2_000_000:
+    if volume >= 10_000_000:
+        score += 3
+        reasons.append("10M+ volume")
+    elif volume >= 2_000_000:
         score += 2
         reasons.append("2M+ volume")
     elif volume >= 500_000:
@@ -269,9 +284,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
     if price < 1:
         risks.append("sub-$1 stock")
 
-    if price > 50:
-        risks.append("high price mover")
-
     score = max(0, min(score, 10))
 
     return {
@@ -292,7 +304,7 @@ def build_alert(result, rank):
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
 
     return f"""
-🚨 12%+ SPIKE ALERT
+🚨 27%+ SPIKE ALERT
 
 Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
@@ -311,7 +323,7 @@ Risk: {risks}
 
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print("[BOOT] No watchlist mode — scanning 12%+ day gainers only", flush=True)
+    print("[BOOT] No watchlist — scanning 27%+ percent gainers only", flush=True)
 
     alert_history = {}
 
@@ -352,11 +364,16 @@ def run_scanner():
             )
             print(f"[SCAN] Top ranked: {top_line}", flush=True)
         else:
-            print("[SCAN] No 12%+ gainers found", flush=True)
+            print("[SCAN] No qualified 27%+ gainers found", flush=True)
 
         now = time.time()
+        alerts_sent_this_cycle = 0
 
         for rank, result in enumerate(results, start=1):
+            if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
+                print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
+                break
+
             ticker = result["ticker"]
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
@@ -366,6 +383,7 @@ def run_scanner():
 
                 if sent:
                     alert_history[ticker] = now
+                    alerts_sent_this_cycle += 1
                     print(f"[ALERT SENT] #{rank} {ticker} score {result['score']}/10", flush=True)
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker} score {result['score']}/10", flush=True)
@@ -406,7 +424,7 @@ if __name__ == "__main__":
     time.sleep(2)
 
     print("[BOOT] sending Telegram test", flush=True)
-    send_telegram("✅ TEST ALERT FROM RENDER — 12%+ spike scanner is live")
+    send_telegram("✅ TEST ALERT FROM RENDER — tight 27%+ spike scanner is live")
 
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
