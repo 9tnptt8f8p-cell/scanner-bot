@@ -38,7 +38,7 @@ WATCHLIST = [
 ]
 
 # ============================
-# WEB HEALTH SERVER
+# WEB SERVER FOR RENDER FREE
 # ============================
 
 app = Flask(__name__)
@@ -72,7 +72,7 @@ def send_telegram(message):
         print(f"[TELEGRAM ERROR] {e}")
 
 # ============================
-# FINNHUB PRICE
+# PRICE DATA - FINNHUB
 # ============================
 
 def get_quote(ticker):
@@ -80,6 +80,7 @@ def get_quote(ticker):
         return None
 
     url = "https://finnhub.io/api/v1/quote"
+
     params = {
         "symbol": ticker,
         "token": FINNHUB_API_KEY
@@ -110,11 +111,12 @@ def get_quote(ticker):
         return None
 
 # ============================
-# VOLUME SYSTEM
+# VOLUME DATA
 # Alpaca -> TwelveData -> AlphaVantage -> Tiingo -> Finnhub
 # ============================
 
 def get_volume_data(ticker, quote_data=None):
+
     # 1. Alpaca
     if ALPACA_API_KEY and ALPACA_SECRET_KEY:
         try:
@@ -122,6 +124,7 @@ def get_volume_data(ticker, quote_data=None):
             start_dt = now_dt - timedelta(minutes=30)
 
             url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
+
             params = {
                 "timeframe": "1Min",
                 "start": start_dt.isoformat() + "Z",
@@ -137,10 +140,12 @@ def get_volume_data(ticker, quote_data=None):
 
             r = requests.get(url, params=params, headers=headers, timeout=10)
             data = r.json()
+
             bars = data.get("bars", [])
 
             if bars:
                 vol = int(sum(bar.get("v", 0) for bar in bars))
+
                 if vol > 0:
                     return {
                         "vol_30m": vol,
@@ -159,6 +164,7 @@ def get_volume_data(ticker, quote_data=None):
     if TWELVEDATA_API_KEY:
         try:
             url = "https://api.twelvedata.com/time_series"
+
             params = {
                 "symbol": ticker,
                 "interval": "1min",
@@ -168,10 +174,12 @@ def get_volume_data(ticker, quote_data=None):
 
             r = requests.get(url, params=params, timeout=10)
             data = r.json()
+
             values = data.get("values", [])
 
             if values:
                 vol = int(sum(int(float(v.get("volume", 0))) for v in values))
+
                 if vol > 0:
                     return {
                         "vol_30m": vol,
@@ -190,6 +198,7 @@ def get_volume_data(ticker, quote_data=None):
     if ALPHAVANTAGE_API_KEY:
         try:
             url = "https://www.alphavantage.co/query"
+
             params = {
                 "function": "TIME_SERIES_INTRADAY",
                 "symbol": ticker,
@@ -199,6 +208,7 @@ def get_volume_data(ticker, quote_data=None):
 
             r = requests.get(url, params=params, timeout=10)
             data = r.json()
+
             series = data.get("Time Series (1min)", {})
 
             volumes = []
@@ -207,6 +217,7 @@ def get_volume_data(ticker, quote_data=None):
 
             if volumes:
                 vol = int(sum(volumes))
+
                 if vol > 0:
                     return {
                         "vol_30m": vol,
@@ -228,6 +239,7 @@ def get_volume_data(ticker, quote_data=None):
             start_dt = now_dt - timedelta(minutes=30)
 
             url = f"https://api.tiingo.com/iex/{ticker}/prices"
+
             params = {
                 "startDate": start_dt.isoformat() + "Z",
                 "endDate": now_dt.isoformat() + "Z",
@@ -240,6 +252,7 @@ def get_volume_data(ticker, quote_data=None):
 
             if isinstance(data, list) and data:
                 vol = int(sum(int(float(bar.get("volume", 0))) for bar in data))
+
                 if vol > 0:
                     return {
                         "vol_30m": vol,
@@ -261,6 +274,7 @@ def get_volume_data(ticker, quote_data=None):
             thirty_minutes_ago = now - 30 * 60
 
             url = "https://finnhub.io/api/v1/stock/candle"
+
             params = {
                 "symbol": ticker,
                 "resolution": "1",
@@ -309,6 +323,7 @@ def get_news_catalyst(ticker):
     today = time.strftime("%Y-%m-%d")
 
     url = "https://finnhub.io/api/v1/company-news"
+
     params = {
         "symbol": ticker,
         "from": today,
@@ -381,7 +396,6 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
     gain = quote["daily_gain"]
     vol_30m = volume_info["vol_30m"]
 
-    # Gain scoring
     if gain >= 75:
         score += 3
         reasons.append("75%+ move")
@@ -392,7 +406,6 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
         score += 1
         reasons.append("30%+ move")
 
-    # Volume scoring
     if volume_info["volume_missing"]:
         risk_flags.append("missing volume data")
     else:
@@ -406,36 +419,29 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
             score += 1
             reasons.append("some volume")
 
-    # Data source reward
     if volume_info.get("source") in ["alpaca", "twelvedata", "alphavantage", "tiingo"]:
         score += 1
         reasons.append(f"volume source: {volume_info.get('source')}")
 
-    # Catalyst scoring
     if catalyst_type not in ["none", "unknown"]:
         score += 2
         reasons.append("fresh catalyst")
     else:
         risk_flags.append("no clear catalyst")
 
-    # Price flags
     if price < 1:
         risk_flags.append("sub-$1 stock")
+
     if price > 50:
         risk_flags.append("high price mover")
 
-    # Dilution risk
     has_dilution, dilution_hits = check_dilution_risk(catalyst_text)
 
     if has_dilution:
         score -= 2
         risk_flags.append("dilution risk: " + ", ".join(dilution_hits))
 
-    # Clamp score
-    if score < 0:
-        score = 0
-    if score > 10:
-        score = 10
+    score = max(0, min(score, 10))
 
     return {
         "ticker": ticker,
@@ -475,7 +481,7 @@ Risk: {risks}
 """.strip()
 
 # ============================
-# SCANNER
+# SCANNER LOOP
 # ============================
 
 def run_scanner():
@@ -544,20 +550,33 @@ def run_scanner():
 
         print("[SCAN] Cycle complete")
         print("[HEARTBEAT] alive")
+
         time.sleep(SCAN_SLEEP)
 
 # ============================
 # START APP
-# IMPORTANT: Flask binds first for Render.
-# Scanner runs in background thread.
+# Render FREE Web Service fix:
+# Open port FIRST, scanner second.
 # ============================
 
 if __name__ == "__main__":
-    print("[BOOT] Starting scanner thread")
-    scanner_thread = Thread(target=run_scanner, daemon=True)
-    scanner_thread.start()
-
     port = int(os.getenv("PORT", 10000))
-    print(f"[WEB] binding to port {port}")
 
-    app.run(host="0.0.0.0", port=port)
+    print(f"[WEB] starting server on port {port}")
+
+    web_thread = Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False
+        ),
+        daemon=True
+    )
+
+    web_thread.start()
+
+    time.sleep(2)
+
+    print("[BOOT] starting scanner")
+    run_scanner()
