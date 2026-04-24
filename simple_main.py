@@ -25,7 +25,9 @@ Bot is running.
 """
         send_telegram(message)
 
-if name == "__main__":
+[4/24/2026 7:32 AM] Blackmonday: TELEGRAM_TOKEN=8710285209:AAHt42ariJ2McMPqNGrDmqR35Lmad_eiI6g
+CHAT_ID=1296637203,1184831083
+[4/24/2026 7:41 AM] Blackmonday: if name == "__main__":
     send_telegram("✅ Bot started")
 
     while True:
