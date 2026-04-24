@@ -116,6 +116,191 @@ def get_quote(ticker):
 # ============================
 
 def get_volume_data(ticker, quote_data=None):
+    """
+    FINAL FREE VERSION (stable):
+
+    Order:
+    1. Alpaca (fixed with feed=iex)
+    2. TwelveData
+    3. AlphaVantage
+    4. Finnhub fallback
+    """
+
+    # ============================
+    # 1. ALPACA (FIXED)
+    # ============================
+    if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+        try:
+            now_dt = datetime.utcnow()
+            start_dt = now_dt - timedelta(minutes=30)
+
+            url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
+
+            params = {
+                "timeframe": "1Min",
+                "start": start_dt.isoformat() + "Z",
+                "end": now_dt.isoformat() + "Z",
+                "limit": 1000,
+                "adjustment": "raw",
+                "feed": "iex"   # 🔥 REQUIRED FOR FREE PLAN
+            }
+
+            headers = {
+                "APCA-API-KEY-ID": ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
+            }
+
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            data = r.json()
+
+            # DEBUG (VERY IMPORTANT)
+            if "bars" not in data:
+                print(f"[ALPACA RAW] {ticker}: {data}")
+
+            bars = data.get("bars", [])
+
+            if bars:
+                vol = int(sum(bar.get("v", 0) for bar in bars))
+
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "alpaca"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} Alpaca no usable volume")
+
+        except Exception as e:
+            print(f"[ALPACA ERROR] {ticker}: {e}")
+
+    # ============================
+    # 2. TWELVEDATA
+    # ============================
+    if TWELVEDATA_API_KEY:
+        try:
+            url = "https://api.twelvedata.com/time_series"
+
+            params = {
+                "symbol": ticker,
+                "interval": "1min",
+                "outputsize": 30,
+                "apikey": TWELVEDATA_API_KEY
+            }
+
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            values = data.get("values", [])
+
+            if values:
+                vol = int(sum(int(float(v.get("volume", 0))) for v in values))
+
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "twelvedata"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} TwelveData no usable volume")
+
+        except Exception as e:
+            print(f"[TWELVEDATA ERROR] {ticker}: {e}")
+
+    # ============================
+    # 3. ALPHA VANTAGE
+    # ============================
+    if ALPHAVANTAGE_API_KEY:
+        try:
+            url = "https://www.alphavantage.co/query"
+
+            params = {
+                "function": "TIME_SERIES_INTRADAY",
+                "symbol": ticker,
+                "interval": "1min",
+                "apikey": ALPHAVANTAGE_API_KEY
+            }
+
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            series = data.get("Time Series (1min)", {})
+
+            volumes = []
+            for k in list(series.keys())[:30]:
+                volumes.append(int(float(series[k].get("5. volume", 0))))
+
+            if volumes:
+                vol = int(sum(volumes))
+
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "alphavantage"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} AlphaVantage no usable volume")
+
+        except Exception as e:
+            print(f"[ALPHA ERROR] {ticker}: {e}")
+
+    # ============================
+    # 4. FINNHUB FALLBACK
+    # ============================
+    if FINNHUB_API_KEY:
+        try:
+            now = int(time.time())
+            thirty_minutes_ago = now - 30 * 60
+
+            url = "https://finnhub.io/api/v1/stock/candle"
+
+            params = {
+                "symbol": ticker,
+                "resolution": "1",
+                "from": thirty_minutes_ago,
+                "to": now,
+                "token": FINNHUB_API_KEY
+            }
+
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            if data.get("s") == "ok":
+                volumes = data.get("v", [])
+                vol = int(sum(volumes))
+
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "finnhub"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} Finnhub no usable volume")
+
+        except Exception as e:
+            print(f"[FINNHUB ERROR] {ticker}: {e}")
+
+    # ============================
+    # FAIL SAFE
+    # ============================
+    return {
+        "vol_30m": 0,
+        "daily_volume": 0,
+        "volume_missing": True,
+        "estimated": False,
+        "source": "none"
+    }(ticker, quote_data=None):
 
     # 1. Alpaca
     if ALPACA_API_KEY and ALPACA_SECRET_KEY:
