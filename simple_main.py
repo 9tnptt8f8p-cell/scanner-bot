@@ -7,12 +7,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+FMP_API_KEY = os.getenv("FMP_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# ======================
-# SETTINGS
-# ======================
 
 SCAN_SECONDS = 30
 
@@ -20,39 +17,27 @@ FAST_MOVE_PCT = 12
 EARLY_VOLUME = 50_000
 FAST_VOLUME = 150_000
 MOMO_VOLUME = 300_000
+COOLDOWN_SECONDS = 300
 
-COOLDOWN_SECONDS = 300  # 5 min per ticker
-
-WATCHLIST = [
-    "ATOM", "AKAN", "AUUD", "PAPL", "SOUN", "SKLZ",
-    "RGTI", "PLTR", "CPXI", "EUDA", "MITI"
-]
-
-# stores recent prices per ticker
 price_history = defaultdict(lambda: deque(maxlen=20))
 last_alert_time = {}
 
 
 # ======================
-# TELEGRAM
+# ALERT
 # ======================
 
 def send_alert(message):
     print(message)
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ALERT] Missing Telegram token/chat id")
+        print("[ALERT] Missing Telegram config")
         return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     try:
         requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message
-            },
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=10
         )
     except Exception as e:
@@ -60,19 +45,51 @@ def send_alert(message):
 
 
 # ======================
-# FINNHUB DATA
+# MOVERS (FMP)
+# ======================
+
+def get_top_movers():
+    if not FMP_API_KEY:
+        print("[BOOT] Missing FMP_API_KEY")
+        return []
+
+    url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API_KEY}"
+
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+
+        symbols = []
+        for item in data[:50]:
+            symbol = item.get("symbol")
+            if symbol:
+                symbols.append(symbol)
+
+        return symbols
+
+    except Exception as e:
+        print(f"[GAINERS ERROR] {e}")
+        return []
+
+
+def get_symbols_to_scan():
+    symbols = get_top_movers()
+
+    print(f"[SYMBOLS] Scanning {len(symbols)} movers")
+    print(symbols)
+
+    return symbols
+
+
+# ======================
+# DATA (FINNHUB)
 # ======================
 
 def get_quote(symbol):
-    url = "https://finnhub.io/api/v1/quote"
-
     try:
         r = requests.get(
-            url,
-            params={
-                "symbol": symbol,
-                "token": FINNHUB_API_KEY
-            },
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol": symbol, "token": FINNHUB_API_KEY},
             timeout=10
         )
 
@@ -84,11 +101,15 @@ def get_quote(symbol):
         if not price or not prev_close:
             return None
 
+        price = float(price)
+        prev_close = float(prev_close)
+
+        if price <= 0 or prev_close <= 0:
+            return None
+
         return {
-            "symbol": symbol,
-            "price": float(price),
-            "prev_close": float(prev_close),
-            "daily_pct": ((float(price) - float(prev_close)) / float(prev_close)) * 100
+            "price": price,
+            "daily_pct": ((price - prev_close) / prev_close) * 100
         }
 
     except Exception as e:
@@ -96,19 +117,13 @@ def get_quote(symbol):
         return None
 
 
-def get_volume(symbol):
-    """
-    Finnhub free quote endpoint does not always give reliable live volume.
-    This tries candle volume from today's 1-minute data.
-    """
+def get_30m_volume(symbol):
     now = int(time.time())
     start = now - 60 * 30
 
-    url = "https://finnhub.io/api/v1/stock/candle"
-
     try:
         r = requests.get(
-            url,
+            "https://finnhub.io/api/v1/stock/candle",
             params={
                 "symbol": symbol,
                 "resolution": "1",
@@ -125,7 +140,7 @@ def get_volume(symbol):
             return 0
 
         volumes = data.get("v", [])
-        return int(sum(volumes))
+        return int(sum(volumes)) if volumes else 0
 
     except Exception as e:
         print(f"[VOLUME ERROR] {symbol}: {e}")
@@ -138,42 +153,26 @@ def get_volume(symbol):
 
 def can_alert(symbol):
     now = time.time()
-
-    if symbol not in last_alert_time:
-        return True
-
-    return now - last_alert_time[symbol] >= COOLDOWN_SECONDS
+    return symbol not in last_alert_time or now - last_alert_time[symbol] > COOLDOWN_SECONDS
 
 
-def mark_alerted(symbol):
+def mark_alert(symbol):
     last_alert_time[symbol] = time.time()
 
 
 def check_fast_move(symbol, price, daily_pct, volume):
     now = time.time()
-
     price_history[symbol].append((now, price))
 
-    if len(price_history[symbol]) < 2:
-        return
+    quick_pct = 0
+    if len(price_history[symbol]) >= 2:
+        old_time, old_price = price_history[symbol][0]
+        if old_price > 0:
+            quick_pct = ((price - old_price) / old_price) * 100
 
-    old_time, old_price = price_history[symbol][0]
+    move_pct = max(daily_pct, quick_pct)
 
-    if old_price <= 0:
-        return
-
-    quick_pct = ((price - old_price) / old_price) * 100
-
-    # Use whichever is stronger: quick intraday move or daily move
-    move_pct = max(quick_pct, daily_pct)
-
-    if move_pct < FAST_MOVE_PCT:
-        return
-
-    if volume < EARLY_VOLUME:
-        return
-
-    if not can_alert(symbol):
+    if move_pct < FAST_MOVE_PCT or volume < EARLY_VOLUME or not can_alert(symbol):
         return
 
     if volume >= MOMO_VOLUME:
@@ -187,60 +186,50 @@ def check_fast_move(symbol, price, daily_pct, volume):
         f"{label}\n"
         f"{symbol}\n"
         f"Move: +{move_pct:.1f}%\n"
+        f"Daily: +{daily_pct:.1f}%\n"
+        f"Quick: +{quick_pct:.1f}%\n"
         f"Price: ${price:.4f}\n"
-        f"30m Volume: {volume:,}\n"
-        f"Alert rule: +12% move / 50k+ volume"
+        f"30m Volume: {volume:,}"
     )
 
     send_alert(msg)
-    mark_alerted(symbol)
+    mark_alert(symbol)
 
 
 # ======================
-# SCANNER LOOP
+# MAIN LOOP
 # ======================
 
-def run_scanner():
+def run():
     if not FINNHUB_API_KEY:
         print("[BOOT] Missing FINNHUB_API_KEY")
         return
 
-    send_alert("✅ Scanner started — fast move alerts active")
+    send_alert("✅ LIVE SCANNER ACTIVE — movers + 12% alerts")
 
     while True:
-        print("[SCAN] Starting cycle")
+        print("\n[SCAN] New cycle")
 
-        for symbol in WATCHLIST:
+        symbols = get_symbols_to_scan()
+
+        for symbol in symbols:
             quote = get_quote(symbol)
-
             if not quote:
-                print(f"[SCAN] No quote for {symbol}")
                 continue
 
             price = quote["price"]
             daily_pct = quote["daily_pct"]
-            volume = get_volume(symbol)
+            volume = get_30m_volume(symbol)
 
-            print(
-                f"[SCAN] {symbol} ${price:.4f} "
-                f"daily={daily_pct:.1f}% vol30m={volume:,}"
-            )
+            print(f"{symbol} ${price:.2f} | {daily_pct:.1f}% | Vol {volume:,}")
 
-            # IMPORTANT:
-            # This runs BEFORE any score filter.
-            check_fast_move(
-                symbol=symbol,
-                price=price,
-                daily_pct=daily_pct,
-                volume=volume
-            )
+            check_fast_move(symbol, price, daily_pct, volume)
 
-            time.sleep(1)
+            time.sleep(0.5)
 
-        print("[SCAN] Cycle complete")
         time.sleep(SCAN_SECONDS)
 
 
 if __name__ == "__main__":
-    run_scanner()
+    run()
 
