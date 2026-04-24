@@ -2,7 +2,7 @@ import os
 import time
 import requests
 
-# Get secrets from Render environment
+# Environment variables (from Render)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
@@ -25,14 +25,8 @@ def send_telegram(message):
 
 def run_scanner():
     print("Running scan...")
-
-    for symbol in WATCHLIST:
-        message = f"""🚨 TEST ALERT
-
-{symbol}
-Bot is running.
-"""
-        send_telegram(message)
+    # Bot is alive, but no test alerts anymore
+    return
 
 
 if __name__ == "__main__":
