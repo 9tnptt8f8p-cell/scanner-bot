@@ -1,15 +1,32 @@
 import os
 import time
 import requests
-from flask import Flask
+from datetime import datetime, timedelta
 from threading import Thread
+from flask import Flask
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ============================
+# ENV KEYS
+# ============================
+
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+TIINGO_API_KEY = os.getenv("TIINGO_API_KEY")
+
+# ============================
+# SETTINGS
+# ============================
 
 MIN_GAIN = 30
 MIN_SCORE = 7
@@ -20,10 +37,9 @@ WATCHLIST = [
     "AKAN", "AUUD", "PAPL", "SOUN", "RGTI", "SKLZ", "EUDA"
 ]
 
-
-# ----------------------------
-# Render health server
-# ----------------------------
+# ============================
+# WEB HEALTH SERVER
+# ============================
 
 app = Flask(__name__)
 
@@ -31,37 +47,38 @@ app = Flask(__name__)
 def home():
     return "Bot alive"
 
-def run_health_server():
-    port = int(os.getenv("PORT", 10000))
-    print(f"[WEB] basic health server listening on port {port}")
-    app.run(host="0.0.0.0", port=port)
+@app.route("/health")
+def health():
+    return "OK"
 
-
-# ----------------------------
-# Telegram alerts
-# ----------------------------
+# ============================
+# TELEGRAM
+# ============================
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ALERT]", message)
+        print("[ALERT LOCAL]", message)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     try:
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        }, timeout=10)
+        requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            timeout=10
+        )
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
-
-# ----------------------------
-# Finnhub quote
-# ----------------------------
+# ============================
+# FINNHUB PRICE
+# ============================
 
 def get_quote(ticker):
+    if not FINNHUB_API_KEY:
+        return None
+
     url = "https://finnhub.io/api/v1/quote"
     params = {
         "symbol": ticker,
@@ -92,212 +109,206 @@ def get_quote(ticker):
         print(f"[QUOTE ERROR] {ticker}: {e}")
         return None
 
+# ============================
+# VOLUME SYSTEM
+# Alpaca -> TwelveData -> AlphaVantage -> Tiingo -> Finnhub
+# ============================
 
-# ----------------------------
-# Volume fix system
-# ----------------------------
 def get_volume_data(ticker, quote_data=None):
-    """
-    Real volume checker with debug.
-    """
+    # 1. Alpaca
+    if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+        try:
+            now_dt = datetime.utcnow()
+            start_dt = now_dt - timedelta(minutes=30)
 
-    now = int(time.time())
-    thirty_minutes_ago = now - 30 * 60
-
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {
-        "symbol": ticker,
-        "resolution": "1",
-        "from": thirty_minutes_ago,
-        "to": now,
-        "token": FINNHUB_API_KEY
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        status = data.get("s")
-        volumes = data.get("v", [])
-
-        if status != "ok":
-            print(f"[VOLUME NO DATA] {ticker} status={status}")
-            return {
-                "vol_30m": 0,
-                "daily_volume": 0,
-                "volume_missing": True,
-                "estimated": False
+            url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
+            params = {
+                "timeframe": "1Min",
+                "start": start_dt.isoformat() + "Z",
+                "end": now_dt.isoformat() + "Z",
+                "limit": 1000,
+                "adjustment": "raw"
             }
 
-        vol_30m = int(sum(volumes))
-
-        return {
-            "vol_30m": vol_30m,
-            "daily_volume": vol_30m,
-            "volume_missing": vol_30m == 0,
-            "estimated": False
-        }
-
-    except Exception as e:
-        print(f"[VOLUME ERROR] {ticker}: {e}")
-        return {
-            "vol_30m": 0,
-            "daily_volume": 0,
-            "volume_missing": True,
-            "estimated": False
-        }
-
-    now = int(time.time())
-    thirty_minutes_ago = now - 30 * 60
-
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {
-        "symbol": ticker,
-        "resolution": "1",
-        "from": thirty_minutes_ago,
-        "to": now,
-        "token": FINNHUB_API_KEY
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        status = data.get("s")
-        volumes = data.get("v", [])
-
-        if status != "ok":
-            print(f"[VOLUME NO DATA] {ticker} candle status={status} response={data}")
-            return {
-                "vol_30m": 0,
-                "daily_volume": 0,
-                "volume_missing": True,
-                "estimated": False
+            headers = {
+                "APCA-API-KEY-ID": ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
             }
 
-        vol_30m = int(sum(volumes))
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            data = r.json()
+            bars = data.get("bars", [])
 
-        if vol_30m == 0:
-            print(f"[VOLUME ZERO] {ticker} candles returned but volume summed to 0")
+            if bars:
+                vol = int(sum(bar.get("v", 0) for bar in bars))
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "alpaca"
+                    }
 
-        return {
-            "vol_30m": vol_30m,
-            "daily_volume": vol_30m,
-            "volume_missing": vol_30m == 0,
-            "estimated": False
-        }
+            print(f"[VOLUME FALLBACK] {ticker} Alpaca no usable volume")
 
-    except Exception as e:
-        print(f"[VOLUME ERROR] {ticker}: {e}")
-        return {
-            "vol_30m": 0,
-            "daily_volume": 0,
-            "volume_missing": True,
-            "estimated": False
-        }
+        except Exception as e:
+            print(f"[ALPACA VOLUME ERROR] {ticker}: {e}")
 
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {
-        "symbol": ticker,
-        "resolution": "1",
-        "from": thirty_minutes_ago,
-        "to": now,
-        "token": FINNHUB_API_KEY
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        if data.get("s") != "ok":
-            return {
-                "vol_30m": 0,
-                "daily_volume": 0,
-                "volume_missing": True,
-                "estimated": False
+    # 2. TwelveData
+    if TWELVEDATA_API_KEY:
+        try:
+            url = "https://api.twelvedata.com/time_series"
+            params = {
+                "symbol": ticker,
+                "interval": "1min",
+                "outputsize": 30,
+                "apikey": TWELVEDATA_API_KEY
             }
 
-        volumes = data.get("v", [])
-        vol_30m = int(sum(volumes))
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+            values = data.get("values", [])
 
-        return {
-            "vol_30m": vol_30m,
-            "daily_volume": vol_30m,
-            "volume_missing": vol_30m == 0,
-            "estimated": False
-        }
+            if values:
+                vol = int(sum(int(float(v.get("volume", 0))) for v in values))
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "twelvedata"
+                    }
 
-    except Exception as e:
-        print(f"[VOLUME ERROR] {ticker}: {e}")
-        return {
-            "vol_30m": 0,
-            "daily_volume": 0,
-            "volume_missing": True,
-            "estimated": False
-        }
+            print(f"[VOLUME FALLBACK] {ticker} TwelveData no usable volume")
 
-    Finnhub quote endpoint often does NOT provide true intraday volume.
-    So this function prevents the bot from blindly killing every ticker
-    just because Vol30m is missing.
+        except Exception as e:
+            print(f"[TWELVEDATA VOLUME ERROR] {ticker}: {e}")
 
-    It:
-    - checks multiple possible volume keys
-    - falls back safely
-    - flags volume as unconfirmed instead of hard-skipping
-    """
+    # 3. Alpha Vantage
+    if ALPHAVANTAGE_API_KEY:
+        try:
+            url = "https://www.alphavantage.co/query"
+            params = {
+                "function": "TIME_SERIES_INTRADAY",
+                "symbol": ticker,
+                "interval": "1min",
+                "apikey": ALPHAVANTAGE_API_KEY
+            }
 
-    raw = quote_data.get("raw", {})
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+            series = data.get("Time Series (1min)", {})
 
-    vol_30m = (
-        raw.get("vol_30m")
-        or raw.get("volume_30m")
-        or raw.get("v30")
-        or quote_data.get("vol_30m")
-        or 0
-    )
+            volumes = []
+            for k in list(series.keys())[:30]:
+                volumes.append(int(float(series[k].get("5. volume", 0))))
 
-    daily_volume = (
-        raw.get("volume")
-        or raw.get("daily_volume")
-        or raw.get("v")
-        or quote_data.get("volume")
-        or 0
-    )
+            if volumes:
+                vol = int(sum(volumes))
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "alphavantage"
+                    }
 
-    try:
-        vol_30m = int(float(vol_30m))
-    except:
-        vol_30m = 0
+            print(f"[VOLUME FALLBACK] {ticker} AlphaVantage no usable volume")
 
-    try:
-        daily_volume = int(float(daily_volume))
-    except:
-        daily_volume = 0
+        except Exception as e:
+            print(f"[ALPHA VOLUME ERROR] {ticker}: {e}")
 
-    estimated = False
+    # 4. Tiingo
+    if TIINGO_API_KEY:
+        try:
+            now_dt = datetime.utcnow()
+            start_dt = now_dt - timedelta(minutes=30)
 
-    # Fallback: estimate 30m volume from daily volume if available
-    if vol_30m == 0 and daily_volume > 0:
-        vol_30m = int(daily_volume / 13)
-        estimated = True
+            url = f"https://api.tiingo.com/iex/{ticker}/prices"
+            params = {
+                "startDate": start_dt.isoformat() + "Z",
+                "endDate": now_dt.isoformat() + "Z",
+                "resampleFreq": "1min",
+                "token": TIINGO_API_KEY
+            }
 
-    volume_missing = vol_30m == 0
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            if isinstance(data, list) and data:
+                vol = int(sum(int(float(bar.get("volume", 0))) for bar in data))
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "tiingo"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} Tiingo no usable volume")
+
+        except Exception as e:
+            print(f"[TIINGO VOLUME ERROR] {ticker}: {e}")
+
+    # 5. Finnhub fallback
+    if FINNHUB_API_KEY:
+        try:
+            now = int(time.time())
+            thirty_minutes_ago = now - 30 * 60
+
+            url = "https://finnhub.io/api/v1/stock/candle"
+            params = {
+                "symbol": ticker,
+                "resolution": "1",
+                "from": thirty_minutes_ago,
+                "to": now,
+                "token": FINNHUB_API_KEY
+            }
+
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            if data.get("s") == "ok":
+                volumes = data.get("v", [])
+                vol = int(sum(volumes))
+
+                if vol > 0:
+                    return {
+                        "vol_30m": vol,
+                        "daily_volume": vol,
+                        "volume_missing": False,
+                        "estimated": False,
+                        "source": "finnhub"
+                    }
+
+            print(f"[VOLUME FALLBACK] {ticker} Finnhub no usable volume")
+
+        except Exception as e:
+            print(f"[FINNHUB VOLUME ERROR] {ticker}: {e}")
 
     return {
-        "vol_30m": vol_30m,
-        "daily_volume": daily_volume,
-        "volume_missing": volume_missing,
-        "estimated": estimated
+        "vol_30m": 0,
+        "daily_volume": 0,
+        "volume_missing": True,
+        "estimated": False,
+        "source": "none"
     }
 
-
-# ----------------------------
-# News / catalyst check
-# ----------------------------
+# ============================
+# NEWS / CATALYST
+# ============================
 
 def get_news_catalyst(ticker):
-    url = "https://finnhub.io/api/v1/company-news"
+    if not FINNHUB_API_KEY:
+        return "unknown", "Missing Finnhub key"
+
     today = time.strftime("%Y-%m-%d")
+
+    url = "https://finnhub.io/api/v1/company-news"
     params = {
         "symbol": ticker,
         "from": today,
@@ -312,29 +323,29 @@ def get_news_catalyst(ticker):
         if not isinstance(news, list) or len(news) == 0:
             return "none", "No fresh catalyst found"
 
-        headline = news[0].get("headline", "").lower()
+        headline = news[0].get("headline", "")
+        h = headline.lower()
 
-        if "earnings" in headline or "results" in headline:
-            return "earnings", "Fresh earnings / results catalyst"
-        if "patent" in headline:
-            return "patent", "Fresh patent catalyst"
-        if "contract" in headline or "agreement" in headline:
-            return "contract", "Fresh contract / agreement catalyst"
-        if "fda" in headline or "trial" in headline:
-            return "biotech", "Fresh biotech / FDA catalyst"
-        if "lawsuit" in headline or "damages" in headline or "jury" in headline:
-            return "legal", "Fresh legal catalyst"
+        if "earnings" in h or "results" in h:
+            return "earnings", headline
+        if "patent" in h:
+            return "patent", headline
+        if "contract" in h or "agreement" in h:
+            return "contract", headline
+        if "fda" in h or "trial" in h:
+            return "biotech", headline
+        if "lawsuit" in h or "jury" in h or "damages" in h:
+            return "legal", headline
 
-        return "news", news[0].get("headline", "Fresh news catalyst")
+        return "news", headline
 
     except Exception as e:
         print(f"[NEWS ERROR] {ticker}: {e}")
         return "unknown", "News check failed"
 
-
-# ----------------------------
-# Dilution / trap check
-# ----------------------------
+# ============================
+# RISK
+# ============================
 
 def check_dilution_risk(text):
     danger_words = [
@@ -351,19 +362,14 @@ def check_dilution_risk(text):
         "reverse split"
     ]
 
-    text = text.lower()
-
+    text = str(text).lower()
     hits = [word for word in danger_words if word in text]
 
-    if hits:
-        return True, hits
+    return len(hits) > 0, hits
 
-    return False, []
-
-
-# ----------------------------
-# Scoring engine
-# ----------------------------
+# ============================
+# SCORING
+# ============================
 
 def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
     score = 0
@@ -371,10 +377,11 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
     risk_flags = []
 
     ticker = quote["ticker"]
-    gain = quote["daily_gain"]
     price = quote["price"]
+    gain = quote["daily_gain"]
+    vol_30m = volume_info["vol_30m"]
 
-    # Percent gain scoring
+    # Gain scoring
     if gain >= 75:
         score += 3
         reasons.append("75%+ move")
@@ -386,20 +393,23 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
         reasons.append("30%+ move")
 
     # Volume scoring
-    vol_30m = volume_info["vol_30m"]
-
     if volume_info["volume_missing"]:
         risk_flags.append("missing volume data")
     else:
-        if vol_30m >= 100_000:
+        if vol_30m >= 500_000:
+            score += 3
+            reasons.append("huge volume")
+        elif vol_30m >= 100_000:
             score += 2
             reasons.append("strong volume")
         elif vol_30m >= 25_000:
             score += 1
             reasons.append("some volume")
 
-    if volume_info["estimated"]:
-        risk_flags.append("volume estimated")
+    # Data source reward
+    if volume_info.get("source") in ["alpaca", "twelvedata", "alphavantage", "tiingo"]:
+        score += 1
+        reasons.append(f"volume source: {volume_info.get('source')}")
 
     # Catalyst scoring
     if catalyst_type not in ["none", "unknown"]:
@@ -408,23 +418,24 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
     else:
         risk_flags.append("no clear catalyst")
 
-    # Price sanity
+    # Price flags
     if price < 1:
         risk_flags.append("sub-$1 stock")
-    elif price > 50:
+    if price > 50:
         risk_flags.append("high price mover")
 
-    # Dilution check from catalyst text/headline
+    # Dilution risk
     has_dilution, dilution_hits = check_dilution_risk(catalyst_text)
 
     if has_dilution:
         score -= 2
         risk_flags.append("dilution risk: " + ", ".join(dilution_hits))
 
-    # Safety rule: do not let missing volume create fake high score
-    if volume_info["volume_missing"] and score >= 7:
-        score -= 2
-        risk_flags.append("score reduced: volume unconfirmed")
+    # Clamp score
+    if score < 0:
+        score = 0
+    if score > 10:
+        score = 10
 
     return {
         "ticker": ticker,
@@ -436,13 +447,12 @@ def score_ticker(quote, volume_info, catalyst_type, catalyst_text):
         "catalyst_type": catalyst_type,
         "catalyst_text": catalyst_text,
         "vol_30m": vol_30m,
-        "daily_volume": volume_info["daily_volume"]
+        "volume_source": volume_info.get("source", "none")
     }
 
-
-# ----------------------------
-# Alert message
-# ----------------------------
+# ============================
+# ALERT MESSAGE
+# ============================
 
 def build_alert(result):
     reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
@@ -455,6 +465,7 @@ def build_alert(result):
 Price: ${result['price']:.4f}
 Daily Gain: {result['gain']:.1f}%
 Vol30m: {result['vol_30m']:,}
+Volume Source: {result['volume_source']}
 
 Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
@@ -463,10 +474,9 @@ Reasons: {reasons}
 Risk: {risks}
 """.strip()
 
-
-# ----------------------------
-# Scanner loop
-# ----------------------------
+# ============================
+# SCANNER
+# ============================
 
 def run_scanner():
     print("[BOOT] Scanner started")
@@ -478,9 +488,8 @@ def run_scanner():
     already_alerted = set()
 
     while True:
-        results = []
-
         print("[SCAN] Starting cycle")
+        results = []
 
         for ticker in WATCHLIST:
             quote = get_quote(ticker)
@@ -496,7 +505,8 @@ def run_scanner():
 
             print(
                 f"[SCAN] {ticker:<6} | Price ${price:<8.4f} | "
-                f"Daily {gain:6.1f}% | Vol30m {volume_info['vol_30m']:>8,}"
+                f"Daily {gain:6.1f}% | Vol30m {volume_info['vol_30m']:>8,} | "
+                f"Source {volume_info.get('source', 'none')}"
             )
 
             if gain < MIN_GAIN:
@@ -534,14 +544,20 @@ def run_scanner():
 
         print("[SCAN] Cycle complete")
         print("[HEARTBEAT] alive")
-
         time.sleep(SCAN_SLEEP)
 
-
-# ----------------------------
-# Start bot
-# ----------------------------
+# ============================
+# START APP
+# IMPORTANT: Flask binds first for Render.
+# Scanner runs in background thread.
+# ============================
 
 if __name__ == "__main__":
-    Thread(target=run_health_server, daemon=True).start()
-    run_scanner()
+    print("[BOOT] Starting scanner thread")
+    scanner_thread = Thread(target=run_scanner, daemon=True)
+    scanner_thread.start()
+
+    port = int(os.getenv("PORT", 10000))
+    print(f"[WEB] binding to port {port}")
+
+    app.run(host="0.0.0.0", port=port)
