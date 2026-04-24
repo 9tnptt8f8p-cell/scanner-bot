@@ -1,3 +1,4 @@
+print("[BOOT] FILE EXECUTED")
 import os
 import time
 import threading
