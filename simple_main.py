@@ -96,10 +96,54 @@ def get_quote(ticker):
 # ----------------------------
 # Volume fix system
 # ----------------------------
-
-def get_volume_data(ticker, quote_data):
+ def get_volume_data(ticker, quote_data=None):
     """
-    Fixes Vol30m = 0 issue.
+    Gets real last-30-minute volume from Finnhub candles.
+    Fixes the Vol30m = 0 problem from the quote endpoint.
+    """
+volume_info = get_volume_data(ticker, quote)
+    now = int(time.time())
+    thirty_minutes_ago = now - 30 * 60
+
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        "symbol": ticker,
+        "resolution": "1",
+        "from": thirty_minutes_ago,
+        "to": now,
+        "token": FINNHUB_API_KEY
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+
+        if data.get("s") != "ok":
+            return {
+                "vol_30m": 0,
+                "daily_volume": 0,
+                "volume_missing": True,
+                "estimated": False
+            }
+
+        volumes = data.get("v", [])
+        vol_30m = int(sum(volumes))
+
+        return {
+            "vol_30m": vol_30m,
+            "daily_volume": vol_30m,
+            "volume_missing": vol_30m == 0,
+            "estimated": False
+        }
+
+    except Exception as e:
+        print(f"[VOLUME ERROR] {ticker}: {e}")
+        return {
+            "vol_30m": 0,
+            "daily_volume": 0,
+            "volume_missing": True,
+            "estimated": False
+        }
 
     Finnhub quote endpoint often does NOT provide true intraday volume.
     So this function prevents the bot from blindly killing every ticker
