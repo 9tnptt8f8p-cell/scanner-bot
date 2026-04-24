@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict, deque
 
-print("✅ SIMPLE_MAIN LOADED — MOVERS + NEWS/DILUTION + 100% + VOLUME SPIKE", flush=True)
+print("✅ BOT LOADED — ALL MOVERS / 30%+ / NEWS / DILUTION / VOLUME SPIKE", flush=True)
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 FMP_API_KEY = os.getenv("FMP_API_KEY")
@@ -14,7 +14,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SCAN_SECONDS = 30
-
 MIN_DAILY_GAIN = 30
 
 FAST_MOVE_PCT = 12
@@ -33,7 +32,6 @@ VOLUME_COOLDOWN = 300
 
 price_history = defaultdict(lambda: deque(maxlen=20))
 volume_history = defaultdict(lambda: deque(maxlen=10))
-
 last_alert_time = {}
 mega_runner_alerted = {}
 volume_alerted = {}
@@ -68,14 +66,14 @@ def send_alert(msg):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=10
+            timeout=10,
         )
     except Exception as e:
         print(f"[ERROR] Telegram: {e}", flush=True)
 
 
 def get_movers():
-    print("[INFO] Fetching movers from FMP...", flush=True)
+    print("[INFO] Fetching biggest gainers from FMP stable endpoint...", flush=True)
 
     if not FMP_API_KEY:
         print("[ERROR] Missing FMP_API_KEY", flush=True)
@@ -91,12 +89,12 @@ def get_movers():
             return []
 
         symbols = []
-        for item in data[:40]:
+        for item in data[:100]:
             symbol = item.get("symbol")
             if symbol:
                 symbols.append(symbol)
 
-        print(f"[INFO] Movers only: {symbols}", flush=True)
+        print(f"[INFO] Gainers returned: {len(symbols)}", flush=True)
         return symbols
 
     except Exception as e:
@@ -109,7 +107,7 @@ def get_quote(symbol):
         r = requests.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": symbol, "token": FINNHUB_API_KEY},
-            timeout=10
+            timeout=10,
         )
 
         data = r.json()
@@ -145,9 +143,9 @@ def get_volume(symbol):
                 "resolution": "1",
                 "from": start,
                 "to": now,
-                "token": FINNHUB_API_KEY
+                "token": FINNHUB_API_KEY,
             },
-            timeout=10
+            timeout=10,
         )
 
         data = r.json()
@@ -173,9 +171,9 @@ def get_news_rank(symbol):
                 "symbol": symbol,
                 "from": start.isoformat(),
                 "to": today.isoformat(),
-                "token": FINNHUB_API_KEY
+                "token": FINNHUB_API_KEY,
             },
-            timeout=10
+            timeout=10,
         )
 
         news = r.json()
@@ -197,18 +195,11 @@ def get_news_rank(symbol):
             "agreement", "collaboration", "order"
         ]
 
-        weak_words = [
-            "announces", "update", "conference", "presentation"
-        ]
-
         if any(w in text for w in a_words):
             return "A", headline
 
         if any(w in text for w in b_words):
             return "B", headline
-
-        if any(w in text for w in weak_words):
-            return "C", headline
 
         return "C", headline
 
@@ -227,7 +218,7 @@ def load_sec_tickers():
         r = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
             headers={"User-Agent": "movers-scanner/1.0 contact@example.com"},
-            timeout=10
+            timeout=10,
         )
 
         data = r.json()
@@ -267,7 +258,7 @@ def get_dilution_rank(symbol):
         r = requests.get(
             url,
             headers={"User-Agent": "movers-scanner/1.0 contact@example.com"},
-            timeout=10
+            timeout=10,
         )
 
         data = r.json()
@@ -339,8 +330,6 @@ def check_volume_spike(symbol, price, daily_pct, volume):
     if not can_volume_alert(symbol):
         return
 
-    print(f"[VOLUME SPIKE] {symbol} {volume:,} avg {int(avg_vol):,}", flush=True)
-
     send_alert(
         f"📊 VOLUME SPIKE\n"
         f"{symbol}\n"
@@ -365,13 +354,7 @@ def check_fast_move(symbol, price, daily_pct, volume):
 
     move_pct = max(daily_pct, quick_pct)
 
-    if move_pct < FAST_MOVE_PCT:
-        return
-
-    if volume < EARLY_VOLUME:
-        return
-
-    if not can_alert(symbol):
+    if move_pct < FAST_MOVE_PCT or volume < EARLY_VOLUME or not can_alert(symbol):
         return
 
     if volume >= MOMO_VOLUME:
@@ -384,7 +367,7 @@ def check_fast_move(symbol, price, daily_pct, volume):
     news_rank, news_text = get_news_rank(symbol)
     dilution_rank, dilution_text = get_dilution_rank(symbol)
 
-    msg = (
+    send_alert(
         f"{tag}\n"
         f"{symbol}\n"
         f"Move: +{move_pct:.1f}%\n"
@@ -398,26 +381,19 @@ def check_fast_move(symbol, price, daily_pct, volume):
         f"Dilution: {dilution_text}"
     )
 
-    send_alert(msg)
     mark_alert(symbol)
 
 
 def check_mega_runner(symbol, price, daily_pct, volume):
-    if daily_pct < NEAR_100_PCT:
+    if daily_pct < NEAR_100_PCT or not can_mega_alert(symbol):
         return
 
-    if not can_mega_alert(symbol):
-        return
-
-    if daily_pct >= FULL_100_PCT:
-        tag = "💯 100%+ RUNNER"
-    else:
-        tag = "🚀 NEAR 100% RUNNER"
+    tag = "💯 100%+ RUNNER" if daily_pct >= FULL_100_PCT else "🚀 NEAR 100% RUNNER"
 
     news_rank, news_text = get_news_rank(symbol)
     dilution_rank, dilution_text = get_dilution_rank(symbol)
 
-    msg = (
+    send_alert(
         f"{tag}\n"
         f"{symbol}\n"
         f"Daily Move: +{daily_pct:.1f}%\n"
@@ -429,16 +405,15 @@ def check_mega_runner(symbol, price, daily_pct, volume):
         f"Dilution: {dilution_text}"
     )
 
-    send_alert(msg)
     mark_mega_alert(symbol)
 
 
 def run_scanner():
     print("🚀 SCANNER STARTED", flush=True)
-    send_alert("🚀 Scanner started — movers only / 30%+ daily / +12% alerts / volume spike / 100% tracker")
+    send_alert("🚀 Scanner started — all FMP gainers / 30%+ / +12% alerts / volume spike / 100% tracker")
 
     while True:
-        print("\n===== NEW MOVERS SCAN =====", flush=True)
+        print("\n===== NEW ALL-MOVERS SCAN =====", flush=True)
 
         symbols = get_movers()
 
@@ -458,11 +433,8 @@ def run_scanner():
             volume = get_volume(symbol)
 
             print(
-                f"[SCAN] {symbol:<6} | "
-                f"Price ${price:<8.4f} | "
-                f"Daily {daily_pct:>6.1f}% | "
-                f"Vol30m {volume:>8,}",
-                flush=True
+                f"[SCAN] {symbol:<6} | Price ${price:<8.4f} | Daily {daily_pct:>6.1f}% | Vol30m {volume:>8,}",
+                flush=True,
             )
 
             check_volume_spike(symbol, price, daily_pct, volume)
@@ -471,7 +443,7 @@ def run_scanner():
 
             time.sleep(0.5)
 
-        print("[DONE] Movers cycle complete", flush=True)
+        print("[DONE] All-movers cycle complete", flush=True)
         time.sleep(SCAN_SECONDS)
 
 
