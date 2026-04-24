@@ -96,12 +96,56 @@ def get_quote(ticker):
 # ----------------------------
 # Volume fix system
 # ----------------------------
- def get_volume_data(ticker, quote_data=None):
+def get_volume_data(ticker, quote_data=None):
     """
     Real volume checker with debug.
-    Tries Finnhub candles.
-    Shows WHY volume is zero.
     """
+
+    now = int(time.time())
+    thirty_minutes_ago = now - 30 * 60
+
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        "symbol": ticker,
+        "resolution": "1",
+        "from": thirty_minutes_ago,
+        "to": now,
+        "token": FINNHUB_API_KEY
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+
+        status = data.get("s")
+        volumes = data.get("v", [])
+
+        if status != "ok":
+            print(f"[VOLUME NO DATA] {ticker} status={status}")
+            return {
+                "vol_30m": 0,
+                "daily_volume": 0,
+                "volume_missing": True,
+                "estimated": False
+            }
+
+        vol_30m = int(sum(volumes))
+
+        return {
+            "vol_30m": vol_30m,
+            "daily_volume": vol_30m,
+            "volume_missing": vol_30m == 0,
+            "estimated": False
+        }
+
+    except Exception as e:
+        print(f"[VOLUME ERROR] {ticker}: {e}")
+        return {
+            "vol_30m": 0,
+            "daily_volume": 0,
+            "volume_missing": True,
+            "estimated": False
+        }
 
     now = int(time.time())
     thirty_minutes_ago = now - 30 * 60
