@@ -355,15 +355,13 @@ def run_scanner():
 
     alert_history = {}
 
-while True:
-    if not should_scan_now():
-        print("[SLEEP] Market inactive — skipping scan")
-        time.sleep(300)
-        continue
+    while True:
+        if not should_scan_now():
+            print("[SLEEP] Market inactive — skipping scan", flush=True)
+            time.sleep(300)
+            continue
 
-    print("[SCAN] Market active — running scan")
-    run_scan()
-    time.sleep(300)
+        print("[SCAN] Market active — running scan", flush=True)
 
         movers = get_percent_gainers()
         results = []
@@ -378,7 +376,6 @@ while True:
             )
 
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
-
             result = score_mover(
                 mover=mover,
                 catalyst_type=catalyst_type,
