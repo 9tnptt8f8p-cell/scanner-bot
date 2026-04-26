@@ -485,8 +485,7 @@ if __name__ == "__main__":
 
     time.sleep(2)
 
-    print("[BOOT] sending Telegram test", flush=True)
-    send_telegram("✅ TEST ALERT FROM RENDER — tight 27%+ spike scanner is live")
+   
 
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
