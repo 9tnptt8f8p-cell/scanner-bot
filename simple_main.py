@@ -355,7 +355,7 @@ def run_scanner():
 
     alert_history = {}
 
-   while True:
+while True:
     if not should_scan_now():
         print("[SLEEP] Market inactive — skipping scan")
         time.sleep(300)
