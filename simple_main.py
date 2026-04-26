@@ -359,7 +359,7 @@ dilution_block = f"\n\n💀 DILUTION RISK: {dilution_risk}"
 
 for item in dilution_reasons:
     dilution_block += f"\n- {item}"
-    return f"""
+return f"""
 🚨 27%+ SPIKE ALERT
 
 Rank: #{rank}
