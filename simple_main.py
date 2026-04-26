@@ -11,7 +11,30 @@ MARKET_HOLIDAYS_2026 = {
     "2026-07-03", "2026-09-07", "2026-11-26",
     "2026-12-25",
 }
+def get_dilution_risk(text):
+    text = str(text).lower()
+    reasons = []
 
+    if "atm" in text or "at-the-market" in text:
+        reasons.append("ATM active")
+
+    if "offering" in text or "securities purchase agreement" in text:
+        reasons.append("Recent offering filed")
+
+    if "warrant" in text or "exercise price" in text:
+        reasons.append("Warrants in play")
+
+    if "s-3" in text or "f-3" in text or "shelf" in text:
+        reasons.append("Shelf registration")
+
+    if len(reasons) >= 2:
+        risk = "HIGH"
+    elif len(reasons) == 1:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+
+    return risk, reasons
 def should_scan_now():
     now = datetime.now(ET)
 
@@ -330,7 +353,12 @@ def score_mover(mover, catalyst_type, catalyst_text):
 def build_alert(result, rank):
     reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
+dilution_risk, dilution_reasons = get_dilution_risk(result["catalyst_text"])
 
+dilution_block = f"\n\n💀 DILUTION RISK: {dilution_risk}"
+
+for item in dilution_reasons:
+    dilution_block += f"\n- {item}"
     return f"""
 🚨 27%+ SPIKE ALERT
 
@@ -345,7 +373,7 @@ Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
 
 Reasons: {reasons}
-Risk: {risks}
+{risks}{dilution_block}
 """.strip()
 
 
