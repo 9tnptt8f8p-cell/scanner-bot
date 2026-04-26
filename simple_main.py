@@ -1,5 +1,33 @@
 import os
 import time
+from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+MARKET_HOLIDAYS_2026 = {
+    "2026-01-01", "2026-01-19", "2026-02-16",
+    "2026-04-03", "2026-05-25", "2026-06-19",
+    "2026-07-03", "2026-09-07", "2026-11-26",
+    "2026-12-25",
+}
+
+def should_scan_now():
+    now = datetime.now(ET)
+
+    # ❌ Weekend
+    if now.weekday() >= 5:
+        return False
+
+    # ❌ Holiday
+    if now.date().isoformat() in MARKET_HOLIDAYS_2026:
+        return False
+
+    # ❌ Outside 4AM–8PM
+    if not (dtime(4, 0) <= now.time() <= dtime(20, 0)):
+        return False
+
+    return True
 import requests
 from threading import Thread
 from flask import Flask
@@ -327,8 +355,15 @@ def run_scanner():
 
     alert_history = {}
 
-    while True:
-        print("[SCAN] Cycle started", flush=True)
+   while True:
+    if not should_scan_now():
+        print("[SLEEP] Market inactive — skipping scan")
+        time.sleep(300)
+        continue
+
+    print("[SCAN] Market active — running scan")
+    run_scan()
+    time.sleep(300)
 
         movers = get_percent_gainers()
         results = []
