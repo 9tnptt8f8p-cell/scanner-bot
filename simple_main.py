@@ -353,13 +353,15 @@ def score_mover(mover, catalyst_type, catalyst_text):
 def build_alert(result, rank):
     reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
-dilution_risk, dilution_reasons = get_dilution_risk(result["catalyst_text"])
 
-dilution_block = f"\n\n💀 DILUTION RISK: {dilution_risk}"
+    dilution_risk, dilution_reasons = get_dilution_risk(result["catalyst_text"])
 
-for item in dilution_reasons:
-    dilution_block += f"\n- {item}"
-return f"""
+    dilution_block = f"\n\n💀 DILUTION RISK: {dilution_risk}"
+
+    for item in dilution_reasons:
+        dilution_block += f"\n- {item}"
+
+    return f"""
 🚨 27%+ SPIKE ALERT
 
 Rank: #{rank}
@@ -373,7 +375,7 @@ Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
 
 Reasons: {reasons}
-{risks}{dilution_block}
+Risk: {risks}{dilution_block}
 """.strip()
 
 
