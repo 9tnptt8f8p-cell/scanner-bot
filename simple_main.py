@@ -591,10 +591,12 @@ def check_sec_offering_risk(ticker):
     except Exception as e:
         return False, f"SEC check error: {e}"
         
-def run_scanner():
+  def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
+
     alert_history = {}
+    runner_prices = {}
 
     while True:
         if not should_scan_now():
@@ -621,7 +623,7 @@ def run_scanner():
                     f"gain {mover['gain']:.1f}% | vol {mover['volume']:,}",
                     flush=True
                 )
-            
+
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
             result = score_mover(
@@ -629,23 +631,23 @@ def run_scanner():
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
-            sec_risk, sec_note = check_sec_offering_risk(ticker)
 
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
             result["sec_note"] = sec_note
 
             if sec_risk:
                 result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
                 result["score"] -= 2
-            # 🔥 BASIC DILUTION CHECK (AFTER result is created)
+
             if catalyst_text:
                 text = catalyst_text.lower()
-
                 if any(word in text for word in ["offering", "warrant", "atm", "dilution", "shelf"]):
                     result["risks"].append("⚠️ possible dilution")
                     result["score"] -= 2
 
             result["session"] = session
             result["session_notes"] = session_notes
+
             candles = get_alpaca_candles(ticker)
 
             if not candles:
@@ -675,6 +677,7 @@ def run_scanner():
 
                 if candle_session_gain < 15:
                     result["risks"].append(f"only up {candle_session_gain:.1f}% this session")
+
             structure = analyze_structure(ticker, candles)
             result["structure"] = structure
             result["score"] += structure["structure_score"]
@@ -707,7 +710,8 @@ def run_scanner():
             )
             print(f"[SCAN] Top ranked: {top_line}", flush=True)
         else:
-            print("[SCAN] No qualified 27%+ gainers found", flush=True)
+            print("[SCAN] No qualified gainers found", flush=True)
+
         now = time.time()
         alerts_sent_this_cycle = 0
 
@@ -717,18 +721,46 @@ def run_scanner():
                 break
 
             ticker = result["ticker"]
+            price = float(result["price"])
+
+            # HARD RULE: never alert anything under +20% on the live session/day
+            if result["gain"] < 20:
+                print(f"[SKIP] {ticker} under 20% gain", flush=True)
+                continue
+
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
+
+            # RE-ALERT: only the main runners going 10% higher from last alert
+            if ticker in runner_prices:
+                if price >= runner_prices[ticker] * 1.10 and above_vwap:
+                    sent = send_telegram(
+                        f"🔥 RUNNER STILL GOING\n\n"
+                        f"{ticker}\n"
+                        f"Price: ${price:.4f}\n"
+                        f"Last Alert: ${runner_prices[ticker]:.4f}\n"
+                        f"Gain: {result['gain']:.1f}%\n\n"
+                        f"Reason: +10% higher since last alert and still above VWAP"
+                    )
+
+                    if sent:
+                        runner_prices[ticker] = price
+                        alert_history[ticker] = now
+                        alerts_sent_this_cycle += 1
+                        print(f"[RE-ALERT SENT] {ticker} still running", flush=True)
+
+                    continue
+
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
             valid_early_alert = (
-                result["gain"] >= 10
+                result["gain"] >= 20
                 and result.get("recent_volume", 0) >= 100000
                 and above_vwap
             )
 
             valid_building_alert = (
-                result["gain"] >= 15
+                result["gain"] >= 20
                 and result.get("recent_volume", 0) >= 150000
                 and above_vwap
             )
@@ -756,6 +788,7 @@ def run_scanner():
 
                 if sent:
                     alert_history[ticker] = now
+                    runner_prices[ticker] = price
                     alerts_sent_this_cycle += 1
                     print(f"[ALERT SENT] #{rank} {ticker} score {result['score']}/10", flush=True)
                 else:
@@ -776,7 +809,7 @@ def run_scanner():
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
 
-        time.sleep(SCAN_SLEEP)        
+        time.sleep(SCAN_SLEEP)
 
 
 
