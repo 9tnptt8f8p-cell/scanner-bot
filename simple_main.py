@@ -669,20 +669,23 @@ def run_scanner():
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            # === CLEAN ALERT LEVELS ===
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
             valid_early_alert = (
                 result["gain"] >= 10
                 and result.get("recent_volume", 0) >= 100000
+                and above_vwap
             )
 
             valid_building_alert = (
                 result["gain"] >= 15
                 and result.get("recent_volume", 0) >= 150000
+                and above_vwap
             )
 
             valid_runner_alert = (
                 result["gain"] >= ALERT_MIN_GAIN
                 and result.get("recent_volume", 0) >= 200000
+                and above_vwap
             )
 
             valid_emergency_runner_alert = (
