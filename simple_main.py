@@ -444,81 +444,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
     }
 
 def build_alert(result, rank):
-
-    reasons = ", ".join(result.get("reasons", [])) or "None"
-    risks_text = "\n".join(result.get("risks", [])) or "None"
-
-    session_block = f"""
-
-🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}
-
-🧠 Session Notes:
-{chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
-"""
-
-    regime_block = f"""
-
-📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
-
-🧠 Regime Notes:
-{chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
-"""
-
-    gain = result["gain"]
-
-    if gain >= 27:
-        title = "🔥 RUNNER ALERT"
-    elif gain >= 15:
-        title = "🚨 BUILDING MOMENTUM"
-    else:
-        title = "⚠️ EARLY SPIKE"
-
-    return f"""{title}
-
-Rank: #{rank}
-{result['ticker']} | Score: {result['score']}/10
-
-Reasons:
-{reasons}
-
-Risk:
-{risks_text}
-
-{session_block}
-
-{regime_block}
-"""
-
-Rank: #{rank}
-{result['ticker']} | Score: {result['score']}/10
-
-Price: ${result['price']:.4f}
-Gain: {result['gain']:.1f}%
-%Session Gain: {result.get('candle_session_gain', 0):.1f}%
-Yahoo Volume: {result['volume']:,}
-Recent Candle Vol: {result.get('recent_volume', 0):,}
-Candle Total Vol: {result.get('total_candle_volume', 0):,}
-
-Catalyst: {result['catalyst_type']}
-{result['catalyst_text']}
-
-🧠 Regime Notes:
-{chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
-"""
-
-    gain = result["gain"]
-
-    if gain >= 27:
-        title = "🔥 RUNNER ALERT"
-    elif gain >= 15:
-        title = "🚨 BUILDING MOMENTUM"
-    else:
-        title = "⚠️ EARLY SPIKE"
-
-    return f"""{title}
-
-
-def build_alert(result, rank):
     reasons = ", ".join(result.get("reasons", [])) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
@@ -790,8 +715,30 @@ def run_scanner():
             )
 
             last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS 
+            
+            valid_early_alert = (
+                result["gain"] >= 20
+                and result.get("recent_volume", 0) >= 100000
+                and above_vwap
+            )
 
+            valid_building_alert = (
+                result["gain"] >= 20
+                and result.get("recent_volume", 0) >= 150000
+                and above_vwap
+            )
+
+            valid_runner_alert = (
+                result["gain"] >= ALERT_MIN_GAIN
+                and result.get("recent_volume", 0) >= 200000
+                and above_vwap
+            )
+
+            valid_emergency_runner_alert = (
+                result["gain"] >= 35
+                and result.get("total_candle_volume", 0) >= 1_000_000
+            )
             should_alert = (
                 (
                     valid_runner_alert
