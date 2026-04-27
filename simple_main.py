@@ -639,17 +639,32 @@ def run_scanner():
         now = time.time()
         alerts_sent_this_cycle = 0
 
-        for rank, result in enumerate(results, start=1):
-            if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
-                print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
-                break
+       for rank, result in enumerate(results, start=1):
+    if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
+        print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
+        break
 
-            ticker = result["ticker"]
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+    ticker = result["ticker"]
+    last_alert = alert_history.get(ticker, 0)
+    cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            if result["score"] >= MIN_SCORE and cooldown_done:
-                sent = send_telegram(build_alert(result, rank))
+    valid_27pct_alert = (
+        result["gain"] >= 27
+        and result.get("candle_session_gain", 0) >= 15
+        and result.get("recent_volume", 0) >= 200000
+        and result["score"] >= MIN_SCORE
+    )
+
+    valid_fast_12pct_alert = (
+        result.get("candle_session_gain", 0) >= 12
+        and result.get("recent_volume", 0) >= 200000
+        and result["score"] >= MIN_SCORE
+    )
+
+    should_alert = valid_27pct_alert or valid_fast_12pct_alert
+
+    if should_alert and cooldown_done:
+        sent = send_telegram(build_alert(result, rank))
 
                 if sent:
                     alert_history[ticker] = now
