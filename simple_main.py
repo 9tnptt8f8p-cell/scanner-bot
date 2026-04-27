@@ -769,9 +769,8 @@ def run_scanner():
                     f"recent_vol={result.get('recent_volume', 0):,}",
                     flush=True
                 )
-    )
-                )
-
+    
+                
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
 
