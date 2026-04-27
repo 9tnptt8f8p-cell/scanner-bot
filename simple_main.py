@@ -478,9 +478,6 @@ def build_alert(result, rank):
 Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
 
-Price: ${result['price']:.4f}
-Gain: {result['gain']:.1f}%
-
 Reasons:
 {reasons}
 
