@@ -445,7 +445,7 @@ def score_mover(mover, catalyst_type, catalyst_text):
 
 def build_alert(result, rank):
     reasons = ", ".join(result.get("reasons", [])) or "None"
-    risks = ", ".join(result.get("risks", [])) or "None"
+    risks_text = "\n".join(result.get("risks", [])) or "None"
 
     session_block = f"""
 
@@ -472,9 +472,23 @@ def build_alert(result, rank):
         title = "🚨 BUILDING MOMENTUM"
     else:
         title = "⚠️ EARLY SPIKE"
-
     return f"""
 {title}
+
+Rank: #{rank}
+{result['ticker']} | Score: {result['score']}/10
+
+Price: ${result['price']:.4f}
+Gain: {result['gain']:.1f}%
+
+Reasons:
+{reasons}
+
+Risk:
+{risks_text}
+{session_block}
+{regime_block}
+"""
 
 Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
