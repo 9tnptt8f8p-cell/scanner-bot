@@ -733,6 +733,7 @@ def run_scanner():
                 and recent_vol >= total_vol * 0.20
             )
 
+            # RE-ALERT
             if ticker in runner_prices:
                 if price >= runner_prices[ticker] * 1.10 and above_vwap and volume_spike:
                     send_telegram(f"🔥 {ticker} STILL RUNNING {price}")
