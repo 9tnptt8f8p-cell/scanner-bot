@@ -617,7 +617,7 @@ def run_scanner():
 
             time.sleep(0.5)
 
-        results.sort(key=lambda x: x["score"], reverse=True)
+               results.sort(key=lambda x: x["score"], reverse=True)
 
         regime, regime_notes = detect_market_regime(results)
 
@@ -636,41 +636,35 @@ def run_scanner():
         else:
             print("[SCAN] No qualified 27%+ gainers found", flush=True)
 
-                       ]
-            )
-            print(f"[SCAN] Top ranked: {top_line}", flush=True)
-        else:
-            print("[SCAN] No qualified 27%+ gainers found", flush=True)
-
         now = time.time()
         alerts_sent_this_cycle = 0
 
-       for rank, result in enumerate(results, start=1):
-    if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
-        print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
-        break
+        for rank, result in enumerate(results, start=1):
+            if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
+                print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
+                break
 
-    ticker = result["ticker"]
-    last_alert = alert_history.get(ticker, 0)
-    cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+            ticker = result["ticker"]
+            last_alert = alert_history.get(ticker, 0)
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-    valid_27pct_alert = (
-        result["gain"] >= 27
-        and result.get("candle_session_gain", 0) >= 15
-        and result.get("recent_volume", 0) >= 200000
-        and result["score"] >= MIN_SCORE
-    )
+            valid_27pct_alert = (
+                result["gain"] >= 27
+                and result.get("candle_session_gain", 0) >= 15
+                and result.get("recent_volume", 0) >= 200000
+                and result["score"] >= MIN_SCORE
+            )
 
-    valid_fast_12pct_alert = (
-        result.get("candle_session_gain", 0) >= 12
-        and result.get("recent_volume", 0) >= 200000
-        and result["score"] >= MIN_SCORE
-    )
+            valid_fast_12pct_alert = (
+                result.get("candle_session_gain", 0) >= 12
+                and result.get("recent_volume", 0) >= 200000
+                and result["score"] >= MIN_SCORE
+            )
 
-    should_alert = valid_27pct_alert or valid_fast_12pct_alert
+            should_alert = valid_27pct_alert or valid_fast_12pct_alert
 
-    if should_alert and cooldown_done:
-        sent = send_telegram(build_alert(result, rank))
+            if should_alert and cooldown_done:
+                sent = send_telegram(build_alert(result, rank))
 
                 if sent:
                     alert_history[ticker] = now
@@ -679,13 +673,16 @@ def run_scanner():
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker} score {result['score']}/10", flush=True)
 
-            elif result["score"] >= MIN_SCORE:
+            elif should_alert:
                 left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
                 print(f"[NO ALERT] #{rank} {ticker} cooldown active {left}s left", flush=True)
 
             else:
                 print(
-                    f"[NO ALERT] #{rank} {ticker} score {result['score']}/10 below MIN_SCORE {MIN_SCORE}",
+                    f"[NO ALERT] #{rank} {ticker} blocked by quality gate | "
+                    f"session_gain={result.get('candle_session_gain', 0):.1f}% "
+                    f"recent_vol={result.get('recent_volume', 0):,} "
+                    f"score={result['score']}/10",
                     flush=True
                 )
 
