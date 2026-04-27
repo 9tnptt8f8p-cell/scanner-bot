@@ -648,11 +648,10 @@ def run_scanner():
             print(f"[SCAN] Top ranked: {top_line}", flush=True)
         else:
             print("[SCAN] No qualified 27%+ gainers found", flush=True)
-
         now = time.time()
         alerts_sent_this_cycle = 0
 
-                for rank, result in enumerate(results, start=1):
+        for rank, result in enumerate(results, start=1):
             if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
                 print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
                 break
