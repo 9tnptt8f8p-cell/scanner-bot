@@ -465,7 +465,8 @@ Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
 
 Price: ${result['price']:.4f}
-Gain: {result['gain']:.1f}%
+Gain: {result['gain']:.1f}
+%Session Gain: {result.get('candle_session_gain', 0):.1f}%
 Yahoo Volume: {result['volume']:,}
 Recent Candle Vol: {result.get('recent_volume', 0):,}
 Candle Total Vol: {result.get('total_candle_volume', 0):,}
@@ -586,9 +587,21 @@ def run_scanner():
             result["recent_volume"] = recent_volume
             result["total_candle_volume"] = total_candle_volume
 
-            if result.get("session") == "PREMARKET" and recent_volume < 200000:
-                result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
+            if candles:
+                first_close = float(candles[0]["close"])
+                last_close = float(candles[-1]["close"])
+                candle_session_gain = ((last_close - first_close) / first_close) * 100 if first_close > 0 else 0
+            else:
+                candle_session_gain = 0
 
+            result["candle_session_gain"] = candle_session_gain
+
+            if result.get("session") == "PREMARKET":
+                if recent_volume < 200000:
+                    result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
+
+                if candle_session_gain < 15:
+                    result["risks"].append(f"only up {candle_session_gain:.1f}% this session")
             structure = analyze_structure(ticker, candles)
             result["structure"] = structure
             result["score"] += structure["structure_score"]
