@@ -591,7 +591,7 @@ def check_sec_offering_risk(ticker):
     except Exception as e:
         return False, f"SEC check error: {e}"
         
-  def run_scanner():
+def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
 
