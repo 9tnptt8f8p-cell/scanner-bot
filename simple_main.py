@@ -663,7 +663,7 @@ def run_scanner():
 
             should_alert = valid_27pct_alert or valid_fast_12pct_alert
 
-           if should_alert and cooldown_done:
+            if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
                 if sent:
@@ -693,15 +693,6 @@ def run_scanner():
 
 
 
-    web_thread = Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=port,
-            debug=False,
-            use_reloader=False
-        ),
-        daemon=True
-    )
 
   
 
