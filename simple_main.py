@@ -447,14 +447,15 @@ def build_alert(result, rank):
     reasons = ", ".join(result.get("reasons", [])) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
-    session_block = f"""
+       session_block = f"""
 
 🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}
 
 🧠 Session Notes:
 {chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
+"""
 
-regime_block = f"""
+    regime_block = f"""
 
 📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
 
