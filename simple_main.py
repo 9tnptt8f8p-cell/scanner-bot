@@ -569,7 +569,7 @@ def run_scanner():
                     f"gain {mover['gain']:.1f}% | vol {mover['volume']:,}",
                     flush=True
                 )
-            )
+            
 
             catalyst_type, catalyst_text = get_news_catalyst(ticker)   
 
