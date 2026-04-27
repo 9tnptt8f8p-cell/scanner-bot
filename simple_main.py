@@ -1,9 +1,5 @@
 import os
 import time
-import requests
-from threading import Thread
-from flask import Flask
-from dotenv import load_dotenv
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -15,7 +11,6 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 ET = ZoneInfo("America/New_York")
-ET = ZoneInfo("America/New_York")
 
 MARKET_HOLIDAYS_2026 = {
     "2026-01-01", "2026-01-19", "2026-02-16",
@@ -23,7 +18,6 @@ MARKET_HOLIDAYS_2026 = {
     "2026-07-03", "2026-09-07", "2026-11-26",
     "2026-12-25",
 }
-
 
    
 def should_scan_now():
