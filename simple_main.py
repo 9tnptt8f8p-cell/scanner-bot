@@ -459,6 +459,10 @@ def build_alert(result, rank):
 
 📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
 
+regime_block = f"""
+
+📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
+
 🧠 Regime Notes:
 {chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
 """
