@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 from structure_engine import analyze_structure
 
+load_dotenv()
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+ET = ZoneInfo("America/New_York")
 ET = ZoneInfo("America/New_York")
 
 MARKET_HOLIDAYS_2026 = {
@@ -147,7 +153,7 @@ def send_telegram(message):
     return success
 
 
-def get_percent_gainers():
+def def get_percent_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
     params = {
@@ -221,6 +227,8 @@ def get_percent_gainers():
     except Exception as e:
         print(f"[GAINERS ERROR] {e}", flush=True)
         return []
+
+
 def get_yahoo_candles(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
@@ -265,6 +273,43 @@ def get_yahoo_candles(ticker):
     except Exception as e:
         print(f"[CANDLE ERROR] {ticker}: {e}", flush=True)
         return []
+
+
+def get_alpaca_candles(ticker):
+    url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
+
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
+    }
+
+    params = {
+        "timeframe": "5Min",
+        "limit": 50
+    }
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        data = r.json()
+
+        bars = data.get("bars", [])
+        candles = []
+
+        for b in bars:
+            candles.append({
+                "open": b["o"],
+                "high": b["h"],
+                "low": b["l"],
+                "close": b["c"],
+                "volume": b["v"]
+            })
+
+         
+        return candles
+    except Exception as e:
+        print(f"[ALPACA ERROR] {ticker}: {e}", flush=True)
+        return []
+
 
 def get_news_catalyst(ticker):
     if not FINNHUB_API_KEY:
