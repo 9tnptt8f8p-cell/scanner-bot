@@ -749,7 +749,7 @@ def run_scanner():
         )
         and volume_spike
     )
-)
+
 
 if should_alert and cooldown_done:
     sent = send_telegram(build_alert(result, rank))
