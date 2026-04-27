@@ -684,8 +684,7 @@ def run_scanner():
                 or valid_emergency_runner_alert
                 or valid_early_spike_alert
             )
-            )
-
+            
             if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
