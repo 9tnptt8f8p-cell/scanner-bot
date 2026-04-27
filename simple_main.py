@@ -40,7 +40,7 @@ def should_scan_now():
 
     return True
 
-BOOT_MARKER = "tight 27pct spike scanner v1"
+BOOT_MARKER = "20pct runner re-alert v1"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
