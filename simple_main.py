@@ -711,8 +711,8 @@ def run_scanner():
         else:
             print("[SCAN] No qualified gainers found", flush=True)
 
-        now = time.time()
-        alerts_sent_this_cycle = 0
+            now = time.time()
+            alerts_sent_this_cycle = 0
 
             for rank, result in enumerate(results, start=1):
 
