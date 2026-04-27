@@ -755,27 +755,28 @@ def run_scanner():
     )
 
 
-    if should_alert and cooldown_done:
-       sent = send_telegram(build_alert(result, rank))
+   if should_alert and cooldown_done:
+    sent = send_telegram(build_alert(result, rank))
 
     if sent:
         alert_history[ticker] = now
         runner_prices[ticker] = price
         alerts_sent_this_cycle += 1
         print(f"[ALERT SENT] #{rank} {ticker} score {result['score']}/10", flush=True)
-                else:
-                    print(f"[ALERT FAILED] #{rank} {ticker} score {result['score']}/10", flush=True)
+    else:
+        print(f"[ALERT FAILED] #{rank} {ticker} score {result['score']}/10", flush=True)
 
-            elif should_alert:
-                left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
-                print(f"[NO ALERT] #{rank} {ticker} cooldown active {left}s left", flush=True)
+elif should_alert:
+    left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
+    print(f"[NO ALERT] #{rank} {ticker} cooldown active {left}s left", flush=True)
 
-            else:
-                print(
-                    f"[NO ALERT] #{rank} {ticker} blocked | "
-                    f"gain={result['gain']:.1f}% "
-                    f"recent_vol={result.get('recent_volume', 0):,}",
-                    flush=True
+else:
+    print(
+        f"[NO ALERT] #{rank} {ticker} blocked | "
+        f"gain={result['gain']:.1f}% "
+        f"recent_vol={result.get('recent_volume', 0):,}",
+        flush=True
+    )
                 )
 
         print("[SCAN] Cycle complete", flush=True)
