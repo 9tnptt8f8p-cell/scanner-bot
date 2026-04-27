@@ -472,8 +472,7 @@ def build_alert(result, rank):
         title = "🚨 BUILDING MOMENTUM"
     else:
         title = "⚠️ EARLY SPIKE"
-return f"""
-{title}
+    return f"""{title}
 
 Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
@@ -486,7 +485,9 @@ Reasons:
 
 Risk:
 {risks_text}
+
 {session_block}
+
 {regime_block}
 """
 
