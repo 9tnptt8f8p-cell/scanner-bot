@@ -39,12 +39,6 @@ def should_scan_now():
         return False
 
     return True
-import requests
-from threading import Thread
-from flask import Flask
-from dotenv import load_dotenv
-
-load_dotenv()
 
 BOOT_MARKER = "tight 27pct spike scanner v1"
 
