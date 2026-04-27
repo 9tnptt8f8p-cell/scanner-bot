@@ -584,14 +584,22 @@ def run_scanner():
                     flush=True
                 )
             
-
-            catalyst_type, catalyst_text = get_news_catalyst(ticker)   
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
             result = score_mover(
                 mover=mover,
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
+
+            # 🔥 BASIC DILUTION CHECK (AFTER result is created)
+            if catalyst_text:
+                text = catalyst_text.lower()
+
+                if any(word in text for word in ["offering", "warrant", "atm", "dilution", "shelf"]):
+                    result["risks"].append("⚠️ possible dilution")
+                    result["score"] -= 2
+
             result["session"] = session
             result["session_notes"] = session_notes
             candles = get_alpaca_candles(ticker)
