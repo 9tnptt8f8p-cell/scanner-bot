@@ -25,14 +25,7 @@ MARKET_HOLIDAYS_2026 = {
 }
 
 
-    if len(reasons) >= 2:
-        risk = "HIGH"
-    elif len(reasons) == 1:
-        risk = "MEDIUM"
-    else:
-        risk = "LOW"
-
-    return risk, reasons
+   
 def should_scan_now():
     now = datetime.now(ET)
 
