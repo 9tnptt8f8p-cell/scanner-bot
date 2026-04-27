@@ -153,7 +153,7 @@ def send_telegram(message):
     return success
 
 
-def def get_percent_gainers():
+def get_percent_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
     params = {
