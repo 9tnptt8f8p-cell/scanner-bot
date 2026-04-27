@@ -552,7 +552,44 @@ def detect_market_regime(results):
 
     return "MIXED", ["some setups but inconsistent", "only take A+ charts"]
 
+ def check_sec_offering_risk(ticker):
+    try:
+        headers = {"User-Agent": "scanner-bot your-email@example.com"}
 
+        tickers_url = "https://www.sec.gov/files/company_tickers.json"
+        r = requests.get(tickers_url, headers=headers, timeout=10)
+        companies = r.json()
+
+        cik = None
+        for item in companies.values():
+            if item.get("ticker", "").upper() == ticker.upper():
+                cik = str(item["cik_str"]).zfill(10)
+                break
+
+        if not cik:
+            return False, "SEC CIK not found"
+
+        filings_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        r = requests.get(filings_url, headers=headers, timeout=10)
+        data = r.json()
+
+        forms = data.get("filings", {}).get("recent", {}).get("form", [])
+        dates = data.get("filings", {}).get("recent", {}).get("filingDate", [])
+
+        risky_forms = {"S-1", "S-3", "424B5", "424B3", "F-1", "F-3", "6-K", "8-K"}
+
+        hits = []
+        for form, date in zip(forms[:20], dates[:20]):
+            if form in risky_forms:
+                hits.append(f"{form} filed {date}")
+
+        if hits:
+            return True, "; ".join(hits[:5])
+
+        return False, "No recent offering-type SEC forms found"
+
+    except Exception as e:
+        return False, f"SEC check error: {e}"
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -591,7 +628,13 @@ def run_scanner():
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
 
+            result["sec_note"] = sec_note
+
+            if sec_risk:
+                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
+                result["score"] -= 2
             # 🔥 BASIC DILUTION CHECK (AFTER result is created)
             if catalyst_text:
                 text = catalyst_text.lower()
