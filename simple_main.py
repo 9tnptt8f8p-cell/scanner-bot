@@ -557,7 +557,13 @@ def run_scanner():
 
         for mover in movers:
             ticker = mover["ticker"]
+    emergency_runner = (
+    mover["gain"] >= 35
+    and mover["volume"] >= 1_000_000
+)
 
+if emergency_runner:
+    print(f"[EMERGENCY QUALIFIED] {ticker} | gain {mover['gain']:.1f}% | vol {mover['volume']:,}", flush=True)
             print(
                 f"[QUALIFIED] {ticker:<6} | Price ${mover['price']:<8.4f} | "
                 f"Gain {mover['gain']:6.1f}% | Volume {mover['volume']:,}",
@@ -660,10 +666,12 @@ def run_scanner():
                 and result.get("recent_volume", 0) >= 200000
                 and result["score"] >= MIN_SCORE
             )
-
-            should_alert = valid_27pct_alert or valid_fast_12pct_alert
-
-            if should_alert and cooldown_done:
+           valid_emergency_runner_alert = (
+                result["gain"] >= 35
+                and result.get("total_candle_volume", 0) >= 1_000_000
+)
+            should_alert = valid_27pct_alert or valid_fast_12pct_alert or valid_emergency_runner_alert
+                if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
                 if sent:
