@@ -510,9 +510,10 @@ def get_market_session():
             "only trust strong news moves"
         ]
 
-    return "CLOSED", ["market closed"]
-    
-    def detect_market_regime(results):
+      return "CLOSED", ["market closed"]
+
+
+def detect_market_regime(results):
     if not results:
         return "UNKNOWN", ["no qualified movers yet"]
 
