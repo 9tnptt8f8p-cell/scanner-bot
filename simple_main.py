@@ -502,10 +502,52 @@ Candle Total Vol: {result.get('total_candle_volume', 0):,}
 Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
 
-Reasons: {reasons}
-Risk: {risks}{session_block}{regime_block}
-""".strip()
+🧠 Regime Notes:
+{chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
+"""
 
+    gain = result["gain"]
+
+    if gain >= 27:
+        title = "🔥 RUNNER ALERT"
+    elif gain >= 15:
+        title = "🚨 BUILDING MOMENTUM"
+    else:
+        title = "⚠️ EARLY SPIKE"
+
+    return f"""{title}
+
+
+def build_alert(result, rank):
+    reasons = ", ".join(result.get("reasons", [])) or "None"
+    risks_text = "\n".join(result.get("risks", [])) or "None"
+
+    gain = result["gain"]
+
+    if gain >= 27:
+        title = "🔥 RUNNER ALERT"
+    elif gain >= 20:
+        title = "🚨 BUILDING MOMENTUM"
+    else:
+        title = "⚠️ EARLY SPIKE"
+
+    return (
+        f"{title}\n\n"
+        f"Rank: #{rank}\n"
+        f"{result['ticker']} | Score: {result['score']}/10\n\n"
+        f"Price: ${result['price']:.4f}\n"
+        f"Gain: {result['gain']:.1f}%\n"
+        f"%Session Gain: {result.get('candle_session_gain', 0):.1f}%\n"
+        f"Yahoo Volume: {result['volume']:,}\n"
+        f"Recent Candle Vol: {result.get('recent_volume', 0):,}\n"
+        f"Candle Total Vol: {result.get('total_candle_volume', 0):,}\n\n"
+        f"Catalyst: {result.get('catalyst_type', 'none')}\n"
+        f"{result.get('catalyst_text', '')}\n\n"
+        f"Reasons:\n{reasons}\n\n"
+        f"Risk:\n{risks_text}\n\n"
+        f"🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}\n"
+        f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
+    )
 def get_market_session():
     now = datetime.now(ET).time()
 
