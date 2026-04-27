@@ -602,14 +602,16 @@ def run_scanner():
 
             results.append(result)
 
-            time.sleep(0.5)    
+            time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
+
         regime, regime_notes = detect_market_regime(results)
 
-    for r in results:
-    r["market_regime"] = regime
-    r["regime_notes"] = regime_notes
+        for r in results:
+            r["market_regime"] = regime
+            r["regime_notes"] = regime_notes
+
         if results:
             top_line = " | ".join(
                 [
