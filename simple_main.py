@@ -444,10 +444,11 @@ def score_mover(mover, catalyst_type, catalyst_text):
     }
 
 def build_alert(result, rank):
+
     reasons = ", ".join(result.get("reasons", [])) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
-       session_block = f"""
+    session_block = f"""
 
 🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}
 
@@ -463,7 +464,6 @@ def build_alert(result, rank):
 {chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
 """
 
-    # 🔥 ALERT TYPE LOGIC (correct spot)
     gain = result["gain"]
 
     if gain >= 27:
@@ -472,6 +472,7 @@ def build_alert(result, rank):
         title = "🚨 BUILDING MOMENTUM"
     else:
         title = "⚠️ EARLY SPIKE"
+
     return f"""{title}
 
 Rank: #{rank}
