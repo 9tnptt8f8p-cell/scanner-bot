@@ -442,7 +442,13 @@ def build_alert(result, rank):
     reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
 
-  
+    session_block = f"""
+
+🕓 MARKET SESSION: {result.get('session', 'UNKNOWN')}
+
+🧠 Session Notes:
+{chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
+"""
 
     return f"""
 🚨 27%+ SPIKE ALERT
@@ -458,10 +464,43 @@ Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
 
 Reasons: {reasons}
-Risk: {risks}
+Risk: {risks}{session_block}
 """.strip()
 
+def get_market_session():
+    now = datetime.now(ET).time()
 
+    if dtime(4, 0) <= now < dtime(9, 30):
+        return "PREMARKET", [
+            "lower liquidity",
+            "wider spreads",
+            "wait for open confirmation"
+        ]
+
+    if dtime(9, 30) <= now < dtime(11, 0):
+        return "OPEN", [
+            "highest opportunity window",
+            "watch VWAP and first pullback"
+        ]
+
+    if dtime(11, 0) <= now < dtime(14, 0):
+        return "MIDDAY", [
+            "slower tape",
+            "avoid forcing trades"
+        ]
+
+    if dtime(14, 0) <= now < dtime(16, 0):
+        return "POWER HOUR", [
+            "watch continuation or breakdown"
+        ]
+
+    if dtime(16, 0) <= now <= dtime(20, 0):
+        return "AFTERHOURS", [
+            "thin liquidity",
+            "only trust strong news moves"
+        ]
+
+    return "CLOSED", ["market closed"]
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print("[BOOT] No watchlist — scanning 27%+ percent gainers only", flush=True)
@@ -475,7 +514,7 @@ def run_scanner():
             continue
 
         print("[SCAN] Market active — running scan", flush=True)
-
+        session, session_notes = get_market_session()
         movers = get_percent_gainers()
         results = []
 
@@ -495,7 +534,8 @@ def run_scanner():
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
-
+            result["session"] = session
+            result["session_notes"] = session_notes
             candles = get_alpaca_candles(ticker)
 
             if not candles:
