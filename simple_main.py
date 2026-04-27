@@ -551,8 +551,8 @@ def detect_market_regime(results):
         return "CHOP", ["lack of strong setups", "be defensive / avoid forcing trades"]
 
     return "MIXED", ["some setups but inconsistent", "only take A+ charts"]
-
- def check_sec_offering_risk(ticker):
+    
+def check_sec_offering_risk(ticker):
     try:
         headers = {"User-Agent": "scanner-bot your-email@example.com"}
 
@@ -590,6 +590,7 @@ def detect_market_regime(results):
 
     except Exception as e:
         return False, f"SEC check error: {e}"
+        
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
