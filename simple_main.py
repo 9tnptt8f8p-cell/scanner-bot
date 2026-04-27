@@ -453,11 +453,6 @@ def build_alert(result, rank):
 
 🧠 Session Notes:
 {chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
-"""
-
-    regime_block = f"""
-
-📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
 
 regime_block = f"""
 
