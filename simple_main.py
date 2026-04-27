@@ -123,6 +123,13 @@ def send_telegram(message):
     return success
 
 
+MAX_GAINERS = 50
+SCAN_MIN_GAIN = 10
+ALERT_MIN_GAIN = 27
+MIN_VOLUME = 50000
+MAX_PRICE = 80
+
+
 def get_percent_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
@@ -197,7 +204,6 @@ def get_percent_gainers():
     except Exception as e:
         print(f"[GAINERS ERROR] {e}", flush=True)
         return []
-
 
 def get_yahoo_candles(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
