@@ -617,7 +617,7 @@ def run_scanner():
 
             time.sleep(0.5)
 
-               results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: x["score"], reverse=True)
 
         regime, regime_notes = detect_market_regime(results)
 
