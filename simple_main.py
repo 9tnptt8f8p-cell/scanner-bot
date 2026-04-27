@@ -27,15 +27,14 @@ MARKET_HOLIDAYS_2026 = {
 def should_scan_now():
     now = datetime.now(ET)
 
-    # ❌ Weekend
+    print(f"[TIME] Market clock ET: {now.strftime('%Y-%m-%d %I:%M:%S %p %Z')}", flush=True)
+
     if now.weekday() >= 5:
         return False
 
-    # ❌ Holiday
     if now.date().isoformat() in MARKET_HOLIDAYS_2026:
         return False
 
-    # ❌ Outside 4AM–8PM
     if not (dtime(4, 0) <= now.time() <= dtime(20, 0)):
         return False
 
