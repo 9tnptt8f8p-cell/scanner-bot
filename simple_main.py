@@ -725,8 +725,6 @@ def run_scanner():
 
             above_vwap = "Price above VWAP" in result.get("reasons", [])
 
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
-
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
 
@@ -736,46 +734,41 @@ def run_scanner():
                 and recent_vol >= total_vol * 0.20
             )
 
-            # RE-ALERT
-            if ticker in runner_prices:
-                if price >= runner_prices[ticker] * 1.10 and above_vwap and volume_spike:
-                    send_telegram(f"🔥 {ticker} STILL RUNNING {price}")
+            last_alert = alert_history.get(ticker, 0)
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+
+            should_alert = (
+                (
+                    valid_runner_alert
+                    or valid_building_alert
+                    or valid_early_alert
+                    or valid_emergency_runner_alert
+                )
+                and volume_spike
+            )
+
+            if should_alert and cooldown_done:
+                sent = send_telegram(build_alert(result, rank))
+
+                if sent:
+                    alert_history[ticker] = now
                     runner_prices[ticker] = price
-                    continue
-                    
-    # NORMAL ALERT LOGIC
-    should_alert = (
-        (
-            valid_runner_alert
-            or valid_building_alert
-            or valid_early_alert
-            or valid_emergency_runner_alert
-        )
-        and volume_spike
-    )
+                    alerts_sent_this_cycle += 1
+                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+                else:
+                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
 
+            elif should_alert:
+                left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
+                print(f"[NO ALERT] #{rank} {ticker} cooldown {left}s", flush=True)
 
-   if should_alert and cooldown_done:
-    sent = send_telegram(build_alert(result, rank))
-
-    if sent:
-        alert_history[ticker] = now
-        runner_prices[ticker] = price
-        alerts_sent_this_cycle += 1
-        print(f"[ALERT SENT] #{rank} {ticker} score {result['score']}/10", flush=True)
-    else:
-        print(f"[ALERT FAILED] #{rank} {ticker} score {result['score']}/10", flush=True)
-
-elif should_alert:
-    left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
-    print(f"[NO ALERT] #{rank} {ticker} cooldown active {left}s left", flush=True)
-
-else:
-    print(
-        f"[NO ALERT] #{rank} {ticker} blocked | "
-        f"gain={result['gain']:.1f}% "
-        f"recent_vol={result.get('recent_volume', 0):,}",
-        flush=True
+            else:
+                print(
+                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"gain={result['gain']:.1f}% "
+                    f"recent_vol={result.get('recent_volume', 0):,}",
+                    flush=True
+                )
     )
                 )
 
