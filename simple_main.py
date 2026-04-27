@@ -652,12 +652,12 @@ def run_scanner():
         now = time.time()
         alerts_sent_this_cycle = 0
 
-        for rank, result in enumerate(results, start=1):
+                for rank, result in enumerate(results, start=1):
             if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
                 print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
                 break
 
-                 ticker = result["ticker"]
+            ticker = result["ticker"]
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
@@ -688,7 +688,7 @@ def run_scanner():
                 or valid_early_alert
                 or valid_emergency_runner_alert
             )
-            
+
             if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
@@ -705,10 +705,9 @@ def run_scanner():
 
             else:
                 print(
-                    f"[NO ALERT] #{rank} {ticker} blocked by quality gate | "
-                    f"session_gain={result.get('candle_session_gain', 0):.1f}% "
-                    f"recent_vol={result.get('recent_volume', 0):,} "
-                    f"score={result['score']}/10",
+                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"gain={result['gain']:.1f}% "
+                    f"recent_vol={result.get('recent_volume', 0):,}",
                     flush=True
                 )
 
