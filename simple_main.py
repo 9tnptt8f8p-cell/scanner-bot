@@ -472,7 +472,7 @@ def build_alert(result, rank):
         title = "🚨 BUILDING MOMENTUM"
     else:
         title = "⚠️ EARLY SPIKE"
-    return f"""
+return f"""
 {title}
 
 Rank: #{rank}
