@@ -555,8 +555,7 @@ def detect_market_regime(results):
 
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print("[BOOT] No watchlist — scanning 27%+ percent gainers only", flush=True)
-
+    print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
     alert_history = {}
 
     while True:
