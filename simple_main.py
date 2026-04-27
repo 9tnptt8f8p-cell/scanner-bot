@@ -663,7 +663,7 @@ def run_scanner():
 
             should_alert = valid_27pct_alert or valid_fast_12pct_alert
 
-            if should_alert and cooldown_done:
+           if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
                 if sent:
@@ -689,13 +689,9 @@ def run_scanner():
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
 
-        time.sleep(SCAN_SLEEP)
+        time.sleep(SCAN_SLEEP)        
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-
-    print(f"[WEB] starting server on port {port}", flush=True)
 
     web_thread = Thread(
         target=lambda: app.run(
@@ -707,18 +703,7 @@ if __name__ == "__main__":
         daemon=True
     )
 
-    web_thread.start()
-
-    time.sleep(2)
-
-   
-
-                
-
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
-
-        time.sleep(SCAN_SLEEP)
+  
 
 
 if __name__ == "__main__":
