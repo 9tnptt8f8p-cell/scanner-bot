@@ -625,16 +625,16 @@ def run_scanner():
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
 
-       if results:
-    top_line = " | ".join(
-        [
-            f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
-            for i, r in enumerate(results[:10])
-        ]
-    )
-    print(f"[SCAN] Top ranked: {top_line}", flush=True)
-else:
-    print("[SCAN] No qualified 27%+ gainers found", flush=True)
+        if results:
+            top_line = " | ".join(
+                [
+                    f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
+                    for i, r in enumerate(results[:10])
+                ]
+            )
+            print(f"[SCAN] Top ranked: {top_line}", flush=True)
+        else:
+            print("[SCAN] No qualified 27%+ gainers found", flush=True)
 
         now = time.time()
         alerts_sent_this_cycle = 0
