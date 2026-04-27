@@ -357,25 +357,42 @@ def get_news_catalyst(ticker):
 
 
 def check_dilution_risk(text):
-    danger_words = [
-        "offering",
-        "registered direct",
-        "securities purchase agreement",
-        "warrant",
-        "warrants",
-        "atm",
-        "shelf",
-        "f-1",
-        "s-1",
-        "convertible",
-        "pipe",
-        "reverse split",
-        "direct offering",
-        "public offering"
-    ]
-
     text = str(text).lower()
-    return [word for word in danger_words if word in text]
+
+    danger_words = {
+        "public offering": "public offering",
+        "registered direct": "registered direct",
+        "direct offering": "direct offering",
+        "private placement": "private placement",
+        "securities purchase agreement": "securities purchase agreement",
+        "at-the-market": "ATM",
+        "atm": "ATM",
+        "shelf": "shelf registration",
+        "s-1": "S-1",
+        "s-3": "S-3",
+        "f-1": "F-1",
+        "f-3": "F-3",
+        "424b": "424B",
+        "424b5": "424B5",
+        "warrant": "warrants",
+        "exercise price": "warrant exercise price",
+        "convertible": "convertible",
+        "convertible note": "convertible note",
+        "pipe": "PIPE",
+        "equity line": "equity line",
+        "resale": "resale registration",
+        "selling stockholder": "selling stockholder",
+        "reverse split": "reverse split",
+        "offering": "offering"
+    }
+
+    hits = []
+
+    for word, label in danger_words.items():
+        if word in text and label not in hits:
+            hits.append(label)
+
+    return hits
 
 
 def score_mover(mover, catalyst_type, catalyst_text):
@@ -423,8 +440,15 @@ def score_mover(mover, catalyst_type, catalyst_text):
     dilution_hits = check_dilution_risk(catalyst_text)
 
     if dilution_hits:
-        score -= 3
-        risks.append("dilution risk: " + ", ".join(dilution_hits))
+        if len(dilution_hits) >= 3:
+            score -= 5
+            risks.append("HIGH dilution risk: " + ", ".join(dilution_hits))
+        elif len(dilution_hits) == 2:
+            score -= 4
+            risks.append("MEDIUM/HIGH dilution risk: " + ", ".join(dilution_hits))
+        else:
+            score -= 3
+            risks.append("dilution risk: " + ", ".join(dilution_hits))
 
     if price < 1:
         risks.append("sub-$1 stock")
@@ -499,7 +523,7 @@ def run_scanner():
                 flush=True
             )
 
-            catalyst_type, catalyst_text = get_news_catalyst(ticker)
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)   
 
             result = score_mover(
                 mover=mover,
@@ -507,9 +531,15 @@ def run_scanner():
                 catalyst_text=catalyst_text
             )
 
-            candles = get_yahoo_candles(ticker)
-            structure = analyze_structure(ticker, candles)
+            candles = get_alpaca_candles(ticker)
 
+            if not candles:
+                print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
+                candles = get_yahoo_candles(ticker)
+            else:
+                print(f"[DATA] {ticker} candles from Alpaca", flush=True)
+
+            structure = analyze_structure(ticker, candles)
             result["structure"] = structure
             result["score"] += structure["structure_score"]
             result["score"] = max(0, min(result["score"], 10))
@@ -522,7 +552,7 @@ def run_scanner():
 
             results.append(result)
 
-            time.sleep(0.5)
+            time.sleep(0.5)    
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
