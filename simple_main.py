@@ -700,7 +700,6 @@ def run_scanner():
         for r in results:
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
-
         if results:
             top_line = " | ".join(
                 [
@@ -715,83 +714,41 @@ def run_scanner():
         now = time.time()
         alerts_sent_this_cycle = 0
 
-        for rank, result in enumerate(results, start=1):
-            if alerts_sent_this_cycle >= MAX_ALERTS_PER_CYCLE:
-                print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
-                break
+            for rank, result in enumerate(results, start=1):
 
             ticker = result["ticker"]
-            price = float(result["price"])
+            price = float(result.get("price", 0))
 
-            # HARD RULE: never alert anything under +20% on the live session/day
             if result["gain"] < 20:
-                print(f"[SKIP] {ticker} under 20% gain", flush=True)
                 continue
 
-above_vwap = "Price above VWAP" in result.get("reasons", [])
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
 
-recent_vol = result.get("recent_volume", 0)
-total_vol = result.get("total_candle_volume", 0)
+            recent_vol = result.get("recent_volume", 0)
+            total_vol = result.get("total_candle_volume", 0)
 
-volume_spike = (
-    recent_vol >= 200000
-    and total_vol > 0
-    and recent_vol >= total_vol * 0.20
-)
-            # RE-ALERT: only the main runners going 10% higher from last alert
+            volume_spike = (
+                recent_vol >= 200000
+                and total_vol > 0
+                and recent_vol >= total_vol * 0.20
+            )
+
             if ticker in runner_prices:
-                if price >= runner_prices[ticker] * 1.10 and above_vwap:
-                    sent = send_telegram(
-                        f"🔥 RUNNER STILL GOING\n\n"
-                        f"{ticker}\n"
-                        f"Price: ${price:.4f}\n"
-                        f"Last Alert: ${runner_prices[ticker]:.4f}\n"
-                        f"Gain: {result['gain']:.1f}%\n\n"
-                        f"Reason: +10% higher since last alert and still above VWAP"
-                    )
-
-                    if sent:
-                        runner_prices[ticker] = price
-                        alert_history[ticker] = now
-                        alerts_sent_this_cycle += 1
-                        print(f"[RE-ALERT SENT] {ticker} still running", flush=True)
-
+                if price >= runner_prices[ticker] * 1.10 and above_vwap and volume_spike:
+                    send_telegram(f"🔥 {ticker} STILL RUNNING {price}")
+                    runner_prices[ticker] = price
                     continue
-
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-
-            valid_early_alert = (
-                result["gain"] >= 20
-                and result.get("recent_volume", 0) >= 100000
-                and above_vwap
-            )
-
-            valid_building_alert = (
-                result["gain"] >= 20
-                and result.get("recent_volume", 0) >= 150000
-                and above_vwap
-            )
-
-            valid_runner_alert = (
-                result["gain"] >= ALERT_MIN_GAIN
-                and result.get("recent_volume", 0) >= 200000
-                and above_vwap
-            )
-
-            valid_emergency_runner_alert = (
-                result["gain"] >= 35
-                and result.get("total_candle_volume", 0) >= 1_000_000
-            )
-
-      should_alert = (
-    (
-        valid_runner_alert
-        or valid_building_alert
-        or valid_early_alert
-        or valid_emergency_runner_alert
+                    
+    # NORMAL ALERT LOGIC
+    should_alert = (
+        (
+            valid_runner_alert
+            or valid_building_alert
+            or valid_early_alert
+            or valid_emergency_runner_alert
+        )
+        and volume_spike
     )
-    and volume_spike
 )
 
 if should_alert and cooldown_done:
