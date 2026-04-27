@@ -443,17 +443,19 @@ def build_alert(result, rank):
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
 
     session_block = f"""
- regime_block = f"""
+
+🕓 MARKET SESSION: {result.get('session', 'UNKNOWN')}
+
+🧠 Session Notes:
+{chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
+"""
+
+    regime_block = f"""
 
 📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
 
 🧠 Regime Notes:
 {chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
-"""
-🕓 MARKET SESSION: {result.get('session', 'UNKNOWN')}
-
-🧠 Session Notes:
-{chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
 """
 
     return f"""
@@ -508,7 +510,9 @@ def get_market_session():
             "only trust strong news moves"
         ]
 
-    return "CLOSED", ["market closed"]def detect_market_regime(results):
+    return "CLOSED", ["market closed"]
+    
+    def detect_market_regime(results):
     if not results:
         return "UNKNOWN", ["no qualified movers yet"]
 
