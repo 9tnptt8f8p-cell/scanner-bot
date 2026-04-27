@@ -443,14 +443,13 @@ def score_mover(mover, catalyst_type, catalyst_text):
         "risks": risks
     }
 
-
 def build_alert(result, rank):
-    reasons = ", ".join(result["reasons"]) if result["reasons"] else "none"
-    risks = ", ".join(result["risks"]) if result["risks"] else "none"
+    reasons = ", ".join(result.get("reasons", [])) or "None"
+    risks = ", ".join(result.get("risks", [])) or "None"
 
     session_block = f"""
 
-🕓 MARKET SESSION: {result.get('session', 'UNKNOWN')}
+🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}
 
 🧠 Session Notes:
 {chr(10).join(['- ' + n for n in result.get('session_notes', [])])}
@@ -464,14 +463,24 @@ def build_alert(result, rank):
 {chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
 """
 
+    # 🔥 ALERT TYPE LOGIC (correct spot)
+    gain = result["gain"]
+
+    if gain >= 27:
+        title = "🔥 RUNNER ALERT"
+    elif gain >= 15:
+        title = "🚨 BUILDING MOMENTUM"
+    else:
+        title = "⚠️ EARLY SPIKE"
+
     return f"""
-🚨 27%+ SPIKE ALERT
+{title}
 
 Rank: #{rank}
 {result['ticker']} | Score: {result['score']}/10
 
 Price: ${result['price']:.4f}
-Gain: {result['gain']:.1f}
+Gain: {result['gain']:.1f}%
 %Session Gain: {result.get('candle_session_gain', 0):.1f}%
 Yahoo Volume: {result['volume']:,}
 Recent Candle Vol: {result.get('recent_volume', 0):,}
