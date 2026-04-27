@@ -574,22 +574,20 @@ def run_scanner():
             result["session_notes"] = session_notes
             candles = get_alpaca_candles(ticker)
 
-          if not candles:
-    print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
-    candles = get_yahoo_candles(ticker)
-else:
-    print(f"[DATA] {ticker} candles from Alpaca", flush=True)
-
-recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
-total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
-
-result["recent_volume"] = recent_volume
-result["total_candle_volume"] = total_candle_volume
-
-if result.get("session") == "PREMARKET" and recent_volume < 200000:
-    result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
+            if not candles:
+                print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
+                candles = get_yahoo_candles(ticker)
             else:
                 print(f"[DATA] {ticker} candles from Alpaca", flush=True)
+
+            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
+            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
+
+            result["recent_volume"] = recent_volume
+            result["total_candle_volume"] = total_candle_volume
+
+            if result.get("session") == "PREMARKET" and recent_volume < 200000:
+                result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
 
             structure = analyze_structure(ticker, candles)
             result["structure"] = structure
