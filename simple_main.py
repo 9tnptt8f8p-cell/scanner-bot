@@ -169,7 +169,7 @@ def get_percent_gainers():
             if price <= 0:
                 continue
 
-            if gain < MIN_GAIN:
+            if gain < SCAN_MIN_GAIN:
                 continue
 
             if volume < MIN_VOLUME:
@@ -189,7 +189,7 @@ def get_percent_gainers():
 
         movers.sort(key=lambda x: x["gain"], reverse=True)
 
-        print(f"[GAINERS] Found {len(movers)} qualified movers over {MIN_GAIN}%:", flush=True)
+        print(f"[GAINERS] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
         print("[GAINERS] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
 
         return movers
