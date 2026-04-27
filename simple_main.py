@@ -443,7 +443,13 @@ def build_alert(result, rank):
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
 
     session_block = f"""
+    regime_block = f"""
 
+📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
+
+🧠 Regime Notes:
+{chr(10).join(['- ' + n for n in result.get('regime_notes', [])])}
+"""
 🕓 MARKET SESSION: {result.get('session', 'UNKNOWN')}
 
 🧠 Session Notes:
@@ -464,7 +470,7 @@ Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
 
 Reasons: {reasons}
-Risk: {risks}{session_block}
+Risk: {risks}{session_block}{regime_block}
 """.strip()
 
 def get_market_session():
@@ -500,7 +506,28 @@ def get_market_session():
             "only trust strong news moves"
         ]
 
-    return "CLOSED", ["market closed"]
+    return "CLOSED", ["market closed"]def detect_market_regime(results):
+    if not results:
+        return "UNKNOWN", ["no qualified movers yet"]
+
+    strong = 0
+    mid = 0
+
+    for r in results[:10]:
+        if r["score"] >= 8:
+            strong += 1
+        elif r["score"] >= 6:
+            mid += 1
+
+    notes = []
+
+    if strong >= 3:
+        return "HOT", ["multiple strong setups", "momentum market active"]
+
+    if strong == 0 and mid <= 2:
+        return "CHOP", ["lack of strong setups", "be defensive / avoid forcing trades"]
+
+    return "MIXED", ["some setups but inconsistent", "only take A+ charts"]
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print("[BOOT] No watchlist — scanning 27%+ percent gainers only", flush=True)
@@ -560,7 +587,11 @@ def run_scanner():
             time.sleep(0.5)    
 
         results.sort(key=lambda x: x["score"], reverse=True)
+        regime, regime_notes = detect_market_regime(results)
 
+    for r in results:
+    r["market_regime"] = regime
+    r["regime_notes"] = regime_notes
         if results:
             top_line = " | ".join(
                 [
