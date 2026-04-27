@@ -728,8 +728,16 @@ def run_scanner():
                 print(f"[SKIP] {ticker} under 20% gain", flush=True)
                 continue
 
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
+above_vwap = "Price above VWAP" in result.get("reasons", [])
 
+recent_vol = result.get("recent_volume", 0)
+total_vol = result.get("total_candle_volume", 0)
+
+volume_spike = (
+    recent_vol >= 200000
+    and total_vol > 0
+    and recent_vol >= total_vol * 0.20
+)
             # RE-ALERT: only the main runners going 10% higher from last alert
             if ticker in runner_prices:
                 if price >= runner_prices[ticker] * 1.10 and above_vwap:
@@ -776,15 +784,18 @@ def run_scanner():
                 and result.get("total_candle_volume", 0) >= 1_000_000
             )
 
-            should_alert = (
-                valid_runner_alert
-                or valid_building_alert
-                or valid_early_alert
-                or valid_emergency_runner_alert
-            )
+      should_alert = (
+    (
+        valid_runner_alert
+        or valid_building_alert
+        or valid_early_alert
+        or valid_emergency_runner_alert
+    )
+    and volume_spike
+)
 
-            if should_alert and cooldown_done:
-                sent = send_telegram(build_alert(result, rank))
+if should_alert and cooldown_done:
+    sent = send_telegram(build_alert(result, rank))
 
                 if sent:
                     alert_history[ticker] = now
