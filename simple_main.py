@@ -464,7 +464,9 @@ Rank: #{rank}
 
 Price: ${result['price']:.4f}
 Gain: {result['gain']:.1f}%
-Volume: {result['volume']:,}
+Yahoo Volume: {result['volume']:,}
+Recent Candle Vol: {result.get('recent_volume', 0):,}
+Candle Total Vol: {result.get('total_candle_volume', 0):,}
 
 Catalyst: {result['catalyst_type']}
 {result['catalyst_text']}
@@ -567,7 +569,14 @@ def run_scanner():
 
             if not candles:
                 print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
-                candles = get_yahoo_candles(ticker)
+                candles = get_yahoo_candles(ticker)recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
+total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
+
+result["recent_volume"] = recent_volume
+result["total_candle_volume"] = total_candle_volume
+
+if result.get("session") == "PREMARKET" and recent_volume < 200000:
+    result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
             else:
                 print(f"[DATA] {ticker} candles from Alpaca", flush=True)
 
