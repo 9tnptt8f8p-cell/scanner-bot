@@ -443,7 +443,7 @@ def build_alert(result, rank):
     risks = ", ".join(result["risks"]) if result["risks"] else "none"
 
     session_block = f"""
-    regime_block = f"""
+ regime_block = f"""
 
 📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}
 
