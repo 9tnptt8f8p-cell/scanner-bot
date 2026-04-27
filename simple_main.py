@@ -434,7 +434,7 @@ def run_scanner():
 
     alert_history = {}
 
-    while True:
+       while True:
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
             time.sleep(300)
@@ -445,39 +445,39 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
-       for mover in movers:
-    ticker = mover["ticker"]
+        for mover in movers:
+            ticker = mover["ticker"]
 
-    print(
-        f"[QUALIFIED] {ticker:<6} | Price ${mover['price']:<8.4f} | "
-        f"Gain {mover['gain']:6.1f}% | Volume {mover['volume']:,}",
-        flush=True
-    )
+            print(
+                f"[QUALIFIED] {ticker:<6} | Price ${mover['price']:<8.4f} | "
+                f"Gain {mover['gain']:6.1f}% | Volume {mover['volume']:,}",
+                flush=True
+            )
 
-    catalyst_type, catalyst_text = get_news_catalyst(ticker)
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
-    result = score_mover(
-        mover=mover,
-        catalyst_type=catalyst_type,
-        catalyst_text=catalyst_text
-    )
+            result = score_mover(
+                mover=mover,
+                catalyst_type=catalyst_type,
+                catalyst_text=catalyst_text
+            )
 
-    candles = get_yahoo_candles(ticker)
-    structure = analyze_structure(ticker, candles)
+            candles = get_yahoo_candles(ticker)
+            structure = analyze_structure(ticker, candles)
 
-    result["structure"] = structure
-    result["score"] += structure["structure_score"]
-    result["score"] = max(0, min(result["score"], 10))
+            result["structure"] = structure
+            result["score"] += structure["structure_score"]
+            result["score"] = max(0, min(result["score"], 10))
 
-    if structure["risk_flags"]:
-        result["risks"].extend(structure["risk_flags"])
+            if structure["risk_flags"]:
+                result["risks"].extend(structure["risk_flags"])
 
-    if structure["reasons"]:
-        result["reasons"].extend(structure["reasons"])
+            if structure["reasons"]:
+                result["reasons"].extend(structure["reasons"])
 
-    results.append(result)
+            results.append(result)
 
-    time.sleep(0.5)
+            time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
