@@ -667,7 +667,12 @@ def run_scanner():
                 and result.get("recent_volume", 0) >= 200000
                 and result["score"] >= MIN_SCORE
             )
-
+            valid_early_spike_alert = (
+                result.get("candle_session_gain", 0) >= 10
+                and result.get("recent_volume", 0) >= 150000
+                and result["gain"] >= 12
+                and result["score"] >= 5
+            )
             valid_emergency_runner_alert = (
                 result["gain"] >= 35
                 and result.get("total_candle_volume", 0) >= 1_000_000
@@ -677,6 +682,8 @@ def run_scanner():
                 valid_27pct_alert
                 or valid_fast_12pct_alert
                 or valid_emergency_runner_alert
+                or valid_early_spike_alert
+            )
             )
 
             if should_alert and cooldown_done:
