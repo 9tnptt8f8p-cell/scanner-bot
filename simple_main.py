@@ -713,7 +713,7 @@ if __name__ == "__main__":
 
    
 
-                )
+                
 
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
