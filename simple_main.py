@@ -697,7 +697,7 @@ def run_scanner():
 
         regime, regime_notes = detect_market_regime(results)
 
-            for r in results:
+        for r in results:
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
 
