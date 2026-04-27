@@ -697,9 +697,10 @@ def run_scanner():
 
         regime, regime_notes = detect_market_regime(results)
 
-        for r in results:
+            for r in results:
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
+
         if results:
             top_line = " | ".join(
                 [
@@ -711,16 +712,18 @@ def run_scanner():
         else:
             print("[SCAN] No qualified gainers found", flush=True)
 
-            now = time.time()
-            alerts_sent_this_cycle = 0
+        now = time.time()
+        alerts_sent_this_cycle = 0
 
-            for rank, result in enumerate(results, start=1):
+        for rank, result in enumerate(results, start=1):
 
             ticker = result["ticker"]
             price = float(result.get("price", 0))
 
             if result["gain"] < 20:
                 continue
+
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
 
             above_vwap = "Price above VWAP" in result.get("reasons", [])
 
