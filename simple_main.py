@@ -544,10 +544,10 @@ def run_scanner():
 
     alert_history = {}
 
-    while True:
+        while True:
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
-            time.sleep(300)
+            time.sleep(60)
             continue
 
         print("[SCAN] Market active — running scan", flush=True)
@@ -557,17 +557,18 @@ def run_scanner():
 
         for mover in movers:
             ticker = mover["ticker"]
-    emergency_runner = (
-    mover["gain"] >= 35
-    and mover["volume"] >= 1_000_000
-)
 
-if emergency_runner:
-    print(f"[EMERGENCY QUALIFIED] {ticker} | gain {mover['gain']:.1f}% | vol {mover['volume']:,}", flush=True)
-            print(
-                f"[QUALIFIED] {ticker:<6} | Price ${mover['price']:<8.4f} | "
-                f"Gain {mover['gain']:6.1f}% | Volume {mover['volume']:,}",
-                flush=True
+            emergency_runner = (
+                mover["gain"] >= 35
+                and mover["volume"] >= 1_000_000
+            )
+
+            if emergency_runner:
+                print(
+                    f"[EMERGENCY QUALIFIED] {ticker} | "
+                    f"gain {mover['gain']:.1f}% | vol {mover['volume']:,}",
+                    flush=True
+                )
             )
 
             catalyst_type, catalyst_text = get_news_catalyst(ticker)   
