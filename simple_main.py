@@ -1,7 +1,13 @@
 import os
 import time
+import requests
+from threading import Thread
+from flask import Flask
+from dotenv import load_dotenv
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
+
+from structure_engine import analyze_structure
 
 ET = ZoneInfo("America/New_York")
 
@@ -215,7 +221,50 @@ def get_percent_gainers():
     except Exception as e:
         print(f"[GAINERS ERROR] {e}", flush=True)
         return []
+def get_yahoo_candles(ticker):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
+    params = {
+        "interval": "5m",
+        "range": "1d"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()
+
+        result = data["chart"]["result"][0]
+        quote = result["indicators"]["quote"][0]
+
+        candles = []
+
+        for o, h, l, c, v in zip(
+            quote["open"],
+            quote["high"],
+            quote["low"],
+            quote["close"],
+            quote["volume"]
+        ):
+            if None in (o, h, l, c, v):
+                continue
+
+            candles.append({
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v
+            })
+
+        return candles
+
+    except Exception as e:
+        print(f"[CANDLE ERROR] {ticker}: {e}", flush=True)
+        return []
 
 def get_news_catalyst(ticker):
     if not FINNHUB_API_KEY:
@@ -406,13 +455,26 @@ def run_scanner():
             )
 
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
-            result = score_mover(
-                mover=mover,
-                catalyst_type=catalyst_type,
-                catalyst_text=catalyst_text
-            )
+           result = score_mover(
+    mover=mover,
+    catalyst_type=catalyst_type,
+    catalyst_text=catalyst_text
+)
 
-            results.append(result)
+candles = get_yahoo_candles(ticker)
+structure = analyze_structure(ticker, candles)
+
+result["structure"] = structure
+result["score"] += structure["structure_score"]
+result["score"] = max(0, min(result["score"], 10))
+
+if structure["risk_flags"]:
+    result["risks"].extend(structure["risk_flags"])
+
+if structure["reasons"]:
+    result["reasons"].extend(structure["reasons"])
+
+results.append(result)
             time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
