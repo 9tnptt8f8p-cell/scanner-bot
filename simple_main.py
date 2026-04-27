@@ -662,17 +662,29 @@ def run_scanner():
                 and result["score"] >= MIN_SCORE
             )
 
+             valid_27pct_alert = (
+                result["gain"] >= 27
+                and result.get("candle_session_gain", 0) >= 15
+                and result.get("recent_volume", 0) >= 200000
+                and result["score"] >= MIN_SCORE
+            )
+
             valid_fast_12pct_alert = (
                 result.get("candle_session_gain", 0) >= 12
                 and result.get("recent_volume", 0) >= 200000
                 and result["score"] >= MIN_SCORE
             )
-             valid_emergency_runner_alert = (
+
+            valid_emergency_runner_alert = (
                 result["gain"] >= 35
                 and result.get("total_candle_volume", 0) >= 1_000_000
             )
 
-                should_alert = valid_27pct_alert or valid_fast_12pct_alert or valid_emergency_runner_alert
+            should_alert = (
+                valid_27pct_alert
+                or valid_fast_12pct_alert
+                or valid_emergency_runner_alert
+            )
                 if should_alert and cooldown_done:
                 sent = send_telegram(build_alert(result, rank))
 
