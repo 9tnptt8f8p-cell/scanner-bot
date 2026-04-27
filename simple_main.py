@@ -657,38 +657,36 @@ def run_scanner():
                 print("[ALERT LIMIT] Max alerts reached this cycle", flush=True)
                 break
 
-            ticker = result["ticker"]
+                 ticker = result["ticker"]
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            valid_27pct_alert = (
-                result["gain"] >= 27
-                and result.get("candle_session_gain", 0) >= 15
-                and result.get("recent_volume", 0) >= 200000
-                and result["score"] >= MIN_SCORE
+            # === CLEAN ALERT LEVELS ===
+            valid_early_alert = (
+                result["gain"] >= 10
+                and result.get("recent_volume", 0) >= 100000
             )
 
-            valid_fast_12pct_alert = (
-                result.get("candle_session_gain", 0) >= 12
-                and result.get("recent_volume", 0) >= 200000
-                and result["score"] >= MIN_SCORE
-            )
-            valid_early_spike_alert = (
-                result.get("candle_session_gain", 0) >= 10
+            valid_building_alert = (
+                result["gain"] >= 15
                 and result.get("recent_volume", 0) >= 150000
-                and result["gain"] >= 12
-                and result["score"] >= 5
             )
+
+            valid_runner_alert = (
+                result["gain"] >= ALERT_MIN_GAIN
+                and result.get("recent_volume", 0) >= 200000
+            )
+
             valid_emergency_runner_alert = (
                 result["gain"] >= 35
                 and result.get("total_candle_volume", 0) >= 1_000_000
             )
 
             should_alert = (
-                valid_27pct_alert
-                or valid_fast_12pct_alert
+                valid_runner_alert
+                or valid_building_alert
+                or valid_early_alert
                 or valid_emergency_runner_alert
-                or valid_early_spike_alert
             )
             
             if should_alert and cooldown_done:
