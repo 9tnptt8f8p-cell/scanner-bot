@@ -636,6 +636,12 @@ def run_scanner():
         else:
             print("[SCAN] No qualified 27%+ gainers found", flush=True)
 
+                       ]
+            )
+            print(f"[SCAN] Top ranked: {top_line}", flush=True)
+        else:
+            print("[SCAN] No qualified 27%+ gainers found", flush=True)
+
         now = time.time()
         alerts_sent_this_cycle = 0
 
@@ -681,6 +687,35 @@ def run_scanner():
                 print(
                     f"[NO ALERT] #{rank} {ticker} score {result['score']}/10 below MIN_SCORE {MIN_SCORE}",
                     flush=True
+                )
+
+        print("[SCAN] Cycle complete", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
+
+        time.sleep(SCAN_SLEEP)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+
+    print(f"[WEB] starting server on port {port}", flush=True)
+
+    web_thread = Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False
+        ),
+        daemon=True
+    )
+
+    web_thread.start()
+
+    time.sleep(2)
+
+   
+
                 )
 
         print("[SCAN] Cycle complete", flush=True)
