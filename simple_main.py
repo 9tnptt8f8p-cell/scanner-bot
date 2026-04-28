@@ -751,7 +751,8 @@ def run_scanner():
                 and price > recent_high
                 and volume_spike
             )
-                            # ===== ENTRY SETUP ALERTS =====
+            
+            # ===== ENTRY SETUP ALERTS =====
 
             vwap_reclaim_setup = (
                 gain >= 15
@@ -763,7 +764,7 @@ def run_scanner():
                 gain >= 20
                 and price >= recent_high * 0.98
                 and recent_vol >= 200_000
-            
+           )
 
             dip_buy_setup = (
                 gain >= 20
@@ -857,9 +858,6 @@ if __name__ == "__main__":
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
 
-      
-
-    print(f"[WEB] starting server on port {port}", flush=True)
 
     web_thread = Thread(
         target=lambda: app.run(
