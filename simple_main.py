@@ -672,7 +672,7 @@ def run_scanner():
 
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
-early_momentum_alert = (
+            early_momentum_aler t = (
     result["gain"] >= 15
     and result.get("volume", 0) >= 500_000
     and result.get("recent_volume", 0) >= 50_000
