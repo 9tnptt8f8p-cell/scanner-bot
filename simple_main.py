@@ -801,7 +801,7 @@ def run_scanner():
 
                 elif breakout_burst_alert:
                     alert_tag = "\n\n🚀 BREAKOUT BURST"
-                                    elif vwap_reclaim_setup:
+                elif vwap_reclaim_setup:
                     alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
 
                 elif breakout_hold_setup:
