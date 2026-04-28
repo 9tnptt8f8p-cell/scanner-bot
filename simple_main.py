@@ -720,33 +720,62 @@ for rank, result in enumerate(results, start=1):
         or valid_emergency_runner_alert
         or early_momentum_alert
     )
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+       
+           
+    last_alert = alert_history.get(ticker, 0)
+    cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            if should_alert and cooldown_done:
-                sent = send_telegram(build_alert(result, rank))
+    if should_alert and cooldown_done:
+        sent = send_telegram(build_alert(result, rank))
 
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = float(result.get("price", 0))
-                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
-                else:
-                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+        if sent:
+            alert_history[ticker] = now
+            runner_prices[ticker] = float(result.get("price", 0))
+            print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+        else:
+            print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
 
-            elif should_alert:
-                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+    elif should_alert:
+        print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
 
-            else:
-                print(
-                    f"[NO ALERT] #{rank} {ticker} blocked | "
-                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
-                    flush=True
-                )
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
+    else:
+        print(
+            f"[NO ALERT] #{rank} {ticker} blocked | "
+            f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
+            flush=True
+        )
 
-        time.sleep(SCAN_SLEEP)
+print("[SCAN] Cycle complete", flush=True)
+print("[HEARTBEAT] alive", flush=True)
 
+time.sleep(SCAN_SLEEP)
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+
+    print(f"[WEB] starting server on port {port}", flush=True)
+
+    web_thread = Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False
+        ),
+        daemon=True
+    )
+
+    web_thread.start()
+
+    time.sleep(2)
+
+    print("[BOOT] starting scanner", flush=True)
+    run_scanner()
+
+print("[SCAN] Cycle complete", flush=True)
+print("[HEARTBEAT] alive", flush=True)
+
+time.sleep(SCAN_SLEEP)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
