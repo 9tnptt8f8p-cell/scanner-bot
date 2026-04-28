@@ -375,19 +375,58 @@ def score_mover(mover, catalyst_type, catalyst_text):
     price = mover["price"]
     volume = mover["volume"]
 
-    if gain >= 27:
+    if gain >= 100:
+        score += 5
+        reasons.append("100%+ gainer")
+    elif gain >= 75:
+        score += 4
+        reasons.append("75%+ gainer")
+    elif gain >= 50:
+        score += 3
+        reasons.append("50%+ gainer")
+    elif gain >= 27:
         score += 2
         reasons.append("27%+ spike")
 
-    if volume >= 500_000:
+    if volume >= 10_000_000:
+        score += 3
+        reasons.append("10M+ volume")
+    elif volume >= 2_000_000:
+        score += 2
+        reasons.append("2M+ volume")
+    elif volume >= 500_000:
         score += 1
-        reasons.append("volume present")
+        reasons.append("500k+ volume")
 
     if catalyst_type not in ["none", "unknown"]:
         score += 2
         reasons.append("fresh news")
     else:
         risks.append("no clear fresh news")
+
+    if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
+        score += 1
+        reasons.append(f"strong catalyst: {catalyst_type}")
+
+    dilution_hits = check_dilution_risk(catalyst_text)
+
+    if dilution_hits:
+        if len(dilution_hits) >= 3:
+            score -= 5
+            risks.append("HIGH dilution risk: " + ", ".join(dilution_hits))
+        elif len(dilution_hits) == 2:
+            score -= 4
+            risks.append("MEDIUM/HIGH dilution risk: " + ", ".join(dilution_hits))
+        else:
+            score -= 3
+            risks.append("dilution risk: " + ", ".join(dilution_hits))
+
+    if gain > 30 and volume < 1_000_000:
+        score -= 2
+        risks.append("low volume spike")
+
+    if price < 1:
+        risks.append("sub-$1 stock")
 
     score = max(0, min(score, 10))
 
