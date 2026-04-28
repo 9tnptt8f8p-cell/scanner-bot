@@ -672,7 +672,26 @@ def run_scanner():
 
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
+            price = result.get("price", 0)
+            recent_vol = result.get("recent_volume", 0)
+            market_cap = result.get("market_cap", 0)
 
+            # ===== TRASH FILTERS =====
+
+            # Price range: keep $0.50 to $500
+            if price < 0.5 or price > 500:
+                print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
+                continue
+
+            # Market cap: allow up to $1B
+            if market_cap and market_cap > 1_000_000_000:
+                print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
+                continue
+
+            # Speed filter: blocks slow weak movers
+            if result.get("gain", 0) < 25 and recent_vol < 200_000:
+                print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
+                continue
             early_momentum_alert = (
                 result["gain"] >= 15
                 and result.get("volume", 0) >= 500_000
