@@ -771,15 +771,6 @@ def run_scanner():
                     flush=True
                 )
 
-            elif should_alert:
-                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
-
-            else:
-                print(
-                    f"[NO ALERT] #{rank} {ticker} blocked | "
-                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
-                    flush=True
-                )
 
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
@@ -809,14 +800,7 @@ if __name__ == "__main__":
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
 
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
-
-        time.sleep(SCAN_SLEEP)
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
+      
 
     print(f"[WEB] starting server on port {port}", flush=True)
 
