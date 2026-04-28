@@ -750,6 +750,7 @@ def run_scanner():
                 gain > 25
                 and price > recent_high
                 and volume_spike
+            )
                             # ===== ENTRY SETUP ALERTS =====
 
             vwap_reclaim_setup = (
