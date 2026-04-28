@@ -659,24 +659,39 @@ def run_scanner():
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
 
-        if results:
-            top_line = " | ".join(
-                f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
-                for i, r in enumerate(results[:10])
-            )
-            print(f"[SCAN] Top ranked: {top_line}", flush=True)
-        else:
-            print("[SCAN] No qualified gainers found", flush=True)
+     if results:
+    top_line = " | ".join(
+        f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
+        for i, r in enumerate(results[:10])
+    )
+    print(f"[SCAN] Top ranked: {top_line}", flush=True)
+else:
+    print("[SCAN] No qualified gainers found", flush=True)
 
-        now = time.time()
+now = time.time()
 
-        for rank, result in enumerate(results, start=1):
-            ticker = result["ticker"]
-            early_momentum_aler t = (
-    result["gain"] >= 15
-    and result.get("volume", 0) >= 500_000
-    and result.get("recent_volume", 0) >= 50_000
-)
+for rank, result in enumerate(results, start=1):
+    ticker = result["ticker"]
+
+    early_momentum_alert = (
+        result["gain"] >= 15
+        and result.get("volume", 0) >= 500_000
+        and result.get("recent_volume", 0) >= 50_000
+    )
+
+    if early_momentum_alert:
+        print(f"[EARLY] {ticker} building momentum", flush=True)
+
+now = time.time()
+
+for rank, result in enumerate(results, start=1):
+    ticker = result["ticker"]
+
+    early_momentum_alert = (
+        result["gain"] >= 15
+        and result.get("volume", 0) >= 500_000
+        and result.get("recent_volume", 0) >= 50_000
+    )
             if result["gain"] < 20:
                 continue
 
