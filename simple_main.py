@@ -8,7 +8,8 @@ from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 from structure_engine import analyze_structure
-
+from msg_builder import build_alert
+from alerts import send_alert
 load_dotenv()
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -406,6 +407,8 @@ def score_mover(mover, catalyst_type, catalyst_text):
     if catalyst_type not in ["none", "unknown"]:
         score += 2
         reasons.append("fresh news")
+
+    return score, reasons, risks
     else:
         risks.append("no clear fresh news")
 
@@ -591,7 +594,37 @@ def run_scanner():
 
         for mover in movers:
             ticker = mover["ticker"]
+        for mover in movers:
+            ticker = mover["ticker"]
 
+            catalyst_type = "unknown"
+            catalyst_text = ""
+
+            score, reasons, risks = score_mover(
+                mover,
+                catalyst_type,
+                catalyst_text
+            )
+
+            if score >= 6:
+                alert_data = {
+                    "emoji": "🚨",
+                    "ticker": ticker,
+                    "score": score,
+                    "rank": len(results) + 1,
+                    "price": mover["price"],
+                    "gain": mover["gain"],
+                    "volume": mover["volume"],
+                    "candle_vol": "N/A",
+                    "catalyst": catalyst_type,
+                    "reasons": reasons,
+                    "risks": risks,
+                    "session": session,
+                    "regime": "UNKNOWN"
+                }
+
+                message = build_alert(alert_data)
+                send_alert(message)
             emergency_runner = (
                 mover["gain"] >= 35
                 and mover["volume"] >= 1_000_000
