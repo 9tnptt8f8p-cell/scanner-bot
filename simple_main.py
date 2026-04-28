@@ -689,7 +689,7 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
 
-            valid_early_alert = (
+                  valid_early_alert = (
                 result["gain"] >= 20
                 and recent_vol >= 100_000
                 and above_vwap
@@ -706,12 +706,47 @@ def run_scanner():
                 and total_vol >= 1_000_000
             )
 
+            # ===== SECOND LEG + BREAKOUT BURST =====
+
+            price = result.get("price", 0)
+            gain = result.get("gain", 0)
+            vwap = result.get("vwap", 0)
+
+            above_vwap = price > vwap
+
+            recent_high = result.get("high", price)
+            recent_vol = result.get("recent_volume", 0)
+            prev_vol = result.get("prev_volume", 0)
+
+            volume_spike = recent_vol > (prev_vol * 1.5 if prev_vol > 0 else 0)
+            pullback = price < recent_high * 0.95
+
+            second_leg_alert = (
+                gain > 25
+                and above_vwap
+                and pullback
+            )
+
+            breakout_burst_alert = (
+                gain > 25
+                and price > recent_high
+                and volume_spike
+            )
+
             should_alert = (
                 valid_early_alert
                 or valid_runner_alert
                 or valid_emergency_runner_alert
                 or early_momentum_alert
+                or second_leg_alert
+                or breakout_burst_alert
             )
+
+            if second_leg_alert:
+                print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+
+            if breakout_burst_alert:
+                print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
 
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
@@ -735,6 +770,44 @@ def run_scanner():
                     f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
                     flush=True
                 )
+
+            elif should_alert:
+                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+
+            else:
+                print(
+                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
+                    flush=True
+                )
+
+        print("[SCAN] Cycle complete", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
+
+        time.sleep(SCAN_SLEEP)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+
+    print(f"[WEB] starting server on port {port}", flush=True)
+
+    web_thread = Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False
+        ),
+        daemon=True
+    )
+
+    web_thread.start()
+
+    time.sleep(2)
+
+    print("[BOOT] starting scanner", flush=True)
+    run_scanner()
 
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
