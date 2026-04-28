@@ -683,17 +683,7 @@ for rank, result in enumerate(results, start=1):
 
     if early_momentum_alert:
         print(f"[EARLY] {ticker} building momentum", flush=True)
-
-now = time.time()
-
-for rank, result in enumerate(results, start=1):
-    ticker = result["ticker"]
-
-    early_momentum_alert = (
-        result["gain"] >= 15
-        and result.get("volume", 0) >= 500_000
-        and result.get("recent_volume", 0) >= 50_000
-    )
+    
             if result["gain"] < 20:
                 continue
 
