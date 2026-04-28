@@ -334,15 +334,9 @@ def get_news_catalyst(ticker):
 
 
 def check_dilution_risk(text):
-    text = str(text).lower()
+    text = (text or "").lower()
 
     danger_words = {
-        "public offering": "public offering",
-        "registered direct": "registered direct",
-        "direct offering": "direct offering",
-        "private placement": "private placement",
-        "securities purchase agreement": "securities purchase agreement",
-        "at-the-market": "ATM",
         "atm": "ATM",
         "shelf": "shelf registration",
         "s-1": "S-1",
@@ -372,15 +366,49 @@ def check_dilution_risk(text):
     return hits
 
 
-def score_mover(mover, catalyst_type, catalyst_text):
-    score = 0
-    reasons = []
-    risks = []
+for mover in movers:
 
-    gain = mover["gain"]
-    price = mover["price"]
-    volume = mover["volume"]
+    ticker = mover["ticker"]
 
+    catalyst_type = "unknown"
+    catalyst_text = ""
+
+    # 🧠 SCORE IT
+    data = score_mover(mover, catalyst_type, catalyst_text)
+
+    score = data["score"]
+    reasons = data["reasons"]
+    risks = data["risks"]
+
+    # 🚨 ALERT FILTER
+    if score >= 6:
+
+   emoji = "🔥" if score >= 8 else "🚨" if score >= 6 else "⚠️"
+
+    alert_data = {
+        "emoji": emoji,
+        "ticker": ticker,
+        "score": score,
+        "rank": len(results) + 1,
+
+        "price": data["price"],
+        "gain": data["gain"],
+        "volume": data["volume"],
+        "candle_vol": "N/A",
+
+        "catalyst": data["catalyst_type"],
+        "reasons": reasons,
+        "risks": risks,
+
+        "session": session,
+        "regime": "UNKNOWN"
+    }
+
+    message = build_alert(alert_data)
+    send_alert(message)
+
+    results.append(data)
+    # 🔥 GAIN SCORING
     if gain >= 100:
         score += 5
         reasons.append("100%+ gainer")
@@ -394,6 +422,7 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 2
         reasons.append("27%+ spike")
 
+    # 📊 VOLUME SCORING
     if volume >= 10_000_000:
         score += 3
         reasons.append("10M+ volume")
@@ -404,18 +433,19 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 1
         reasons.append("500k+ volume")
 
+    # 📰 CATALYST CHECK
     if catalyst_type not in ["none", "unknown"]:
         score += 2
         reasons.append("fresh news")
-
-    return score, reasons, risks
     else:
         risks.append("no clear fresh news")
 
+    # ⭐ STRONG CATALYST BONUS
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
         reasons.append(f"strong catalyst: {catalyst_type}")
 
+    # ⚠️ DILUTION CHECK
     dilution_hits = check_dilution_risk(catalyst_text)
 
     if dilution_hits:
@@ -429,11 +459,18 @@ def score_mover(mover, catalyst_type, catalyst_text):
             score -= 3
             risks.append("dilution risk: " + ", ".join(dilution_hits))
 
+    # ⚠️ LOW QUALITY FLAGS
+    if gain > 30 and volume < 1_000_000:
+        score -= 2
+        risks.append("low volume spike")
+
     if price < 1:
         risks.append("sub-$1 stock")
 
+    # 🎯 CLAMP SCORE (0–10)
     score = max(0, min(score, 10))
 
+    # 📦 FINAL OUTPUT
     return {
         "ticker": mover["ticker"],
         "price": price,
