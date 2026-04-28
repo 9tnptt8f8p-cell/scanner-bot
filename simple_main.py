@@ -683,43 +683,43 @@ for rank, result in enumerate(results, start=1):
 
     if early_momentum_alert:
         print(f"[EARLY] {ticker} building momentum", flush=True)
-    
-            if result["gain"] < 20:
-                continue
 
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
-            recent_vol = result.get("recent_volume", 0)
-            total_vol = result.get("total_candle_volume", 0)
+    if result["gain"] < 20 and not early_momentum_alert:
+        continue
 
-            volume_spike = (
-                recent_vol >= 200_000
-                and total_vol > 0
-                and recent_vol >= total_vol * 0.20
-            )
+    above_vwap = "Price above VWAP" in result.get("reasons", [])
+    recent_vol = result.get("recent_volume", 0)
+    total_vol = result.get("total_candle_volume", 0)
 
-            valid_early_alert = (
-                result["gain"] >= 20
-                and recent_vol >= 100_000
-                and above_vwap
-            )
+    volume_spike = (
+        recent_vol >= 200_000
+        and total_vol > 0
+        and recent_vol >= total_vol * 0.20
+    )
 
-            valid_runner_alert = (
-                result["gain"] >= ALERT_MIN_GAIN
-                and recent_vol >= 200_000
-                and above_vwap
-            )
+    valid_early_alert = (
+        result["gain"] >= 20
+        and recent_vol >= 100_000
+        and above_vwap
+    )
 
-            valid_emergency_runner_alert = (
-                result["gain"] >= 35
-                and total_vol >= 1_000_000
-            )
+    valid_runner_alert = (
+        result["gain"] >= ALERT_MIN_GAIN
+        and recent_vol >= 200_000
+        and above_vwap
+    )
 
-            should_alert = (
-    valid_early_alert
-    or valid_runner_alert
-    or valid_emergency_runner_alert
-    or early_momentum_alert
-)
+    valid_emergency_runner_alert = (
+        result["gain"] >= 35
+        and total_vol >= 1_000_000
+    )
+
+    should_alert = (
+        valid_early_alert
+        or valid_runner_alert
+        or valid_emergency_runner_alert
+        or early_momentum_alert
+    )
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
