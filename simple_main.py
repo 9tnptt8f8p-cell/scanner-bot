@@ -449,41 +449,36 @@ for mover in movers:
     catalyst_type = "unknown"
     catalyst_text = ""
 
-    # 🧠 SCORE IT
-    data = score_mover(mover, catalyst_type, catalyst_text)
+        # 🧠 SCORE IT
+        data = score_mover(mover, catalyst_type, catalyst_text)
 
-    score = data["score"]
-    reasons = data["reasons"]
-    risks = data["risks"]
+        score = data["score"]
+        reasons = data["reasons"]
+        risks = data["risks"]
 
-    # 🚨 ALERT
-    if score >= 6:
+        # 🚨 ALERT
+        if score >= 6:
+            emoji = "🔥" if score >= 8 else "🚨"
 
-        emoji = "🔥" if score >= 8 else "🚨"
+            alert_data = {
+                "emoji": emoji,
+                "ticker": ticker,
+                "score": score,
+                "rank": len(results) + 1,
+                "price": data["price"],
+                "gain": data["gain"],
+                "volume": data["volume"],
+                "candle_vol": "N/A",
+                "catalyst": data["catalyst_type"],
+                "reasons": reasons,
+                "risks": risks,
+                "session": session,
+                "regime": "UNKNOWN"
+            }
 
-        alert_data = {
-            "emoji": emoji,
-            "ticker": ticker,
-            "score": score,
-            "rank": len(results) + 1,
-
-            "price": data["price"],
-            "gain": data["gain"],
-            "volume": data["volume"],
-            "candle_vol": "N/A",
-
-            "catalyst": data["catalyst_type"],
-            "reasons": reasons,
-            "risks": risks,
-
-            "session": session,
-            "regime": "UNKNOWN"
-        }
-
-        message = build_alert(alert_data)
-        send_alert(message)
-
-        results.append(data)
+            message = build_alert(alert_data)
+            send_alert(message)
+            results.append(data)
 
         message = build_alert(alert_data)
         send_alert(message)
