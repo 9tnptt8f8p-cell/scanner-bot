@@ -725,32 +725,33 @@ def run_scanner():
                 and total_vol >= 1_000_000
             )
 
-            # ===== SECOND LEG + BREAKOUT BURST =====
+# ===== SECOND LEG + BREAKOUT BURST =====
 
-            price = result.get("price", 0)
-            gain = result.get("gain", 0)
-            vwap = result.get("vwap", 0)
+price = result.get("price", 0)
+gain = result.get("gain", 0)
+vwap = result.get("vwap", 0)
 
-            above_vwap = price > vwap
+above_vwap = price > vwap if vwap else "Price above VWAP" in result.get("reasons", [])
 
-            recent_high = result.get("high", price)
-            recent_vol = result.get("recent_volume", 0)
-            prev_vol = result.get("prev_volume", 0)
+recent_high = result.get("high", price)
+recent_vol = result.get("recent_volume", 0)
+prev_vol = result.get("prev_volume", 0)
 
-            volume_spike = recent_vol > (prev_vol * 1.5 if prev_vol > 0 else 0)
-            pullback = price < recent_high * 0.95
+volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
 
-            second_leg_alert = (
-                gain > 25
-                and above_vwap
-                and pullback
-            )
+second_leg_alert = (
+    ticker in second_leg_tracker
+    and not second_leg_tracker[ticker]["sent"]
+    and gain >= 25
+    and above_vwap
+    and price > second_leg_tracker[ticker]["high"] * 1.03
+)
 
-            breakout_burst_alert = (
-                gain > 25
-                and price > recent_high
-                and volume_spike
-            )
+breakout_burst_alert = (
+    gain >= 25
+    and price > recent_high
+    and volume_spike
+)
             
             # ===== ENTRY SETUP ALERTS =====
 
@@ -791,31 +792,53 @@ def run_scanner():
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
 
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+last_alert = alert_history.get(ticker, 0)
+cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            if should_alert and cooldown_done:
-                alert_tag = ""
+if should_alert and cooldown_done:
+    alert_tag = ""
 
-                if second_leg_alert:
-                    alert_tag = "\n\n🟢 SECOND LEG BUILDING"
+    if second_leg_alert:
+        alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
 
-                elif breakout_burst_alert:
-                    alert_tag = "\n\n🚀 BREAKOUT BURST"
-                elif vwap_reclaim_setup:
-                    alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
+    elif breakout_burst_alert:
+        alert_tag = "\n\n🚀 BREAKOUT BURST"
 
-                elif breakout_hold_setup:
-                    alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+    elif vwap_reclaim_setup:
+        alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
 
-                elif dip_buy_setup:
-                    alert_tag = "\n\n📈 DIP BUY SETUP"
+    elif breakout_hold_setup:
+        alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
 
-                sent = send_telegram(build_alert(result, rank) + alert_tag)
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = float(result.get("price", 0))
-                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+    elif dip_buy_setup:
+        alert_tag = "\n\n📈 DIP BUY SETUP"
+
+    sent = send_telegram(build_alert(result, rank) + alert_tag)
+
+    if sent:
+        alert_history[ticker] = now
+        runner_prices[ticker] = float(result.get("price", 0))
+
+    if sent:
+    alert_history[ticker] = now
+    runner_prices[ticker] = float(result.get("price", 0))
+
+
+    if ticker not in second_leg_tracker:
+        second_leg_tracker[ticker] = {
+            "high": price,
+            "sent": False
+        }
+
+    if second_leg_alert:
+        second_leg_tracker[ticker]["sent"] = True
+    else:
+        second_leg_tracker[ticker]["high"] = max(
+            second_leg_tracker[ticker]["high"],
+            price
+        )
+
+        print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
 
