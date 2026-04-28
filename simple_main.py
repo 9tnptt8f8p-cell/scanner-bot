@@ -458,7 +458,7 @@ def build_alert(result, rank):
 
     gain = result["gain"]
 
-  title = get_alert_title(result)
+    title = get_alert_title(result)
 
     return (
         f"{title}\n\n"
