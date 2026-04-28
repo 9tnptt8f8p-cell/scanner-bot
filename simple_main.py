@@ -659,7 +659,7 @@ def run_scanner():
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
 
-           if results:
+        if results:
             top_line = " | ".join(
                 f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
                 for i, r in enumerate(results[:10])
