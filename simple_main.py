@@ -14,7 +14,7 @@ load_dotenv()
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-
+second_leg_tracker = {}
 ET = ZoneInfo("America/New_York")
 
 MARKET_HOLIDAYS_2026 = {
@@ -877,18 +877,6 @@ if __name__ == "__main__":
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
 
-
-    web_thread = Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=port,
-            debug=False,
-            use_reloader=False
-        ),
-        daemon=True
-    )
-
-    web_thread.start()
 
     time.sleep(2)
 
