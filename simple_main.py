@@ -679,6 +679,8 @@ for rank, result in enumerate(results, start=1):
         and result.get("recent_volume", 0) >= 50_000
     )
 
+    title = get_alert_title(result)
+
     if early_momentum_alert:
         print(f"[EARLY] {ticker} building momentum", flush=True)
 
