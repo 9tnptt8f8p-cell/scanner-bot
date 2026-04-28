@@ -365,7 +365,6 @@ def check_dilution_risk(text):
 
     return hits
 
-
 def score_mover(mover, catalyst_type, catalyst_text):
     score = 0
     reasons = []
@@ -430,117 +429,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
 
     score = max(0, min(score, 10))
 
-    return {
-        "ticker": mover["ticker"],
-        "price": price,
-        "gain": gain,
-        "volume": volume,
-        "score": score,
-        "catalyst_type": catalyst_type,
-        "catalyst_text": catalyst_text,
-        "reasons": reasons,
-        "risks": risks
-    }
-        # 🔹 LOOP (inside run_scanner)
-        for mover in movers:
-            ticker = mover["ticker"]
-
-            catalyst_type = "unknown"
-            catalyst_text = ""
-
-            # 🧠 SCORE IT
-            data = score_mover(mover, catalyst_type, catalyst_text)
-
-            score = data["score"]
-            reasons = data["reasons"]
-            risks = data["risks"]
-
-            # 🚨 ALERT
-            if score >= 6:
-                emoji = "🔥" if score >= 8 else "🚨"
-
-                alert_data = {
-                    "emoji": emoji,
-                    "ticker": ticker,
-                    "score": score,
-                    "rank": len(results) + 1,
-                    "price": data["price"],
-                    "gain": data["gain"],
-                    "volume": data["volume"],
-                    "candle_vol": "N/A",
-                    "catalyst": data["catalyst_type"],
-                    "reasons": reasons,
-                    "risks": risks,
-                    "session": session,
-                    "regime": "UNKNOWN"
-                }
-
-                message = build_alert(alert_data)
-                send_alert(message)
-                results.append(data)
-    # 🔥 GAIN SCORING
-    if gain >= 100:
-        score += 5
-        reasons.append("100%+ gainer")
-    elif gain >= 75:
-        score += 4
-        reasons.append("75%+ gainer")
-    elif gain >= 50:
-        score += 3
-        reasons.append("50%+ gainer")
-    elif gain >= 27:
-        score += 2
-        reasons.append("27%+ spike")
-
-    # 📊 VOLUME SCORING
-    if volume >= 10_000_000:
-        score += 3
-        reasons.append("10M+ volume")
-    elif volume >= 2_000_000:
-        score += 2
-        reasons.append("2M+ volume")
-    elif volume >= 500_000:
-        score += 1
-        reasons.append("500k+ volume")
-
-    # 📰 CATALYST CHECK
-    if catalyst_type not in ["none", "unknown"]:
-        score += 2
-        reasons.append("fresh news")
-    else:
-        risks.append("no clear fresh news")
-
-    # ⭐ STRONG CATALYST BONUS
-    if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
-        score += 1
-        reasons.append(f"strong catalyst: {catalyst_type}")
-
-    # ⚠️ DILUTION CHECK
-    dilution_hits = check_dilution_risk(catalyst_text)
-
-    if dilution_hits:
-        if len(dilution_hits) >= 3:
-            score -= 5
-            risks.append("HIGH dilution risk: " + ", ".join(dilution_hits))
-        elif len(dilution_hits) == 2:
-            score -= 4
-            risks.append("MEDIUM/HIGH dilution risk: " + ", ".join(dilution_hits))
-        else:
-            score -= 3
-            risks.append("dilution risk: " + ", ".join(dilution_hits))
-
-    # ⚠️ LOW QUALITY FLAGS
-    if gain > 30 and volume < 1_000_000:
-        score -= 2
-        risks.append("low volume spike")
-
-    if price < 1:
-        risks.append("sub-$1 stock")
-
-    # 🎯 CLAMP SCORE (0–10)
-    score = max(0, min(score, 10))
-
-    # 📦 FINAL OUTPUT
     return {
         "ticker": mover["ticker"],
         "price": price,
@@ -688,7 +576,7 @@ def run_scanner():
     alert_history = {}
     runner_prices = {}
 
-    while True:
+     while True:
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
             time.sleep(60)
@@ -698,6 +586,7 @@ def run_scanner():
         session, session_notes = get_market_session()
         movers = get_percent_gainers()
         results = []
+
         for mover in movers:
             ticker = mover["ticker"]
 
@@ -732,6 +621,8 @@ def run_scanner():
                 message = build_alert(alert_data)
                 send_alert(message)
                 results.append(data)
+
+        time.sleep(SCAN_INTERVAL)
             emergency_runner = (
                 mover["gain"] >= 35
                 and mover["volume"] >= 1_000_000
