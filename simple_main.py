@@ -679,7 +679,7 @@ for rank, result in enumerate(results, start=1):
         and result.get("recent_volume", 0) >= 50_000
     )
 
-    title = get_alert_title(result)
+       title = get_alert_title(result)
 
     if early_momentum_alert:
         print(f"[EARLY] {ticker} building momentum", flush=True)
@@ -772,12 +772,7 @@ if __name__ == "__main__":
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
 
-print("[SCAN] Cycle complete", flush=True)
-print("[HEARTBEAT] alive", flush=True)
 
-time.sleep(SCAN_SLEEP)
-
-if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
 
     print(f"[WEB] starting server on port {port}", flush=True)
