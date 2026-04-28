@@ -659,120 +659,90 @@ def run_scanner():
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
 
-     if results:
-    top_line = " | ".join(
-        f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
-        for i, r in enumerate(results[:10])
-    )
-    print(f"[SCAN] Top ranked: {top_line}", flush=True)
-else:
-    print("[SCAN] No qualified gainers found", flush=True)
-
-now = time.time()
-
-for rank, result in enumerate(results, start=1):
-    ticker = result["ticker"]
-
-    early_momentum_alert = (
-        result["gain"] >= 15
-        and result.get("volume", 0) >= 500_000
-        and result.get("recent_volume", 0) >= 50_000
-    )
-
-       title = get_alert_title(result)
-
-    if early_momentum_alert:
-        print(f"[EARLY] {ticker} building momentum", flush=True)
-
-    if result["gain"] < 20 and not early_momentum_alert:
-        continue
-
-    above_vwap = "Price above VWAP" in result.get("reasons", [])
-    recent_vol = result.get("recent_volume", 0)
-    total_vol = result.get("total_candle_volume", 0)
-
-    volume_spike = (
-        recent_vol >= 200_000
-        and total_vol > 0
-        and recent_vol >= total_vol * 0.20
-    )
-
-    valid_early_alert = (
-        result["gain"] >= 20
-        and recent_vol >= 100_000
-        and above_vwap
-    )
-
-    valid_runner_alert = (
-        result["gain"] >= ALERT_MIN_GAIN
-        and recent_vol >= 200_000
-        and above_vwap
-    )
-
-    valid_emergency_runner_alert = (
-        result["gain"] >= 35
-        and total_vol >= 1_000_000
-    )
-
-    should_alert = (
-        valid_early_alert
-        or valid_runner_alert
-        or valid_emergency_runner_alert
-        or early_momentum_alert
-    )
-       
-           
-    last_alert = alert_history.get(ticker, 0)
-    cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-
-    if should_alert and cooldown_done:
-        sent = send_telegram(build_alert(result, rank))
-
-        if sent:
-            alert_history[ticker] = now
-            runner_prices[ticker] = float(result.get("price", 0))
-            print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+           if results:
+            top_line = " | ".join(
+                f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
+                for i, r in enumerate(results[:10])
+            )
+            print(f"[SCAN] Top ranked: {top_line}", flush=True)
         else:
-            print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+            print("[SCAN] No qualified gainers found", flush=True)
 
-    elif should_alert:
-        print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+        now = time.time()
 
-    else:
-        print(
-            f"[NO ALERT] #{rank} {ticker} blocked | "
-            f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
-            flush=True
-        )
+        for rank, result in enumerate(results, start=1):
+            ticker = result["ticker"]
 
-print("[SCAN] Cycle complete", flush=True)
-print("[HEARTBEAT] alive", flush=True)
+            early_momentum_alert = (
+                result["gain"] >= 15
+                and result.get("volume", 0) >= 500_000
+                and result.get("recent_volume", 0) >= 50_000
+            )
 
-time.sleep(SCAN_SLEEP)
+            if early_momentum_alert:
+                print(f"[EARLY] {ticker} building momentum", flush=True)
+
+            if result["gain"] < 20 and not early_momentum_alert:
+                continue
+
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
+            recent_vol = result.get("recent_volume", 0)
+            total_vol = result.get("total_candle_volume", 0)
+
+            valid_early_alert = (
+                result["gain"] >= 20
+                and recent_vol >= 100_000
+                and above_vwap
+            )
+
+            valid_runner_alert = (
+                result["gain"] >= ALERT_MIN_GAIN
+                and recent_vol >= 200_000
+                and above_vwap
+            )
+
+            valid_emergency_runner_alert = (
+                result["gain"] >= 35
+                and total_vol >= 1_000_000
+            )
+
+            should_alert = (
+                valid_early_alert
+                or valid_runner_alert
+                or valid_emergency_runner_alert
+                or early_momentum_alert
+            )
+
+            last_alert = alert_history.get(ticker, 0)
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+
+            if should_alert and cooldown_done:
+                sent = send_telegram(build_alert(result, rank))
+
+                if sent:
+                    alert_history[ticker] = now
+                    runner_prices[ticker] = float(result.get("price", 0))
+                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+                else:
+                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+
+            elif should_alert:
+                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+
+            else:
+                print(
+                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
+                    flush=True
+                )
+
+        print("[SCAN] Cycle complete", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
+
+        time.sleep(SCAN_SLEEP)
+
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-
-    print(f"[WEB] starting server on port {port}", flush=True)
-
-    web_thread = Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=port,
-            debug=False,
-            use_reloader=False
-        ),
-        daemon=True
-    )
-
-    web_thread.start()
-
-    time.sleep(2)
-
-    print("[BOOT] starting scanner", flush=True)
-    run_scanner()
-
-
     port = int(os.getenv("PORT", 10000))
 
     print(f"[WEB] starting server on port {port}", flush=True)
