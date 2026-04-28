@@ -569,6 +569,7 @@ def check_sec_offering_risk(ticker):
     except Exception as e:
         return False, f"SEC check error: {e}"
         
+    port = int(os.getenv("PORT", 10000))
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -599,19 +600,137 @@ def run_scanner():
                 catalyst_text=catalyst_text
             )
 
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
+            result["sec_note"] = sec_note
+
+            if sec_risk:
+                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
+                result["score"] -= 2
+
+            result["session"] = session
+            result["session_notes"] = session_notes
+
+            candles = get_alpaca_candles(ticker)
+
+            if not candles:
+                print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
+                candles = get_yahoo_candles(ticker)
+            else:
+                print(f"[DATA] {ticker} candles from Alpaca", flush=True)
+
+            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
+            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
+
+            result["recent_volume"] = recent_volume
+            result["total_candle_volume"] = total_candle_volume
+
+            if candles:
+                first_close = float(candles[0]["close"])
+                last_close = float(candles[-1]["close"])
+                result["candle_session_gain"] = (
+                    ((last_close - first_close) / first_close) * 100
+                    if first_close > 0 else 0
+                )
+            else:
+                result["candle_session_gain"] = 0
+
+            structure = analyze_structure(ticker, candles)
+            result["structure"] = structure
+            result["score"] += structure.get("structure_score", 0)
+            result["score"] = max(0, min(result["score"], 10))
+
+            result["risks"].extend(structure.get("risk_flags", []))
+            result["reasons"].extend(structure.get("reasons", []))
+
             results.append(result)
+            time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
-        for rank, result in enumerate(results, start=1):
-            # decide alert / send alert goes here
-            pass
+        regime, regime_notes = detect_market_regime(results)
 
+        for r in results:
+            r["market_regime"] = regime
+            r["regime_notes"] = regime_notes
+
+        if results:
+            top_line = " | ".join(
+                f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
+                for i, r in enumerate(results[:10])
+            )
+            print(f"[SCAN] Top ranked: {top_line}", flush=True)
+        else:
+            print("[SCAN] No qualified gainers found", flush=True)
+
+        now = time.time()
+
+        for rank, result in enumerate(results, start=1):
+            ticker = result["ticker"]
+
+            if result["gain"] < 20:
+                continue
+
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
+            recent_vol = result.get("recent_volume", 0)
+            total_vol = result.get("total_candle_volume", 0)
+
+            volume_spike = (
+                recent_vol >= 200_000
+                and total_vol > 0
+                and recent_vol >= total_vol * 0.20
+            )
+
+            valid_early_alert = (
+                result["gain"] >= 20
+                and recent_vol >= 100_000
+                and above_vwap
+            )
+
+            valid_runner_alert = (
+                result["gain"] >= ALERT_MIN_GAIN
+                and recent_vol >= 200_000
+                and above_vwap
+            )
+
+            valid_emergency_runner_alert = (
+                result["gain"] >= 35
+                and total_vol >= 1_000_000
+            )
+
+            should_alert = (
+                valid_early_alert
+                or valid_runner_alert
+                or valid_emergency_runner_alert
+            ) and volume_spike
+
+            last_alert = alert_history.get(ticker, 0)
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+
+            if should_alert and cooldown_done:
+                sent = send_telegram(build_alert(result, rank))
+
+                if sent:
+                    alert_history[ticker] = now
+                    runner_prices[ticker] = float(result.get("price", 0))
+                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+                else:
+                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+
+            elif should_alert:
+                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+
+            else:
+                print(
+                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
+                    flush=True
+                )
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
 
         time.sleep(SCAN_SLEEP)
-           
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
 
@@ -630,8 +749,6 @@ if __name__ == "__main__":
     web_thread.start()
 
     time.sleep(2)
-
-   
 
     print("[BOOT] starting scanner", flush=True)
     run_scanner()
