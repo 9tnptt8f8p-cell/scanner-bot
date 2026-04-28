@@ -366,6 +366,43 @@ def check_dilution_risk(text):
     return hits
 
 
+def score_mover(mover, catalyst_type, catalyst_text):
+    score = 0
+    reasons = []
+    risks = []
+
+    gain = mover["gain"]
+    price = mover["price"]
+    volume = mover["volume"]
+
+    if gain >= 27:
+        score += 2
+        reasons.append("27%+ spike")
+
+    if volume >= 500_000:
+        score += 1
+        reasons.append("volume present")
+
+    if catalyst_type not in ["none", "unknown"]:
+        score += 2
+        reasons.append("fresh news")
+    else:
+        risks.append("no clear fresh news")
+
+    score = max(0, min(score, 10))
+
+    return {
+        "ticker": mover["ticker"],
+        "price": price,
+        "gain": gain,
+        "volume": volume,
+        "score": score,
+        "catalyst_type": catalyst_type,
+        "catalyst_text": catalyst_text,
+        "reasons": reasons,
+        "risks": risks
+    }
+# 🔹 LOOP (inside run_scanner)
 for mover in movers:
 
     ticker = mover["ticker"]
@@ -373,12 +410,14 @@ for mover in movers:
     catalyst_type = "unknown"
     catalyst_text = ""
 
+    # 🧠 SCORE IT
     data = score_mover(mover, catalyst_type, catalyst_text)
 
     score = data["score"]
     reasons = data["reasons"]
     risks = data["risks"]
 
+    # 🚨 ALERT
     if score >= 6:
 
         emoji = "🔥" if score >= 8 else "🚨"
@@ -401,6 +440,11 @@ for mover in movers:
             "session": session,
             "regime": "UNKNOWN"
         }
+
+        message = build_alert(alert_data)
+        send_alert(message)
+
+        results.append(data)
 
         message = build_alert(alert_data)
         send_alert(message)
@@ -626,32 +670,31 @@ def run_scanner():
         session, session_notes = get_market_session()
         movers = get_percent_gainers()
         results = []
-
-        for mover in movers:
-            ticker = mover["ticker"]
         for mover in movers:
             ticker = mover["ticker"]
 
             catalyst_type = "unknown"
             catalyst_text = ""
 
-            score, reasons, risks = score_mover(
-                mover,
-                catalyst_type,
-                catalyst_text
-            )
+            data = score_mover(mover, catalyst_type, catalyst_text)
+
+            score = data["score"]
+            reasons = data["reasons"]
+            risks = data["risks"]
 
             if score >= 6:
+                emoji = "🔥" if score >= 8 else "🚨"
+
                 alert_data = {
-                    "emoji": "🚨",
+                    "emoji": emoji,
                     "ticker": ticker,
                     "score": score,
                     "rank": len(results) + 1,
-                    "price": mover["price"],
-                    "gain": mover["gain"],
-                    "volume": mover["volume"],
+                    "price": data["price"],
+                    "gain": data["gain"],
+                    "volume": data["volume"],
                     "candle_vol": "N/A",
-                    "catalyst": catalyst_type,
+                    "catalyst": data["catalyst_type"],
                     "reasons": reasons,
                     "risks": risks,
                     "session": session,
@@ -660,6 +703,7 @@ def run_scanner():
 
                 message = build_alert(alert_data)
                 send_alert(message)
+                results.append(data)
             emergency_runner = (
                 mover["gain"] >= 35
                 and mover["volume"] >= 1_000_000
