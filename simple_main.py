@@ -440,19 +440,25 @@ def score_mover(mover, catalyst_type, catalyst_text):
         "reasons": reasons,
         "risks": risks
     }
+def get_alert_title(result):
+    gain = result.get("gain", 0)
+    score = result.get("score", 0)
+    recent_vol = result.get("recent_volume", 0)
 
+    if gain >= 35 and score >= 8 and recent_vol >= 200_000:
+        return "🔥 MOMENTUM RUNNER"
+
+    if gain >= 20 and score >= 6 and recent_vol >= 100_000:
+        return "🚨 BUILDING MOMENTUM"
+
+    return "⚠️ EARLY SPIKE"
 def build_alert(result, rank):
     reasons = ", ".join(result.get("reasons", [])) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
     gain = result["gain"]
 
-    if gain >= 27:
-        title = "🔥 RUNNER ALERT"
-    elif gain >= 20:
-        title = "🚨 BUILDING MOMENTUM"
-    else:
-        title = "⚠️ EARLY SPIKE"
+  title = get_alert_title(result)
 
     return (
         f"{title}\n\n"
