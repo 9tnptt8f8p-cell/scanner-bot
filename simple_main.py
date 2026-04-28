@@ -763,7 +763,7 @@ def run_scanner():
                 gain >= 20
                 and price >= recent_high * 0.98
                 and recent_vol >= 200_000
-            )
+            
 
             dip_buy_setup = (
                 gain >= 20
