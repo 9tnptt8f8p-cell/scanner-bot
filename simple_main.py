@@ -752,8 +752,15 @@ def run_scanner():
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
             if should_alert and cooldown_done:
-                sent = send_telegram(build_alert(result, rank))
+                alert_tag = ""
 
+                if second_leg_alert:
+                    alert_tag = "\n\n🟢 SECOND LEG BUILDING"
+
+                elif breakout_burst_alert:
+                    alert_tag = "\n\n🚀 BREAKOUT BURST"
+
+                sent = send_telegram(build_alert(result, rank) + alert_tag)
                 if sent:
                     alert_history[ticker] = now
                     runner_prices[ticker] = float(result.get("price", 0))
