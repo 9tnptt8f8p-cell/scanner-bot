@@ -576,64 +576,20 @@ def run_scanner():
     alert_history = {}
     runner_prices = {}
 
-     while True:
+    while True:
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
             time.sleep(60)
             continue
 
         print("[SCAN] Market active — running scan", flush=True)
+
         session, session_notes = get_market_session()
         movers = get_percent_gainers()
         results = []
 
         for mover in movers:
             ticker = mover["ticker"]
-
-            catalyst_type = "unknown"
-            catalyst_text = ""
-
-            data = score_mover(mover, catalyst_type, catalyst_text)
-
-            score = data["score"]
-            reasons = data["reasons"]
-            risks = data["risks"]
-
-            if score >= 6:
-                emoji = "🔥" if score >= 8 else "🚨"
-
-                alert_data = {
-                    "emoji": emoji,
-                    "ticker": ticker,
-                    "score": score,
-                    "rank": len(results) + 1,
-                    "price": data["price"],
-                    "gain": data["gain"],
-                    "volume": data["volume"],
-                    "candle_vol": "N/A",
-                    "catalyst": data["catalyst_type"],
-                    "reasons": reasons,
-                    "risks": risks,
-                    "session": session,
-                    "regime": "UNKNOWN"
-                }
-
-                message = build_alert(alert_data)
-                send_alert(message)
-                results.append(data)
-
-        time.sleep(SCAN_INTERVAL)
-            emergency_runner = (
-                mover["gain"] >= 35
-                and mover["volume"] >= 1_000_000
-            )
-
-            if emergency_runner:
-                print(
-                    f"[EMERGENCY QUALIFIED] {ticker} | "
-                    f"gain {mover['gain']:.1f}% | vol {mover['volume']:,}",
-                    flush=True
-                )
 
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
@@ -643,178 +599,19 @@ def run_scanner():
                 catalyst_text=catalyst_text
             )
 
-            sec_risk, sec_note = check_sec_offering_risk(ticker)
-            result["sec_note"] = sec_note
-
-            if sec_risk:
-                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
-                result["score"] -= 2
-
-            if catalyst_text:
-                text = catalyst_text.lower()
-                if any(word in text for word in ["offering", "warrant", "atm", "dilution", "shelf"]):
-                    result["risks"].append("⚠️ possible dilution")
-                    result["score"] -= 2
-
-            result["session"] = session
-            result["session_notes"] = session_notes
-
-            candles = get_alpaca_candles(ticker)
-
-            if not candles:
-                print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
-                candles = get_yahoo_candles(ticker)
-            else:
-                print(f"[DATA] {ticker} candles from Alpaca", flush=True)
-
-            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
-            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
-
-            result["recent_volume"] = recent_volume
-            result["total_candle_volume"] = total_candle_volume
-
-            if candles:
-                first_close = float(candles[0]["close"])
-                last_close = float(candles[-1]["close"])
-                candle_session_gain = ((last_close - first_close) / first_close) * 100 if first_close > 0 else 0
-            else:
-                candle_session_gain = 0
-
-            result["candle_session_gain"] = candle_session_gain
-
-            if result.get("session") == "PREMARKET":
-                if recent_volume < 200000:
-                    result["risks"].append(f"low premarket candle volume: {recent_volume:,}")
-
-                if candle_session_gain < 15:
-                    result["risks"].append(f"only up {candle_session_gain:.1f}% this session")
-
-            structure = analyze_structure(ticker, candles)
-            result["structure"] = structure
-            result["score"] += structure["structure_score"]
-            result["score"] = max(0, min(result["score"], 10))
-
-            if structure["risk_flags"]:
-                result["risks"].extend(structure["risk_flags"])
-
-            if structure["reasons"]:
-                result["reasons"].extend(structure["reasons"])
-
             results.append(result)
-
-            time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
-        regime, regime_notes = detect_market_regime(results)
-
-        for r in results:
-            r["market_regime"] = regime
-            r["regime_notes"] = regime_notes
-
-        if results:
-            top_line = " | ".join(
-                [
-                    f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
-                    for i, r in enumerate(results[:10])
-                ]
-            )
-            print(f"[SCAN] Top ranked: {top_line}", flush=True)
-        else:
-            print("[SCAN] No qualified gainers found", flush=True)
-
-        now = time.time()
-        alerts_sent_this_cycle = 0
-
         for rank, result in enumerate(results, start=1):
+            # decide alert / send alert goes here
+            pass
 
-            ticker = result["ticker"]
-            price = float(result.get("price", 0))
-
-            if result["gain"] < 20:
-                continue
-
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
-
-            recent_vol = result.get("recent_volume", 0)
-            total_vol = result.get("total_candle_volume", 0)
-
-            volume_spike = (
-                recent_vol >= 200000
-                and total_vol > 0
-                and recent_vol >= total_vol * 0.20
-            )
-
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS 
-            
-            valid_early_alert = (
-                result["gain"] >= 20
-                and result.get("recent_volume", 0) >= 100000
-                and above_vwap
-            )
-
-            valid_building_alert = (
-                result["gain"] >= 20
-                and result.get("recent_volume", 0) >= 150000
-                and above_vwap
-            )
-
-            valid_runner_alert = (
-                result["gain"] >= ALERT_MIN_GAIN
-                and result.get("recent_volume", 0) >= 200000
-                and above_vwap
-            )
-
-            valid_emergency_runner_alert = (
-                result["gain"] >= 35
-                and result.get("total_candle_volume", 0) >= 1_000_000
-            )
-            should_alert = (
-                (
-                    valid_runner_alert
-                    or valid_building_alert
-                    or valid_early_alert
-                    or valid_emergency_runner_alert
-                )
-                and volume_spike
-            )
-
-            if should_alert and cooldown_done:
-                sent = send_telegram(build_alert(result, rank))
-
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = price
-                    alerts_sent_this_cycle += 1
-                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
-                else:
-                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
-
-            elif should_alert:
-                left = int(ALERT_COOLDOWN_SECONDS - (now - last_alert))
-                print(f"[NO ALERT] #{rank} {ticker} cooldown {left}s", flush=True)
-
-            else:
-                print(
-                    f"[NO ALERT] #{rank} {ticker} blocked | "
-                    f"gain={result['gain']:.1f}% "
-                    f"recent_vol={result.get('recent_volume', 0):,}",
-                    flush=True
-                )
-    
-                
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
 
         time.sleep(SCAN_SLEEP)
-
-
-
-
-  
-
-
+           
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
 
