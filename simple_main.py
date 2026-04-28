@@ -689,7 +689,7 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
 
-                  valid_early_alert = (
+            valid_early_alert = (
                 result["gain"] >= 20
                 and recent_vol >= 100_000
                 and above_vwap
