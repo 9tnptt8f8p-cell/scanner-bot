@@ -750,6 +750,26 @@ def run_scanner():
                 gain > 25
                 and price > recent_high
                 and volume_spike
+                            # ===== ENTRY SETUP ALERTS =====
+
+            vwap_reclaim_setup = (
+                gain >= 15
+                and above_vwap
+                and recent_vol >= 150_000
+            )
+
+            breakout_hold_setup = (
+                gain >= 20
+                and price >= recent_high * 0.98
+                and recent_vol >= 200_000
+            )
+
+            dip_buy_setup = (
+                gain >= 20
+                and above_vwap
+                and pullback
+                and recent_vol >= 150_000
+            )
             )
 
             should_alert = (
@@ -759,6 +779,9 @@ def run_scanner():
                 or early_momentum_alert
                 or second_leg_alert
                 or breakout_burst_alert
+                or vwap_reclaim_setup
+                or breakout_hold_setup
+                or dip_buy_setup
             )
 
             if second_leg_alert:
@@ -778,6 +801,14 @@ def run_scanner():
 
                 elif breakout_burst_alert:
                     alert_tag = "\n\n🚀 BREAKOUT BURST"
+                                    elif vwap_reclaim_setup:
+                    alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
+
+                elif breakout_hold_setup:
+                    alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+
+                elif dip_buy_setup:
+                    alert_tag = "\n\n📈 DIP BUY SETUP"
 
                 sent = send_telegram(build_alert(result, rank) + alert_tag)
                 if sent:
