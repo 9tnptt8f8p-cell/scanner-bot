@@ -771,8 +771,7 @@ def run_scanner():
                 and pullback
                 and recent_vol >= 150_000
             )
-            )
-
+            
             should_alert = (
                 valid_early_alert
                 or valid_runner_alert
