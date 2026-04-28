@@ -672,7 +672,11 @@ def run_scanner():
 
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
-
+early_momentum_alert = (
+    result["gain"] >= 15
+    and result.get("volume", 0) >= 500_000
+    and result.get("recent_volume", 0) >= 50_000
+)
             if result["gain"] < 20:
                 continue
 
@@ -704,11 +708,11 @@ def run_scanner():
             )
 
             should_alert = (
-                valid_early_alert
-                or valid_runner_alert
-                or valid_emergency_runner_alert
-            ) and volume_spike
-
+    valid_early_alert
+    or valid_runner_alert
+    or valid_emergency_runner_alert
+    or early_momentum_alert
+)
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
