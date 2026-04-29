@@ -1026,7 +1026,7 @@ def run_scanner():
 
         now = time.time()
 
-  for rank, result in enumerate(results, start=1):
+for rank, result in enumerate(results, start=1):
     ticker = result["ticker"]
     price = result.get("price", 0)
     recent_vol = result.get("recent_volume", 0)
@@ -1045,6 +1045,7 @@ def run_scanner():
     # --- NEWS QUALITY FILTER ---
     headline = result.get("catalyst_text", "")
     news_quality = classify_news_quality(headline)
+
     if news_quality == "STRONG":
         result["catalyst_type"] = "⚡ STRONG NEWS"
 
@@ -1061,12 +1062,13 @@ def run_scanner():
             r for r in result.get("reasons", [])
             if "fresh news" not in r.lower()
         ]
-            # ===== TRASH FILTERS =====
 
-            # Price range: keep $0.50 to $500
-            if price < 0.5 or price > 500:
-                print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
-                continue
+    # ===== TRASH FILTERS =====
+
+    # Price range: keep $0.50 to $500
+    if price < 0.5 or price > 500:
+        print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
+        continue
             # Market cap filter
             if market_cap == 0:
                 print(f"[WARN] {ticker} no market cap data — allowing through", flush=True)
