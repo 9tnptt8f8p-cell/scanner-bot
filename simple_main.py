@@ -197,7 +197,7 @@ def get_float_shares(ticker):   # 👈 NO INDENT (top level)
     except Exception as e:
         print(f"[FLOAT ERROR] {ticker}: {e}", flush=True)
         return 0
-        def get_finnhub_profile(ticker):
+def get_finnhub_profile(ticker):
     if not FINNHUB_API_KEY:
         return 0, 0
 
