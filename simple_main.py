@@ -939,17 +939,19 @@ def run_scanner():
                 and pullback
                 and recent_vol >= 150_000
             )
+            trend_builder_alert = result.get("trend_builder_alert", False)
 
             should_alert = (
-                valid_early_alert
-                or valid_runner_alert
-                or valid_emergency_runner_alert
-                or early_momentum_alert
-                or second_leg_alert
-                or breakout_burst_alert
-                or vwap_reclaim_setup
-                or breakout_hold_setup
-                or dip_buy_setup
+            valid_early_alert
+            or valid_runner_alert
+            or valid_emergency_runner_alert
+            or early_momentum_alert
+            or trend_builder_alert
+            or second_leg_alert
+            or breakout_burst_alert
+            or vwap_reclaim_setup
+            or breakout_hold_setup
+            or dip_buy_setup
             )
 
             if second_leg_alert:
