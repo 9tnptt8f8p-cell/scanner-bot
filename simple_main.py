@@ -758,19 +758,19 @@ def run_scanner():
                 mover=mover,
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
-            )
+                       )
             market_cap = get_yahoo_market_cap(ticker)
             result["market_cap"] = market_cap
 
-           if market_cap:
-           result["reasons"].append(f"Market cap: ${market_cap:,}")
+            if market_cap:
+                result["reasons"].append(f"Market cap: ${market_cap:,}")
 
-           sec_risk, sec_note = check_sec_offering_risk(ticker)
-           result["sec_note"] = sec_note
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
+            result["sec_note"] = sec_note
 
-           if sec_risk:
-           result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
-           result["score"] -= 2
+            if sec_risk:
+                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
+                result["score"] -= 2
 
             result["session"] = session
             result["session_notes"] = session_notes
