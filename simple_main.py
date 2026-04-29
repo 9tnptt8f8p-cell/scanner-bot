@@ -181,7 +181,10 @@ def get_percent_gainers():
 
                 if gain < SCAN_MIN_GAIN:
                     continue
-
+                    
+                if volume < MIN_VOLUME:
+                    continue
+                    
                 if price > MAX_PRICE:
                     continue
 
