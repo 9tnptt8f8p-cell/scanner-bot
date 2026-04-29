@@ -1025,6 +1025,9 @@ for rank, result in enumerate(results, start=1):
     market_cap = result.get("market_cap", 0)
     float_shares = result.get("float", 0)
 
+    if market_cap == 0:
+        continue
+
     # --- RISK HOOK ---
     filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
     filing_date = result.get("filing_date", None)
