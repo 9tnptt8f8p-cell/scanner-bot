@@ -1154,6 +1154,22 @@ for rank, result in enumerate(results, start=1):
                     "⚠️ Dilution language: " + ", ".join(dilution_hits[:3])
                 )
                 result["score"] = max(0, result.get("score", 0) - 1)
+           # ===== DILUTION SEVERITY =====
+
+            recent_filing = result.get("filing_date", "")
+
+            high_risk_words = [
+                "atm offering",
+                "public offering",
+                "registered direct",
+                "securities purchase agreement"
+            ]
+
+            high_risk_hit = any(word in dilution_text for word in high_risk_words)
+
+            if dilution_hits and high_risk_hit:
+                result.setdefault("risks", []).append("🚨 HIGH DILUTION RISK")
+                result["score"] = max(0, result.get("score", 0) - 2)
 
             # ===== SECOND LEG + BREAKOUT BURST =====
 
