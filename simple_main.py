@@ -131,142 +131,79 @@ MIN_VOLUME = 50000
 MAX_PRICE = 80
 
 def get_percent_gainers():
-    # FINVIZ first, Yahoo backup
-    finviz_url = "https://finviz.com/screener.ashx?v=111&s=ta_topgainers"
+    # Yahoo expanded scanner: day gainers + most actives
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
 
-    try:
-        r = requests.get(finviz_url, headers=headers, timeout=10)
-        html = r.text
+    screeners = ["day_gainers", "most_actives"]
+    all_movers = {}
 
-        movers = []
+    for screener in screeners:
+        params = {
+            "scrIds": screener,
+            "count": 100
+        }
 
-        # Split by Finviz quote links
-        parts = html.split('quote.ashx?t=')
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            data = r.json()
 
-        for part in parts[1:]:
-            try:
-                ticker = part.split('&')[0].split('"')[0].upper().strip()
+            quotes = (
+                data.get("finance", {})
+                .get("result", [{}])[0]
+                .get("quotes", [])
+            )
 
-                if not ticker or "." in ticker or "-" in ticker:
+            for q in quotes:
+                ticker = q.get("symbol")
+                price = q.get("regularMarketPrice")
+                gain = q.get("regularMarketChangePercent")
+                volume = q.get("regularMarketVolume", 0)
+
+                if not ticker:
                     continue
 
-                # Get the row this ticker lives in
-                row = part.split("</tr>")[0]
+                if "." in ticker or "-" in ticker:
+                    continue
 
-                # Remove commas and dollar signs
-                clean = row.replace(",", "").replace("$", "")
+                try:
+                    price = float(price or 0)
+                    gain = float(gain or 0)
+                    volume = int(volume or 0)
+                except Exception:
+                    continue
 
-                # Find percent change
-                gain = None
-                for piece in clean.split(">"):
-                    text = piece.split("<")[0].strip()
-                    if text.endswith("%"):
-                        try:
-                            gain = float(text.replace("%", ""))
-                            break
-                        except:
-                            pass
-
-                if gain is None:
+                if price <= 0:
                     continue
 
                 if gain < SCAN_MIN_GAIN:
                     continue
 
-                movers.append({
+                if price > MAX_PRICE:
+                    continue
+
+                # keep best data if duplicate
+                all_movers[ticker] = {
                     "ticker": ticker,
-                    "price": 0,
+                    "price": price,
                     "gain": gain,
-                    "volume": 0
-                })
+                    "volume": volume
+                }
 
-            except Exception:
-                continue
+        except Exception as e:
+            print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
 
-        movers = movers[:MAX_GAINERS]
+    movers = list(all_movers.values())
 
-        if movers:
-            print(f"[FINVIZ] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
-            print("[FINVIZ] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
-            return movers
+    movers.sort(key=lambda x: x["gain"], reverse=True)
 
-        print("[FINVIZ] No movers parsed — falling back to Yahoo", flush=True)
+    print(f"[YAHOO EXPANDED] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
+    print("[YAHOO EXPANDED] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
 
-    except Exception as e:
-        print(f"[FINVIZ ERROR] {e} — falling back to Yahoo", flush=True)
-
-    # ===== YAHOO BACKUP =====
-    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-
-    params = {
-        "scrIds": "day_gainers",
-        "count": MAX_GAINERS
-    }
-
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        data = r.json()
-
-        quotes = (
-            data.get("finance", {})
-            .get("result", [{}])[0]
-            .get("quotes", [])
-        )
-
-        movers = []
-
-        for q in quotes:
-            ticker = q.get("symbol")
-            price = q.get("regularMarketPrice")
-            gain = q.get("regularMarketChangePercent")
-            volume = q.get("regularMarketVolume", 0)
-
-            if not ticker:
-                continue
-
-            if "." in ticker or "-" in ticker:
-                continue
-
-            try:
-                price = float(price or 0)
-                gain = float(gain or 0)
-                volume = int(volume or 0)
-            except Exception:
-                continue
-
-            if price <= 0:
-                continue
-
-            if gain < SCAN_MIN_GAIN:
-                continue
-
-            if volume < MIN_VOLUME:
-                continue
-
-            if price > MAX_PRICE:
-                continue
-
-            movers.append({
-                "ticker": ticker,
-                "price": price,
-                "gain": gain,
-                "volume": volume
-            })
-
-        movers.sort(key=lambda x: x["gain"], reverse=True)
-
-        print(f"[YAHOO BACKUP] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
-        print("[YAHOO BACKUP] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
-
-        return movers
-
-    except Exception as e:
-        print(f"[GAINERS ERROR] {e}", flush=True)
-        return []
+    return movers[:MAX_GAINERS]
 
 def get_yahoo_candles(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
