@@ -809,16 +809,16 @@ def run_scanner():
             trend_builder_alert = is_trend_builder(result, candles)
             result["trend_builder_alert"] = trend_builder_alert
 
-       if trend_builder_alert:
-          result["score"] += 2
-          result["score"] = max(0, min(result["score"], 10))
-          result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
-          results.append(result)
-          time.sleep(0.5)
+            if trend_builder_alert:
+            result["score"] += 2
+            result["score"] = max(0, min(result["score"], 10))
+            result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
+            results.append(result)
+            time.sleep(0.5)
 
-        results.sort(key=lambda x: x["score"], reverse=True)
+            results.sort(key=lambda x: x["score"], reverse=True)
 
-        regime, regime_notes = detect_market_regime(results)
+            regime, regime_notes = detect_market_regime(results)
 
         for r in results:
             r["market_regime"] = regime
@@ -964,22 +964,25 @@ def run_scanner():
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
             if should_alert and cooldown_done:
-                alert_tag = ""
+               alert_tag = ""
 
-                if second_leg_alert:
-                    alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
+            if trend_builder_alert:
+               alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
 
-                elif breakout_burst_alert:
-                    alert_tag = "\n\n🚀 BREAKOUT BURST"
+            elif second_leg_alert:
+               alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
 
-                elif vwap_reclaim_setup:
-                    alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
+            elif  breakout_burst_alert:
+                alert_tag = "\n\n🚀 BREAKOUT BURST"
 
-                elif breakout_hold_setup:
-                    alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+            elif  vwap_reclaim_setup:
+                alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
 
-                elif dip_buy_setup:
-                    alert_tag = "\n\n📈 DIP BUY SETUP"
+            elif breakout_hold_setup:
+                 alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+
+            elif dip_buy_setup:
+                 alert_tag = "\n\n📈 DIP BUY SETUP"
 
                 sent = send_telegram(build_alert(result, rank) + alert_tag)
 
