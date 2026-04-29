@@ -855,8 +855,12 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
                 continue
 
-            # Market cap: allow up to $1B
-            if market_cap and market_cap > 1_000_000_000:
+            # Market cap filter
+            if market_cap == 0:
+                print(f"[FILTER] {ticker} skipped — no market cap data", flush=True)
+                continue
+
+            if market_cap > 1_000_000_000:
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
 
