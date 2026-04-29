@@ -144,69 +144,39 @@ def get_percent_gainers():
 
         movers = []
 
-        rows = html.split("<tr")[1:]
+        # Split by Finviz quote links
+        parts = html.split('quote.ashx?t=')
 
-        for row in rows:
-            if "quote.ashx?t=" not in row:
-                continue
-
+        for part in parts[1:]:
             try:
-                ticker = row.split("quote.ashx?t=")[1].split("&")[0].upper()
+                ticker = part.split('&')[0].split('"')[0].upper().strip()
 
-                # Basic HTML cleanup
-                cells = row.split("<td")[1:]
-                clean_cells = []
-
-                for cell in cells:
-                    value = cell.split(">")[-1].split("<")[0]
-                    value = value.replace("&nbsp;", "").replace("$", "").replace(",", "").strip()
-                    clean_cells.append(value)
-
-                # Finviz v=111 rough columns:
-                # ticker usually 1, price near end, change near end, volume near end
-                price = None
-                gain = None
-                volume = None
-
-                for value in clean_cells:
-                    if "%" in value:
-                        try:
-                            gain = float(value.replace("%", ""))
-                        except:
-                            pass
-
-                nums = []
-                for value in clean_cells:
-                    try:
-                        nums.append(float(value))
-                    except:
-                        pass
-
-                # Safer fallback from row text
-                if gain is None:
+                if not ticker or "." in ticker or "-" in ticker:
                     continue
 
-                # Find price/volume from known positions can be messy, so use broad parse
-                raw_parts = row.replace(",", "").replace("$", "").split(">")
+                # Get the row this ticker lives in
+                row = part.split("</tr>")[0]
 
-                for part in raw_parts:
-                    text = part.split("<")[0].strip()
+                # Remove commas and dollar signs
+                clean = row.replace(",", "").replace("$", "")
 
-                    if not text:
-                        continue
-
+                # Find percent change
+                gain = None
+                for piece in clean.split(">"):
+                    text = piece.split("<")[0].strip()
                     if text.endswith("%"):
                         try:
                             gain = float(text.replace("%", ""))
+                            break
                         except:
                             pass
 
-                # Fallback: use Yahoo later if Finviz parsing fails
-                # Skip bad parsed rows
-                if gain is None or gain < SCAN_MIN_GAIN:
+                if gain is None:
                     continue
 
-                # Let Finnhub later confirm price/gain, so Finviz only discovers ticker
+                if gain < SCAN_MIN_GAIN:
+                    continue
+
                 movers.append({
                     "ticker": ticker,
                     "price": 0,
