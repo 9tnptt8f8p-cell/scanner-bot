@@ -763,10 +763,13 @@ def run_scanner():
                result["reasons"].append(f"Market cap: ${market_cap:,}")
                sec_risk, sec_note = check_sec_offering_risk(ticker)
                result["sec_note"] = sec_note
-
+                
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
+            result["sec_note"] = sec_note
+            
             if sec_risk:
-                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
-                result["score"] -= 2
+            result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
+            result["score"] -= 2
 
             result["session"] = session
             result["session_notes"] = session_notes
