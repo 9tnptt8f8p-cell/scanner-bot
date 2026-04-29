@@ -1044,7 +1044,7 @@ for rank, result in enumerate(results, start=1):
 
     # --- NEWS QUALITY FILTER ---
     headline = result.get("catalyst_text", "")
-    news_quality = classify_news_quality(headline)
+    news_quality = classify_news_quality(result.get("catalyst_text", ""))
 
     if news_quality == "STRONG":
         result["catalyst_type"] = "⚡ STRONG NEWS"
