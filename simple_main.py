@@ -50,7 +50,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
-MIN_GAIN = 20
+MIN_GAIN = 12
 SCAN_MIN_GAIN = MIN_GAIN
 SCAN_SLEEP = 180
 ALERT_COOLDOWN_SECONDS = 1800
@@ -939,7 +939,7 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
             early_momentum_alert = (
-                result["gain"] >= 15
+                result["gain"] >= 12
                 and result.get("volume", 0) >= 500_000
                 and result.get("recent_volume", 0) >= 50_000
             )
@@ -955,7 +955,7 @@ def run_scanner():
             total_vol = result.get("total_candle_volume", 0)
 
             valid_early_alert = (
-                result["gain"] >= 20
+                result["gain"] >= 15
                 and recent_vol >= 100_000
                 and above_vwap
             )
