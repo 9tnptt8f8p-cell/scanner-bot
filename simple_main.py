@@ -733,11 +733,11 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
-    for mover in movers:
-        sec_risk = False
-        sec_note = ""
+        for mover in movers:
+            sec_risk = False
+            sec_note = ""
 
-        ticker = mover["ticker"]
+            ticker = mover["ticker"]
 
             # 🔥 Finnhub quote confirmation
             finnhub_quote = get_finnhub_quote(ticker)
@@ -748,17 +748,18 @@ def run_scanner():
                 print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
             else:
                 print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
- 
-            if mover.get("volume", 0) == 0:
-               mover["volume"] = 500_000
 
-            # Continue normal flow
+            if mover.get("volume", 0) == 0:
+                mover["volume"] = 500_000
+
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
+
             result = score_mover(
                 mover=mover,
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
-                       )
+            )
+
             market_cap = get_yahoo_market_cap(ticker)
             result["market_cap"] = market_cap
 
@@ -788,12 +789,11 @@ def run_scanner():
 
             result["recent_volume"] = recent_volume
             result["total_candle_volume"] = total_candle_volume
-            
+
             if candles:
-            result["high"] = max(float(c["high"]) for c in candles[-10:])
-            result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
-            
-            if candles:
+                result["high"] = max(float(c["high"]) for c in candles[-10:])
+                result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
+
                 first_close = float(candles[0]["close"])
                 last_close = float(candles[-1]["close"])
                 result["candle_session_gain"] = (
@@ -810,19 +810,21 @@ def run_scanner():
 
             result["risks"].extend(structure.get("risk_flags", []))
             result["reasons"].extend(structure.get("reasons", []))
+
             trend_builder_alert = is_trend_builder(result, candles)
             result["trend_builder_alert"] = trend_builder_alert
 
             if trend_builder_alert:
-            result["score"] += 2
-            result["score"] = max(0, min(result["score"], 10))
-            result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
+                result["score"] += 2
+                result["score"] = max(0, min(result["score"], 10))
+                result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
+
             results.append(result)
             time.sleep(0.5)
 
-            results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: x["score"], reverse=True)
 
-            regime, regime_notes = detect_market_regime(results)
+        regime, regime_notes = detect_market_regime(results)
 
         for r in results:
             r["market_regime"] = regime
