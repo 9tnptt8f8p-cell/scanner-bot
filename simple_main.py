@@ -762,7 +762,8 @@ def run_scanner():
 
             market_cap = get_yahoo_market_cap(ticker)
             result["market_cap"] = market_cap
-
+            print(f"[MARKET CAP] {ticker}: {market_cap}", flush=True)
+            
             if market_cap:
                 result["reasons"].append(f"Market cap: ${market_cap:,}")
 
