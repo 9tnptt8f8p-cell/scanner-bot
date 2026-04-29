@@ -197,6 +197,32 @@ def get_float_shares(ticker):   # 👈 NO INDENT (top level)
     except Exception as e:
         print(f"[FLOAT ERROR] {ticker}: {e}", flush=True)
         return 0
+        def get_finnhub_profile(ticker):
+    if not FINNHUB_API_KEY:
+        return 0, 0
+
+    url = "https://finnhub.io/api/v1/stock/profile2"
+
+    params = {
+        "symbol": ticker,
+        "token": FINNHUB_API_KEY
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+
+        market_cap_millions = float(data.get("marketCapitalization", 0) or 0)
+        share_outstanding_millions = float(data.get("shareOutstanding", 0) or 0)
+
+        market_cap = int(market_cap_millions * 1_000_000)
+        float_shares = int(share_outstanding_millions * 1_000_000)
+
+        return market_cap, float_shares
+
+    except Exception as e:
+        print(f"[FINNHUB PROFILE ERROR] {ticker}: {e}", flush=True)
+        return 0, 0
 def get_percent_gainers():
     # Yahoo expanded scanner: day gainers + most actives
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
@@ -792,12 +818,13 @@ def run_scanner():
                 catalyst_text=catalyst_text
             )
 
-            market_cap = get_yahoo_market_cap(ticker)
+            market_cap, float_shares = get_finnhub_profile(ticker)
+
             result["market_cap"] = market_cap
-            float_shares = get_float_shares(ticker)
             result["float"] = float_shares
-            print(f"[FLOAT] {ticker}: {float_shares}", flush=True)
+
             print(f"[MARKET CAP] {ticker}: {market_cap}", flush=True)
+            print(f"[FLOAT] {ticker}: {float_shares}", flush=True)
             
             if market_cap:
                 result["reasons"].append(f"Market cap: ${market_cap:,}")
