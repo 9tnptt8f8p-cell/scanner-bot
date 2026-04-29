@@ -602,6 +602,75 @@ def detect_market_regime(results):
 
     return "MIXED", ["some setups but inconsistent", "only take A+ charts"]
     
+    def ema(values, period):
+    if len(values) < period:
+        return None
+
+    k = 2 / (period + 1)
+    ema_value = values[0]
+
+    for price in values[1:]:
+        ema_value = price * k + ema_value * (1 - k)
+
+    return ema_value
+
+
+def higher_lows_forming(candles, count=4):
+    if len(candles) < count:
+        return False
+
+    lows = [float(c["low"]) for c in candles[-count:]]
+
+    return all(lows[i] >= lows[i - 1] for i in range(1, len(lows)))
+
+
+def is_big_upper_wick(candle):
+    high = float(candle["high"])
+    low = float(candle["low"])
+    close = float(candle["close"])
+
+    full_range = high - low
+    upper_wick = high - close
+
+    if full_range <= 0:
+        return False
+
+    return upper_wick / full_range >= 0.45
+
+
+def is_trend_builder(result, candles):
+    if len(candles) < 20:
+        return False
+
+    closes = [float(c["close"]) for c in candles]
+
+    ema9 = ema(closes[-20:], 9)
+    ema20 = ema(closes[-30:], 20) if len(closes) >= 30 else ema(closes, 20)
+    ema50 = ema(closes[-50:], 50) if len(closes) >= 50 else None
+
+    if ema9 is None or ema20 is None:
+        return False
+
+    above_vwap = "Price above VWAP" in result.get("reasons", [])
+
+    volume_steady = result.get("recent_volume", 0) >= 75_000
+    holding_gains = result.get("candle_session_gain", 0) >= 2
+    higher_lows = higher_lows_forming(candles, count=4)
+    no_bad_wick = not is_big_upper_wick(candles[-1])
+
+    ema_stack = ema9 > ema20
+    if ema50:
+        ema_stack = ema9 > ema20 > ema50
+
+    return (
+        result.get("gain", 0) >= TREND_BUILDER_MIN_GAIN
+        and above_vwap
+        and ema_stack
+        and higher_lows
+        and volume_steady
+        and holding_gains
+        and no_bad_wick
+    )
 def check_sec_offering_risk(ticker):
     try:
         headers = {"User-Agent": "scanner-bot your-email@example.com"}
