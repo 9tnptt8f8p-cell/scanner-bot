@@ -125,10 +125,10 @@ def send_telegram(message):
 
 
 MAX_GAINERS = 50
-SCAN_MIN_GAIN = 20
+SCAN_MIN_GAIN = 12
 ALERT_MIN_GAIN = 27
 MIN_VOLUME = 50000
-MAX_PRICE = 80
+
 
 MAX_MARKET_CAP = 1_000_000_000
 TREND_BUILDER_MIN_GAIN = 12
@@ -926,10 +926,6 @@ def run_scanner():
             # Float filter
             if float_shares == 0:
                 print(f"[WARN] {ticker} no float data — allowing through", flush=True)
-
-            elif float_shares > 50_000_000:
-                print(f"[FILTER] {ticker} skipped — float too high", flush=True)
-                continue
 
             if float_shares > 50_000_000:
                 print(f"[FILTER] {ticker} skipped — float too high", flush=True)
