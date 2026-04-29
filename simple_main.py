@@ -378,7 +378,49 @@ def get_alpaca_candles(ticker):
     except Exception as e:
         print(f"[ALPACA ERROR] {ticker}: {e}", flush=True)
         return []
+def get_news_catalyst(ticker):
+    if not FINNHUB_API_KEY:
+        return "unknown", "Missing Finnhub key"
 
+    today = time.strftime("%Y-%m-%d")
+
+    url = "https://finnhub.io/api/v1/company-news"
+
+    params = {
+        "symbol": ticker,
+        "from": today,
+        "to": today,
+        "token": FINNHUB_API_KEY
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        news = r.json()
+
+        if not isinstance(news, list) or not news:
+            return "none", "No fresh catalyst found"
+
+        headline = news[0].get("headline", "")
+        h = headline.lower()
+
+        if "earnings" in h or "results" in h:
+            return "earnings", headline
+        if "patent" in h:
+            return "patent", headline
+        if "contract" in h or "agreement" in h:
+            return "contract", headline
+        if "fda" in h or "trial" in h:
+            return "biotech", headline
+        if "lawsuit" in h or "jury" in h or "damages" in h:
+            return "legal", headline
+        if "offering" in h or "warrant" in h or "registered direct" in h:
+            return "offering", headline
+
+        return "news", headline
+
+    except Exception as e:
+        print(f"[NEWS ERROR] {ticker}: {e}", flush=True)
+        return "unknown", "News check failed"
 def get_finnhub_quote(ticker):
     if not FINNHUB_API_KEY:
         return None
@@ -674,7 +716,7 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
-            for mover in movers:
+        for mover in movers:
             ticker = mover["ticker"]
 
             # 🔥 Finnhub quote confirmation
