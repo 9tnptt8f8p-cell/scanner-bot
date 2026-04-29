@@ -588,7 +588,7 @@ def build_alert(result, rank):
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
         f"%Session Gain: {result.get('candle_session_gain', 0):.1f}%\n"
-        f"Yahoo Volume: {result['volume']:,}\n"
+        f"Scanner Volume: {result['volume']:,}\n"
         f"Recent Candle Vol: {result.get('recent_volume', 0):,}\n"
         f"Candle Total Vol: {result.get('total_candle_volume', 0):,}\n\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
@@ -1010,7 +1010,4 @@ if __name__ == "__main__":
     run_scanner()
 
 
-    time.sleep(2)
-
-    print("[BOOT] starting scanner", flush=True)
-    run_scanner()
+   
