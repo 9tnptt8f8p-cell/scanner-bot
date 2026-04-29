@@ -134,7 +134,37 @@ MAX_MARKET_CAP = 1_000_000_000
 TREND_BUILDER_MIN_GAIN = 12
 PREMARKET_MIN_GAIN = 8
 PREMARKET_MIN_VOLUME = 50_000
+def get_yahoo_market_cap(ticker):
+    url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
 
+    params = {
+        "modules": "price"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()
+
+        result = data.get("quoteSummary", {}).get("result", [])
+        if not result:
+            return 0
+
+        market_cap = (
+            result[0]
+            .get("price", {})
+            .get("marketCap", {})
+            .get("raw", 0)
+        )
+
+        return int(market_cap or 0)
+
+    except Exception as e:
+        print(f"[MARKET CAP ERROR] {ticker}: {e}", flush=True)
+        return 0
 def get_percent_gainers():
     # Yahoo expanded scanner: day gainers + most actives
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
