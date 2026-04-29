@@ -851,8 +851,7 @@ def check_sec_offering_risk(ticker):
     except Exception as e:
         return False, f"SEC check error: {e}"
         
-    port = int(os.getenv("PORT", 10000))
-    
+    port = int(os.getenv("PORT", 10000)) 
   def classify_news_quality(headline):
     h = (headline or "").lower()
 
@@ -869,31 +868,24 @@ def check_sec_offering_risk(ticker):
 
     strong_words = [
         "earnings",
-        "guidance",
-        "contract",
-        "partnership",
-        "merger",
-        "acquisition",
         "fda",
         "approval",
-        "patent",
-        "order",
-        "buyout",
-        "upgrade",
-        "price target",
-        "clinical trial",
-        "phase 1",
-        "phase 2",
-        "phase 3"
+        "contract",
+        "partnership",
+        "acquisition",
+        "guidance",
+        "deal",
+        "merger"
     ]
-
-    if any(word in h for word in weak_words):
-        return "WEAK"
 
     if any(word in h for word in strong_words):
         return "STRONG"
+    elif any(word in h for word in weak_words):
+        return "WEAK"
+    else:
+        return "NONE"
 
-    return "NONE"
+
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
