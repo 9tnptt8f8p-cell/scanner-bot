@@ -676,14 +676,10 @@ def build_alert(result, rank):
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
         f"%Session Gain: {result.get('candle_session_gain', 0):.1f}%\n"
-        f"Scanner Volume: {result['volume']:,}\n"
-        f"Recent Candle Vol: {result.get('recent_volume', 0):,}\n"
-        f"Candle Total Vol: {result.get('total_candle_volume', 0):,}\n\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
-        f"🕒 MARKET SESSION: {result.get('session', 'UNKNOWN')}\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
     )
 def get_market_session():
