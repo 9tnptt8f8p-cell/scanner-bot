@@ -511,6 +511,9 @@ def get_alert_title(result):
     score = result.get("score", 0)
     recent_vol = result.get("recent_volume", 0)
 
+    if result.get("trend_builder_alert"):
+        return "🚨 TREND BUILDER"
+
     if gain >= 35 and score >= 8 and recent_vol >= 200_000:
         return "🔥 MOMENTUM RUNNER"
 
