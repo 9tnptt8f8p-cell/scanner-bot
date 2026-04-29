@@ -8,13 +8,13 @@ def build_alert(data):
     gain = data.get("gain")
 
     volume = data.get("volume")
-    candle_vol = data.get("candle_vol")
+    
 
     catalyst = data.get("catalyst", "none")
     reasons = data.get("reasons", [])
     risks = data.get("risks", [])
 
-    session = data.get("session", "UNKNOWN")
+    
     regime = data.get("regime", "UNKNOWN")
 
     reasons_text = "\n- ".join(reasons)
@@ -29,8 +29,6 @@ Rank: #{rank}
 Price: ${price}
 Gain: +{gain}%
 
-Volume: {volume}
-Recent Candle Vol: {candle_vol}
 
 Catalyst: {catalyst}
 
@@ -40,7 +38,6 @@ Reasons:
 Risk:
 - {risks_text}
 
-🕒 SESSION: {session}
 📊 MARKET REGIME: {regime}
 """
     return msg.strip()
