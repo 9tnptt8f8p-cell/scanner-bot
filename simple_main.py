@@ -852,6 +852,48 @@ def check_sec_offering_risk(ticker):
         return False, f"SEC check error: {e}"
         
     port = int(os.getenv("PORT", 10000))
+    
+    def classify_news_quality(headline):
+    h = (headline or "").lower()
+
+    weak_words = [
+        "stocks moving",
+        "premarket movers",
+        "why shares are trading",
+        "here are",
+        "top gainers",
+        "market update",
+        "roundup",
+        "shares are trading higher"
+    ]
+
+    strong_words = [
+        "earnings",
+        "guidance",
+        "contract",
+        "partnership",
+        "merger",
+        "acquisition",
+        "fda",
+        "approval",
+        "patent",
+        "order",
+        "buyout",
+        "upgrade",
+        "price target",
+        "clinical trial",
+        "phase 1",
+        "phase 2",
+        "phase 3"
+    ]
+
+    if any(word in h for word in weak_words):
+        return "WEAK"
+
+    if any(word in h for word in strong_words):
+        return "STRONG"
+
+    return "NONE"
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -984,12 +1026,33 @@ def run_scanner():
 
         now = time.time()
 
-        for rank, result in enumerate(results, start=1):
-            ticker = result["ticker"]
-            price = result.get("price", 0)
-            recent_vol = result.get("recent_volume", 0)
-            market_cap = result.get("market_cap", 0)
-            float_shares = result.get("float", 0)
+       for rank, result in enumerate(results, start=1):
+    ticker = result["ticker"]
+    price = result.get("price", 0)
+    recent_vol = result.get("recent_volume", 0)
+    market_cap = result.get("market_cap", 0)
+    float_shares = result.get("float", 0)
+
+    # 🔥 ADD THIS (INDENTED)
+    headline = result.get("catalyst_text", "")
+    news_quality = classify_news_quality(headline)
+
+    if news_quality == "STRONG":
+        result["catalyst_type"] = "⚡ STRONG NEWS"
+
+    elif news_quality == "WEAK":
+        result["catalyst_type"] = "⚠️ WEAK NEWS"
+        result["reasons"] = [
+            r for r in result.get("reasons", [])
+            if "fresh news" not in r.lower()
+        ]
+
+    else:
+        result["catalyst_type"] = "none"
+        result["reasons"] = [
+            r for r in result.get("reasons", [])
+            if "fresh news" not in r.lower()
+        ]
             # ===== TRASH FILTERS =====
 
             # Price range: keep $0.50 to $500
