@@ -853,7 +853,7 @@ def check_sec_offering_risk(ticker):
         
     port = int(os.getenv("PORT", 10000))
     
-    def classify_news_quality(headline):
+  def classify_news_quality(headline):
     h = (headline or "").lower()
 
     weak_words = [
