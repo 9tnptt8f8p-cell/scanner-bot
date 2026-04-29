@@ -898,7 +898,10 @@ def run_scanner():
                 continue
             # Float filter
             if float_shares == 0:
-                print(f"[FILTER] {ticker} skipped — no float data", flush=True)
+                print(f"[WARN] {ticker} no float data — allowing through", flush=True)
+
+            elif float_shares > 50_000_000:
+                print(f"[FILTER] {ticker} skipped — float too high", flush=True)
                 continue
 
             if float_shares > 50_000_000:
