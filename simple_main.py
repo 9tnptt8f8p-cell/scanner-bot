@@ -366,18 +366,17 @@ def get_percent_gainers():
                     "gain": gain,
                     "volume": volume
                 }
-
         except Exception as e:
             print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
 
-   nasdaq_movers = get_nasdaq_gainers()
+    nasdaq_movers = get_nasdaq_gainers()
 
-   for m in nasdaq_movers:
-       all_movers[m["ticker"]] = m
+    for m in nasdaq_movers:
+        all_movers[m["ticker"]] = m
 
-   movers = list(all_movers.values())
+    movers = list(all_movers.values())
 
-   movers.sort(key=lambda x: x["gain"], reverse=True)
+    movers.sort(key=lambda x: x["gain"], reverse=True)
 
     print(f"[YAHOO EXPANDED] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
     print("[YAHOO EXPANDED] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
