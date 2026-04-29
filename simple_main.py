@@ -6,7 +6,7 @@ from flask import Flask
 from dotenv import load_dotenv
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
-
+from risk_engine import build_risk
 from structure_engine import analyze_structure
 from msg_builder import build_alert
 from alerts import send_alert
@@ -1032,7 +1032,12 @@ def run_scanner():
     recent_vol = result.get("recent_volume", 0)
     market_cap = result.get("market_cap", 0)
     float_shares = result.get("float", 0)
+    filing_text = result.get("filing_text", "")
+    filing_date = result.get("filing_date", None)
 
+risk_list = build_risk(filing_text, filing_date)
+
+result["risks"] = result.get("risks", []) + risk_list
     # 🔥 ADD THIS (INDENTED)
     headline = result.get("catalyst_text", "")
     news_quality = classify_news_quality(headline)
