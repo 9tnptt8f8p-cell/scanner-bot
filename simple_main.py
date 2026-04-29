@@ -947,7 +947,7 @@ def run_scanner():
             )
             trend_builder_alert = result.get("trend_builder_alert", False)
 
-             should_alert = (
+            should_alert = (
                 valid_early_alert
                 or valid_runner_alert
                 or valid_emergency_runner_alert
