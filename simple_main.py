@@ -223,6 +223,78 @@ def get_finnhub_profile(ticker):
     except Exception as e:
         print(f"[FINNHUB PROFILE ERROR] {ticker}: {e}", flush=True)
         return 0, 0
+        def get_nasdaq_gainers():
+    url = "https://api.nasdaq.com/api/screener/stocks"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/"
+    }
+
+    params = {
+        "tableonly": "true",
+        "limit": 200,
+        "offset": 0,
+        "download": "true"
+    }
+
+    movers = []
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        data = r.json()
+
+        rows = (
+            data.get("data", {})
+            .get("rows", [])
+        )
+
+        for row in rows:
+            ticker = row.get("symbol")
+            price_raw = str(row.get("lastsale", "0")).replace("$", "").replace(",", "")
+            pct_raw = str(row.get("pctchange", "0")).replace("%", "").replace("+", "")
+            vol_raw = str(row.get("volume", "0")).replace(",", "")
+
+            if not ticker:
+                continue
+
+            if "." in ticker or "-" in ticker:
+                continue
+
+            try:
+                price = float(price_raw or 0)
+                gain = float(pct_raw or 0)
+                volume = int(float(vol_raw or 0))
+            except Exception:
+                continue
+
+            if price <= 0:
+                continue
+
+            if gain < SCAN_MIN_GAIN:
+                continue
+
+            if volume < MIN_VOLUME:
+                continue
+
+            if price > MAX_PRICE:
+                continue
+
+            movers.append({
+                "ticker": ticker,
+                "price": price,
+                "gain": gain,
+                "volume": volume
+            })
+
+        print(f"[NASDAQ] Found {len(movers)} candidates over {SCAN_MIN_GAIN}%", flush=True)
+        return movers
+
+    except Exception as e:
+        print(f"[NASDAQ ERROR] {e}", flush=True)
+        return []
 def get_percent_gainers():
     # Yahoo expanded scanner: day gainers + most actives
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
