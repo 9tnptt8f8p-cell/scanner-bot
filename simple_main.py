@@ -1119,6 +1119,21 @@ for rank, result in enumerate(results, start=1):
                 result["gain"] >= 35
                 and total_vol >= 1_000_000
             )
+                    # ===== NEWS QUALITY FILTER =====
+
+            headline = result.get("catalyst_text", "") or ""
+            news_quality = classify_news_quality(headline)
+
+            if news_quality == "STRONG":
+                result["catalyst_type"] = "⚡ STRONG NEWS"
+
+            elif news_quality == "WEAK":
+                result["catalyst_type"] = "⚠️ WEAK NEWS"
+                result["score"] = max(0, result.get("score", 0) - 1)
+                result.setdefault("risks", []).append("⚠️ Weak/generic news headline")
+
+            else:
+                result["catalyst_type"] = "❌ NO CLEAR NEWS"
 
             # ===== SECOND LEG + BREAKOUT BURST =====
 
