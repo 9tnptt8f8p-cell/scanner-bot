@@ -223,7 +223,7 @@ def get_finnhub_profile(ticker):
     except Exception as e:
         print(f"[FINNHUB PROFILE ERROR] {ticker}: {e}", flush=True)
         return 0, 0
-        def get_nasdaq_gainers():
+def get_nasdaq_gainers():
     url = "https://api.nasdaq.com/api/screener/stocks"
 
     headers = {
