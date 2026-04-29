@@ -767,7 +767,10 @@ def run_scanner():
             sec_risk, sec_note = check_sec_offering_risk(ticker)
             result["sec_note"] = sec_note
             
-            if sec_risk:
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
+            result["sec_note"] = sec_note
+
+           if sec_risk:
             result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
             result["score"] -= 2
 
