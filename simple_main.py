@@ -231,7 +231,13 @@ def get_percent_gainers():
         "User-Agent": "Mozilla/5.0"
     }
 
-    screeners = ["day_gainers", "most_actives"]
+    screeners = [
+    "day_gainers",
+    "most_actives",
+    "small_cap_gainers",
+    "aggressive_small_caps",
+    "undervalued_growth_stocks"
+]
     all_movers = {}
 
     for screener in screeners:
