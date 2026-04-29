@@ -851,8 +851,8 @@ def check_sec_offering_risk(ticker):
     except Exception as e:
         return False, f"SEC check error: {e}"
         
-    port = int(os.getenv("PORT", 10000)) 
-  def classify_news_quality(headline):
+    port = int(os.getenv("PORT", 10000))
+def classify_news_quality(headline):
     h = (headline or "").lower()
 
     weak_words = [
