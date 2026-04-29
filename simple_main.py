@@ -679,9 +679,6 @@ def run_scanner():
 
             # Continue normal flow
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
-            # 🔥 Keep this AFTER Finnhub update
-            catalyst_type, catalyst_text = get_news_catalyst(ticker)
-
             result = score_mover(
                 mover=mover,
                 catalyst_type=catalyst_type,
