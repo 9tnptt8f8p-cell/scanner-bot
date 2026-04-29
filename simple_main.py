@@ -662,7 +662,8 @@ def get_alert_title(result):
 
     return "⚠️ EARLY SPIKE"
 def build_alert(result, rank):
-    reasons = ", ".join(result.get("reasons", [])) or "None"
+    clean_reasons = [r for r in result.get("reasons", []) if "market cap" not in r.lower()]
+    reasons = ", ".join(clean_reasons) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
     gain = result["gain"]
