@@ -1134,6 +1134,38 @@ for rank, result in enumerate(results, start=1):
 
             else:
                 result["catalyst_type"] = "❌ NO CLEAR NEWS"
+            # ===== DILUTION / OFFERING RISK FILTER =====
+
+            dilution_text = (
+                result.get("filing_text", "")
+                or result.get("catalyst_text", "")
+                or ""
+            ).lower()
+
+            dilution_words = [
+                "at-the-market",
+                "atm offering",
+                "shelf registration",
+                "registered direct",
+                "securities purchase agreement",
+                "warrant",
+                "warrants",
+                "public offering",
+                "private placement",
+                "resale registration",
+                "s-1",
+                "f-1",
+                "424b",
+                "prospectus"
+            ]
+
+            dilution_hits = [word for word in dilution_words if word in dilution_text]
+
+            if dilution_hits:
+                result.setdefault("risks", []).append(
+                    "⚠️ Dilution language: " + ", ".join(dilution_hits[:3])
+                )
+                result["score"] = max(0, result.get("score", 0) - 1)
 
             # ===== SECOND LEG + BREAKOUT BURST =====
 
