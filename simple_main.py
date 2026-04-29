@@ -130,17 +130,111 @@ ALERT_MIN_GAIN = 27
 MIN_VOLUME = 50000
 MAX_PRICE = 80
 
-
 def get_percent_gainers():
+    # FINVIZ first, Yahoo backup
+    finviz_url = "https://finviz.com/screener.ashx?v=111&s=ta_topgainers"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        r = requests.get(finviz_url, headers=headers, timeout=10)
+        html = r.text
+
+        movers = []
+
+        rows = html.split("<tr")[1:]
+
+        for row in rows:
+            if "quote.ashx?t=" not in row:
+                continue
+
+            try:
+                ticker = row.split("quote.ashx?t=")[1].split("&")[0].upper()
+
+                # Basic HTML cleanup
+                cells = row.split("<td")[1:]
+                clean_cells = []
+
+                for cell in cells:
+                    value = cell.split(">")[-1].split("<")[0]
+                    value = value.replace("&nbsp;", "").replace("$", "").replace(",", "").strip()
+                    clean_cells.append(value)
+
+                # Finviz v=111 rough columns:
+                # ticker usually 1, price near end, change near end, volume near end
+                price = None
+                gain = None
+                volume = None
+
+                for value in clean_cells:
+                    if "%" in value:
+                        try:
+                            gain = float(value.replace("%", ""))
+                        except:
+                            pass
+
+                nums = []
+                for value in clean_cells:
+                    try:
+                        nums.append(float(value))
+                    except:
+                        pass
+
+                # Safer fallback from row text
+                if gain is None:
+                    continue
+
+                # Find price/volume from known positions can be messy, so use broad parse
+                raw_parts = row.replace(",", "").replace("$", "").split(">")
+
+                for part in raw_parts:
+                    text = part.split("<")[0].strip()
+
+                    if not text:
+                        continue
+
+                    if text.endswith("%"):
+                        try:
+                            gain = float(text.replace("%", ""))
+                        except:
+                            pass
+
+                # Fallback: use Yahoo later if Finviz parsing fails
+                # Skip bad parsed rows
+                if gain is None or gain < SCAN_MIN_GAIN:
+                    continue
+
+                # Let Finnhub later confirm price/gain, so Finviz only discovers ticker
+                movers.append({
+                    "ticker": ticker,
+                    "price": 0,
+                    "gain": gain,
+                    "volume": 0
+                })
+
+            except Exception:
+                continue
+
+        movers = movers[:MAX_GAINERS]
+
+        if movers:
+            print(f"[FINVIZ] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
+            print("[FINVIZ] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
+            return movers
+
+        print("[FINVIZ] No movers parsed — falling back to Yahoo", flush=True)
+
+    except Exception as e:
+        print(f"[FINVIZ ERROR] {e} — falling back to Yahoo", flush=True)
+
+    # ===== YAHOO BACKUP =====
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 
     params = {
         "scrIds": "day_gainers",
         "count": MAX_GAINERS
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
     }
 
     try:
@@ -181,11 +275,9 @@ def get_percent_gainers():
                 continue
 
             if volume < MIN_VOLUME:
-                print(f"[FILTER] {ticker} skipped — volume {volume:,} under {MIN_VOLUME:,}", flush=True)
                 continue
 
             if price > MAX_PRICE:
-                print(f"[FILTER] {ticker} skipped — price ${price:.2f} over ${MAX_PRICE}", flush=True)
                 continue
 
             movers.append({
@@ -197,8 +289,8 @@ def get_percent_gainers():
 
         movers.sort(key=lambda x: x["gain"], reverse=True)
 
-        print(f"[GAINERS] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
-        print("[GAINERS] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
+        print(f"[YAHOO BACKUP] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
+        print("[YAHOO BACKUP] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
 
         return movers
 
@@ -582,21 +674,21 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
-     for mover in movers:
-    ticker = mover["ticker"]
+            for mover in movers:
+            ticker = mover["ticker"]
 
-    # 🔥 Finnhub quote confirmation
-    finnhub_quote = get_finnhub_quote(ticker)
+            # 🔥 Finnhub quote confirmation
+            finnhub_quote = get_finnhub_quote(ticker)
 
-    if finnhub_quote:
-        mover["price"] = finnhub_quote["price"]
-        mover["gain"] = finnhub_quote["gain"]
-        print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
-    else:
-        print(f"[FINNHUB] {ticker} quote unavailable — using Yahoo price/gain", flush=True)
+            if finnhub_quote:
+                mover["price"] = finnhub_quote["price"]
+                mover["gain"] = finnhub_quote["gain"]
+                print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
+            else:
+                print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
 
-    # 🔥 Keep this AFTER Finnhub update
-    catalyst_type, catalyst_text = get_news_catalyst(ticker)
+            # 🔥 Keep this AFTER Finnhub update
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
             result = score_mover(
                 mover=mover,
