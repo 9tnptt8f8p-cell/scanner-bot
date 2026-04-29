@@ -1026,22 +1026,25 @@ def run_scanner():
 
         now = time.time()
 
-       for rank, result in enumerate(results, start=1):
+  for rank, result in enumerate(results, start=1):
     ticker = result["ticker"]
     price = result.get("price", 0)
     recent_vol = result.get("recent_volume", 0)
     market_cap = result.get("market_cap", 0)
     float_shares = result.get("float", 0)
-    filing_text = result.get("filing_text", "")
+
+    # --- RISK HOOK ---
+    filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
     filing_date = result.get("filing_date", None)
 
-risk_list = build_risk(filing_text, filing_date)
+    risk_list = build_risk(filing_text, filing_date)
 
-result["risks"] = result.get("risks", []) + risk_list
-    # 🔥 ADD THIS (INDENTED)
+    if risk_list:
+        result["risks"] = result.get("risks", []) + risk_list
+
+    # --- NEWS QUALITY FILTER ---
     headline = result.get("catalyst_text", "")
     news_quality = classify_news_quality(headline)
-
     if news_quality == "STRONG":
         result["catalyst_type"] = "⚡ STRONG NEWS"
 
