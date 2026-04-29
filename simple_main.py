@@ -733,8 +733,11 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
-        for mover in movers:
-            ticker = mover["ticker"]
+    for mover in movers:
+        sec_risk = False
+        sec_note = ""
+
+        ticker = mover["ticker"]
 
             # 🔥 Finnhub quote confirmation
             finnhub_quote = get_finnhub_quote(ticker)
