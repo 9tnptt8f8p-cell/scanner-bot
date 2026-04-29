@@ -605,7 +605,7 @@ def detect_market_regime(results):
 
     return "MIXED", ["some setups but inconsistent", "only take A+ charts"]
     
-    def ema(values, period):
+  def ema(values, period):
     if len(values) < period:
         return None
 
