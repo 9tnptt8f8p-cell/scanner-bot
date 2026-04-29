@@ -1211,8 +1211,7 @@ for rank, result in enumerate(results, start=1):
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = current_price > last_alert_price
 
-                if should_alert and (cooldown_done or new_high_realert) and result["score"] >= 6:
-                    alert_tag = ""
+                if should_alert and new_high_realert and result["score"] >= 6:
 
                 if trend_builder_alert:
                     alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
