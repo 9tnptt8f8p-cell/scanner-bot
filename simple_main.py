@@ -728,7 +728,12 @@ def run_scanner():
                 print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
             else:
                 print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
+ 
+            if mover.get("volume", 0) == 0:
+               mover["volume"] = 500_000
 
+            # Continue normal flow
+            catalyst_type, catalyst_text = get_news_catalyst(ticker)
             # 🔥 Keep this AFTER Finnhub update
             catalyst_type, catalyst_text = get_news_catalyst(ticker)
 
