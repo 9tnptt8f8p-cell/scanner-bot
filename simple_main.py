@@ -803,9 +803,15 @@ def run_scanner():
 
             result["risks"].extend(structure.get("risk_flags", []))
             result["reasons"].extend(structure.get("reasons", []))
+            trend_builder_alert = is_trend_builder(result, candles)
+            result["trend_builder_alert"] = trend_builder_alert
 
-            results.append(result)
-            time.sleep(0.5)
+       if trend_builder_alert:
+          result["score"] += 2
+          result["score"] = max(0, min(result["score"], 10))
+          result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
+          results.append(result)
+          time.sleep(0.5)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
