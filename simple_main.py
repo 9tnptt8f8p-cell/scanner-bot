@@ -1156,8 +1156,6 @@ for rank, result in enumerate(results, start=1):
                 result["score"] = max(0, result.get("score", 0) - 1)
            # ===== DILUTION SEVERITY =====
 
-            recent_filing = result.get("filing_date", "")
-
             high_risk_words = [
                 "atm offering",
                 "public offering",
