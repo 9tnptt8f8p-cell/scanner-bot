@@ -130,6 +130,11 @@ ALERT_MIN_GAIN = 27
 MIN_VOLUME = 50000
 MAX_PRICE = 80
 
+MAX_MARKET_CAP = 1_000_000_000
+TREND_BUILDER_MIN_GAIN = 12
+PREMARKET_MIN_GAIN = 8
+PREMARKET_MIN_VOLUME = 50_000
+
 def get_percent_gainers():
     # Yahoo expanded scanner: day gainers + most actives
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
