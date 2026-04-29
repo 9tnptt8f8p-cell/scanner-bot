@@ -666,7 +666,7 @@ def build_alert(result, rank):
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
     gain = result["gain"]
-
+    float_shares = result.get("float", 0)
     title = get_alert_title(result)
 
     return (
@@ -675,6 +675,7 @@ def build_alert(result, rank):
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
+        f"Float: {float_shares/1_000_000:.1f}M\n\n"
         f"%Session Gain: {result.get('candle_session_gain', 0):.1f}%\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
