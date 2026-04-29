@@ -889,13 +889,11 @@ def run_scanner():
             if price < 0.5 or price > 500:
                 print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
                 continue
-
             # Market cap filter
             if market_cap == 0:
-                print(f"[FILTER] {ticker} skipped — no market cap data", flush=True)
-                continue
+                print(f"[WARN] {ticker} no market cap data — allowing through", flush=True)
 
-            if market_cap > 1_000_000_000:
+            elif market_cap > 1_000_000_000:
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
             # Float filter
