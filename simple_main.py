@@ -160,10 +160,43 @@ def get_yahoo_market_cap(ticker):
             .get("raw", 0)
         )
 
-        return int(market_cap or 0)
+            return int(market_cap or 0)
 
     except Exception as e:
         print(f"[MARKET CAP ERROR] {ticker}: {e}", flush=True)
+        return 0
+
+
+def get_float_shares(ticker):   # 👈 NO INDENT (top level)
+    url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+
+    params = {
+        "modules": "defaultKeyStatistics"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()
+
+        result = data.get("quoteSummary", {}).get("result", [])
+        if not result:
+            return 0
+
+        float_shares = (
+            result[0]
+            .get("defaultKeyStatistics", {})
+            .get("floatShares", {})
+            .get("raw", 0)
+        )
+
+        return int(float_shares or 0)
+
+    except Exception as e:
+        print(f"[FLOAT ERROR] {ticker}: {e}", flush=True)
         return 0
 def get_percent_gainers():
     # Yahoo expanded scanner: day gainers + most actives
@@ -762,6 +795,9 @@ def run_scanner():
 
             market_cap = get_yahoo_market_cap(ticker)
             result["market_cap"] = market_cap
+            float_shares = get_float_shares(ticker)
+            result["float"] = float_shares
+            print(f"[FLOAT] {ticker}: {float_shares}", flush=True)
             print(f"[MARKET CAP] {ticker}: {market_cap}", flush=True)
             
             if market_cap:
@@ -847,7 +883,7 @@ def run_scanner():
             price = result.get("price", 0)
             recent_vol = result.get("recent_volume", 0)
             market_cap = result.get("market_cap", 0)
-
+            float_shares = result.get("float", 0)
             # ===== TRASH FILTERS =====
 
             # Price range: keep $0.50 to $500
@@ -863,7 +899,14 @@ def run_scanner():
             if market_cap > 1_000_000_000:
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
+            # Float filter
+            if float_shares == 0:
+                print(f"[FILTER] {ticker} skipped — no float data", flush=True)
+                continue
 
+            if float_shares > 50_000_000:
+                print(f"[FILTER] {ticker} skipped — float too high", flush=True)
+                continue
             # Speed filter: blocks slow weak movers
             if result.get("gain", 0) < 25 and recent_vol < 200_000:
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
