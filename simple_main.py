@@ -1122,7 +1122,7 @@ def run_scanner():
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
 
-            if should_alert and cooldown_done:
+            if should_alert and cooldown_done and result["score"] >= 6:
                 alert_tag = ""
 
                 if trend_builder_alert:
