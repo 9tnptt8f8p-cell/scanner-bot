@@ -160,12 +160,11 @@ def get_yahoo_market_cap(ticker):
             .get("raw", 0)
         )
 
-            return int(market_cap or 0)
+        return int(market_cap or 0)
 
     except Exception as e:
         print(f"[MARKET CAP ERROR] {ticker}: {e}", flush=True)
         return 0
-
 
 def get_float_shares(ticker):   # 👈 NO INDENT (top level)
     url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
