@@ -781,7 +781,11 @@ def run_scanner():
 
             result["recent_volume"] = recent_volume
             result["total_candle_volume"] = total_candle_volume
-
+            
+            if candles:
+            result["high"] = max(float(c["high"]) for c in candles[-10:])
+            result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
+            
             if candles:
                 first_close = float(candles[0]["close"])
                 last_close = float(candles[-1]["close"])
