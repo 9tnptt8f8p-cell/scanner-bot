@@ -243,7 +243,7 @@ def get_percent_gainers():
     for screener in screeners:
         params = {
             "scrIds": screener,
-            "count": 100
+            "count": 200
         }
 
         try:
