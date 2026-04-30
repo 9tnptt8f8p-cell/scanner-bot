@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+from bs4 import BeautifulSoup
 from threading import Thread
 from flask import Flask
 from dotenv import load_dotenv
