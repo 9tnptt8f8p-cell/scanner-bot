@@ -12,6 +12,90 @@ from msg_builder import build_alert
 from alerts import send_alert
 load_dotenv()
 
+
+def detect_dilution_type(text):
+    text = (text or "").lower()
+    signals = []
+
+    if "at the market" in text or "atm offering" in text:
+        signals.append("ATM offering")
+
+    if "warrant" in text:
+        signals.append("Warrants")
+
+    if "convertible" in text or "convertible note" in text:
+        signals.append("Convertible notes")
+
+    if "securities purchase agreement" in text:
+        signals.append("Securities purchase agreement")
+
+    if "registered direct" in text:
+        signals.append("Registered direct offering")
+
+    if "shelf registration" in text or "form s-3" in text or "form f-3" in text:
+        signals.append("Shelf registration")
+
+    if "resale" in text:
+        signals.append("Resale registration")
+
+    if "offering" in text and not signals:
+        signals.append("Offering language detected")
+
+    return signals
+
+
+def analyze_news(headline):
+    h = (headline or "").lower()
+
+    if not h:
+        return "UNKNOWN", "❓ No clear headline found"
+
+    if any(x in h for x in ["here are", "stocks moving", "top movers", "why shares are trading"]):
+        return "WEAK", "📰 Mover-list headline, not company-specific news"
+
+    if any(x in h for x in ["offering", "priced", "registered direct", "atm"]):
+        return "NEGATIVE", "💸 Offering / dilution news"
+
+    if any(x in h for x in ["contract", "agreement", "partnership", "collaboration"]):
+        return "STRONG", "🤝 Deal / partnership news"
+
+    if any(x in h for x in ["fda", "approval", "phase", "trial", "clinical", "data"]):
+        return "STRONG", "💊 FDA / clinical news"
+
+    if any(x in h for x in ["earnings", "revenue", "guidance", "profit", "sales"]):
+        return "STRONG", "📊 Earnings / financial news"
+
+    if any(x in h for x in ["merger", "acquisition", "buyout"]):
+        return "STRONG", "🏢 Merger / acquisition news"
+
+    return "UNKNOWN", "❓ Unclear catalyst"
+
+
+def build_trade_bias(result):
+    risks = " ".join(result.get("risks", [])).lower()
+    news_quality = result.get("news_quality", "")
+    structure = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
+
+    if "offering" in risks or "dilution" in risks or "warrant" in risks:
+        return "⚠️ High risk — dilution/financing overhang"
+
+    if news_quality == "NEGATIVE":
+        return "❌ Negative catalyst — avoid unless extreme scalp only"
+
+    if news_quality == "WEAK":
+        return "⚠️ Weak catalyst — could fade fast"
+
+    if "below vwap" in structure:
+        return "⚠️ Below VWAP — wait for reclaim"
+
+    if "upper wick" in structure or "trap" in structure:
+        return "⚠️ Trap risk — wait for cleaner setup"
+
+    if news_quality == "STRONG":
+        return "✅ Strong catalyst — watch for continuation"
+
+    return "🤔 Mixed/unclear — wait for confirmation"
+
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 second_leg_tracker = {}
