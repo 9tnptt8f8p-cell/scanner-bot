@@ -1027,7 +1027,7 @@ if any(k in h for k in BAD_NEWS_KEYWORDS):
 
 # ✅ Real catalyst
 if any(k in h for k in STRONG_KEYWORDS):
-return "STRONG"
+    return "STRONG"
 
 if any(k in h for k in WEAK_KEYWORDS):
     return "WEAK"
