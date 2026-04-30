@@ -1164,7 +1164,7 @@ def run_scanner():
             # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
             else:
                 clean_risks.append(
-                    risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+                  r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
                 )
             
             if clean_risks:
