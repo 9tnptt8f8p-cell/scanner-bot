@@ -688,10 +688,11 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 1
         reasons.append("500k+ volume")
 
-    if catalyst_type not in ["none", "unknown"]:
-        score += 2
-        reasons.append("fresh news")
-    else:
+   if catalyst_type not in ["none", "unknown"]:
+       score += 2
+       reasons.append("fresh news")
+   else:
+       pass
         risks.append("no clear fresh news")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
