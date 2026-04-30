@@ -1076,7 +1076,8 @@ def run_scanner():
 
     alert_history = {}
     runner_prices = {}
-
+    first_alert_price = {}
+    second_leg_alerted = set()
     while True:
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
@@ -1390,9 +1391,11 @@ def run_scanner():
                 or vwap_reclaim_setup
                 or breakout_hold_setup
                 or dip_buy_setup
-            )
-
+                        )
             if second_leg_alert:
+                result["emoji"] = "🚀"
+                result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
+                result.setdefault("reasons", []).append("Second leg building")
                 print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
 
             if breakout_burst_alert:
@@ -1400,6 +1403,8 @@ def run_scanner():
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             current_price = float(result.get("price", 0))
+            if ticker not in first_alert_price and result.get("score", 0) >= 7:
+            first_alert_price[ticker] = current_price
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = current_price > last_alert_price
 
