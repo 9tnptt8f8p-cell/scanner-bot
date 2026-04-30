@@ -1133,12 +1133,13 @@ def run_scanner():
             result["news_summary"] = news_summary
             # --- NEWS QUALITY SCORE ADJUSTMENT ---
             if news_quality == "NONE":
-            result["score"] = max(0, result.get("score", 0) - 2)
-            result.setdefault("risks", []).append("⚠️ No real catalyst / aggregator headline")
+            result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+            result["catalyst_type"] = "⚠️ TECHNICAL MOMENTUM ONLY"
 
             elif news_quality == "WEAK":
             result["score"] = max(0, result.get("score", 0) - 1)
             result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+            result["catalyst_type"] = "⚠️ WEAK NEWS"
 
             elif news_quality == "STRONG":
             result["score"] = min(10, result.get("score", 0) + 1)
