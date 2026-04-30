@@ -66,7 +66,4 @@ Bias: {trade_bias}
 
     return msg.strip()
 
-Bias: {trade_bias}
-"""
 
-    return msg.strip()
