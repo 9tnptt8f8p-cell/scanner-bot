@@ -1307,7 +1307,7 @@ def run_scanner():
 
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
-                        last_alert = alert_history.get(ticker, 0)
+            last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             current_price = float(result.get("price", 0))
             last_alert_price = runner_prices.get(ticker, 0)
