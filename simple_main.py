@@ -1331,12 +1331,13 @@ def run_scanner():
             if should_alert and result["score"] >= 6:
                 if cooldown_done or new_high_realert:
                     sent = send_alert(build_alert(result, rank) + alert_tag)
-
                     if sent:
                         alert_history[ticker] = now
                         runner_prices[ticker] = current_price
-                    if second_leg_alert and ticker in second_leg_tracker:
-                       second_leg_tracker[ticker]["sent"] = True
+
+                        if second_leg_alert and ticker in second_leg_tracker:
+                            second_leg_tracker[ticker]["sent"] = True
+
                         print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                     else:
                         print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
