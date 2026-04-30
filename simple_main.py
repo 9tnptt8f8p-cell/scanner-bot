@@ -1281,7 +1281,7 @@ def run_scanner():
                result.setdefault("risks", []).append(
                "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
             )
-                result["score"] = max(0, result.get("score", 0) - 1)      
+            result["score"] = max(0, result.get("score", 0) - 1)      
  
 
             # ===== SECOND LEG + BREAKOUT BURST =====
