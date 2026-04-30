@@ -1160,16 +1160,6 @@ def run_scanner():
             if clean_risks:
                 result["risks"] = result.get("risks", []) + clean_risks
             
-                        # 🚨 TRUE DILUTION / FINANCING
-                        if any(x in r for x in [
-                            "offering",
-                            "dilution",
-                            "warrant",
-                            "atm",
-                            "convertible",
-                            "securities purchase"
-                        ]):
-                            clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
         
             # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
             else:
