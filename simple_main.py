@@ -1182,6 +1182,8 @@ def run_scanner():
                 result.setdefault("risks", []).append(
                     "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
                 )
+                result["score"] = max(0, result.get("score", 0) - 1)
+                )
             # --- SEC FILING CLEANUP (SMART) ---
             risk_list = build_risk(filing_text, filing_date)
             
