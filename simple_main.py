@@ -1181,24 +1181,33 @@ def run_scanner():
                 result.setdefault("risks", []).append(
                     "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
                 )
-                result["score"] = max(0, result.get("score", 0) - 1)
-            # --- SEC FILING CLEANUP (NOT AUTO-DILUTION) ---
+            # --- SEC FILING CLEANUP (SMART) ---
             risk_list = build_risk(filing_text, filing_date)
-
+            
             clean_risks = []
-
+            
             for risk in risk_list:
-                if "offering" in risk.lower() or "dilution" in risk.lower():
-                    clean_risks.append(risk)  # keep real dilution warnings
+                r = risk.lower()
+            
+                # 🚨 TRUE DILUTION / FINANCING
+                if any(x in r for x in [
+                    "offering",
+                    "dilution",
+                    "warrant",
+                    "atm",
+                    "convertible",
+                    "securities purchase"
+                ]):
+                    clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
+            
+                # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
                 else:
                     clean_risks.append(
                         risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
                     )
-
-            if  clean_risks:
+            
+            if clean_risks:
                 result["risks"] = result.get("risks", []) + clean_risks
-
-
             # ===== TRASH FILTERS =====
 
             if price < 0.5 or price > 500:
