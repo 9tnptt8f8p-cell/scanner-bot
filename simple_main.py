@@ -762,7 +762,6 @@ def build_alert(result, rank):
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
         f"Float: {float_shares/1_000_000:.1f}M\n\n"
-        f"%Session Gain: {result.get('candle_session_gain', 0):.1f}%\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
         f"Reasons:\n{reasons}\n\n"
@@ -1244,46 +1243,7 @@ def run_scanner():
                 result["gain"] >= 35
                 and total_vol >= 1_000_000
             )
-            # --- DILUTION BREAKDOWN (CLEAN VERSION) ---
-
-            dilution_text = (filing_text or "").lower()
-
-            active_dilution_words = [
-               "at-the-market",
-               "atm offering",
-               "public offering",
-               "registered direct",
-               "securities purchase agreement",
-               "private placement",
-               "prospectus supplement",
-               "424b",
-            ]
-
-            medium_dilution_words = [
-               "shelf registration",
-               "s-1",
-               "f-1",
-               "warrant",
-               "warrants",
-               "convertible",
-            ]
-
-            active_hits = [w for w in active_dilution_words if w in dilution_text]
-            medium_hits = [w for w in medium_dilution_words if w in dilution_text]
-
-            if active_hits:
-               result.setdefault("risks", []).append(
-               "🚨 ACTIVE DILUTION: " + ", ".join(active_hits[:3])
-            )
-               result["score"] = max(0, result.get("score", 0) - 2)
-
-            elif medium_hits:
-               result.setdefault("risks", []).append(
-               "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
-            )
-            result["score"] = max(0, result.get("score", 0) - 1)      
- 
-
+       
             # ===== SECOND LEG + BREAKOUT BURST =====
 
             price = result.get("price", 0)
