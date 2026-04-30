@@ -1153,10 +1153,6 @@ def run_scanner():
                 if isinstance(r, str):
                     if "offering" in r.lower() or "dilution" in r.lower():
                         clean_risks.append(r)
-                    else:
-                        clean_risks.append(
-                            r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
-                        )
             
              clean_risks = []
             
