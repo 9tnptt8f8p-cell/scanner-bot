@@ -1158,17 +1158,24 @@ def run_scanner():
                             r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
                         )
             
-            if clean_risks:
-                result["risks"] = result.get("risks", []) + clean_risks
-                    
-            # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
-            else:
-                clean_risks.append(
-                    r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
-                )
+             clean_risks = []
             
-            if clean_risks:
-                result["risks"] = result.get("risks", []) + clean_risks
+            for r in result.get("risks", []):
+                # handle dict risks safely
+                if isinstance(r, dict):
+                    r = r.get("text") or r.get("message") or str(r)
+            
+                # always convert to string before replace
+                r = str(r)
+            
+                # soften wording
+                if "⚠️ SEC offering risk:" in r:
+                    r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+            
+                clean_risks.append(r)
+            
+            # overwrite with cleaned version
+            result["risks"] = clean_risks
             # ===== TRASH FILTERS =====
 
             if price < 0.5 or price > 500:
