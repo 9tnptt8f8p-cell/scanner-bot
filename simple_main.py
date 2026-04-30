@@ -691,7 +691,7 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 2
         reasons.append("fresh news")
     else:
-        risks.append("no clear fresh news")
+       risks.append("⚠️ No confirmed catalyst / technical momentum only")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
