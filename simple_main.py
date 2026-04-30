@@ -1071,20 +1071,44 @@ WEAK_KEYWORDS = [
         return [f"🚨 DILUTION RISK (can dump anytime): {', '.join(hits[:3])}"]
 def find_real_news_headline(ticker, current_headline=""):
     """
-    Keeps current headline if it is usable.
-    If junk/empty, tries simple fallback sources later.
+    Keeps current headline if usable.
+    If junk/empty, tries Yahoo fallback.
     """
 
     quality = classify_news_quality(current_headline)
 
+    # ✅ Keep good headline
     if quality in ["STRONG", "WEAK", "UNKNOWN"]:
         return current_headline, quality
 
-    # fallback placeholder for scraper upgrade
-    # later we plug in PR Newswire / GlobeNewswire / Yahoo search here
+    # 🔎 Try Yahoo scrape
+    try:
+        url = f"https://finance.yahoo.com/quote/{ticker}/news/"
+        headers = {"User-Agent": "Mozilla/5.0"}
 
+        r = requests.get(url, headers=headers, timeout=8)
+
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            links = soup.find_all("a")
+
+            for link in links:
+                text = link.get_text(" ", strip=True)
+
+                if not text or len(text) < 25:
+                    continue
+
+                scraped_quality = classify_news_quality(text)
+
+                if scraped_quality in ["STRONG", "WEAK", "UNKNOWN"]:
+                    print(f"[NEWS SCRAPE] {ticker}: {text}", flush=True)
+                    return text, scraped_quality
+
+    except Exception as e:
+        print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
+
+    # ❌ Nothing found
     return current_headline, "NONE"
-    return []
     
 def find_real_news_headline(ticker, current_headline=""):
     quality = classify_news_quality(current_headline)
