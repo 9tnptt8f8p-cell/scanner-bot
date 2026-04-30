@@ -1307,69 +1307,42 @@ def run_scanner():
 
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
-
-            last_alert = alert_history.get(ticker, 0)
+                        last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             current_price = float(result.get("price", 0))
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = current_price > last_alert_price
+
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
+
+            alert_tag = ""
+
+            if trend_builder_alert:
+                alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
+            elif second_leg_alert:
+                alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
+            elif breakout_burst_alert:
+                alert_tag = "\n\n🚀 BREAKOUT BURST"
+            elif vwap_reclaim_setup:
+                alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
+            elif breakout_hold_setup:
+                alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+            elif dip_buy_setup:
+                alert_tag = "\n\n📈 DIP BUY SETUP"
+
             if should_alert and result["score"] >= 6:
-            if cooldown_done or new_high_realert:
-                sent = send_alert(build_alert(result, rank) + alert_tag)
+                if cooldown_done or new_high_realert:
+                    sent = send_alert(build_alert(result, rank) + alert_tag)
 
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = current_price
-            else:
-                print(f"[NO ALERT] #{rank} {ticker} cooldown active")
-
-                if trend_builder_alert:
-                    alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
-
-                elif second_leg_alert:
-                    alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
-
-                elif breakout_burst_alert:
-                    alert_tag = "\n\n🚀 BREAKOUT BURST"
-
-                elif vwap_reclaim_setup:
-                    alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
-
-                elif breakout_hold_setup:
-                    alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
-
-                elif dip_buy_setup:
-                    alert_tag = "\n\n📈 DIP BUY SETUP"
-
-                sent = send_alert(build_alert(result, rank) + alert_tag)
-
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = float(result.get("price", 0))
-
-                    if ticker not in second_leg_tracker:
-                        second_leg_tracker[ticker] = {
-                            "high": price,
-                            "sent": False
-                        }
-
-                    if second_leg_alert:
-                        second_leg_tracker[ticker]["sent"] = True
+                    if sent:
+                        alert_history[ticker] = now
+                        runner_prices[ticker] = current_price
+                        print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                     else:
-                        second_leg_tracker[ticker]["high"] = max(
-                            second_leg_tracker[ticker]["high"],
-                            price
-                        )
-
-                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
-
+                        print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
                 else:
-                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
-            elif should_alert:
-                print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
-
+                    print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
             else:
                 print(
                     f"[NO ALERT] #{rank} {ticker} blocked | "
@@ -1377,10 +1350,11 @@ def run_scanner():
                     flush=True
                 )
 
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
 
-        time.sleep(SCAN_SLEEP)
+            print("[SCAN] Cycle complete", flush=True)
+            print("[HEARTBEAT] alive", flush=True)
+
+            time.sleep(SCAN_SLEEP)
 
 
 if __name__ == "__main__":
