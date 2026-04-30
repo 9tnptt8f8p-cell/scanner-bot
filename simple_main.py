@@ -1068,7 +1068,21 @@ WEAK_KEYWORDS = [
 
     if hits:
         return [f"🚨 DILUTION RISK (can dump anytime): {', '.join(hits[:3])}"]
+def find_real_news_headline(ticker, current_headline=""):
+    """
+    Keeps current headline if it is usable.
+    If junk/empty, tries simple fallback sources later.
+    """
 
+    quality = classify_news_quality(current_headline)
+
+    if quality in ["STRONG", "WEAK", "UNKNOWN"]:
+        return current_headline, quality
+
+    # fallback placeholder for scraper upgrade
+    # later we plug in PR Newswire / GlobeNewswire / Yahoo search here
+
+    return current_headline, "NONE"
     return []
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
@@ -1215,9 +1229,10 @@ def run_scanner():
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
             headline = result.get("catalyst_text", "") or result.get("headline", "")
-            news_quality = classify_news_quality(headline)
+            headline, news_quality = find_real_news_headline(ticker, headline)
+            result["catalyst_text"] = headline
+            result["headline"] = headline
             result["news_quality"] = news_quality
-            
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 2)
@@ -1406,7 +1421,7 @@ def run_scanner():
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
             first_alert_price[ticker] = current_price
             last_alert_price = runner_prices.get(ticker, 0)
-            new_high_realert = current_price > last_alert_price
+            new_high_realert = current_price > last_alert_price * 1.01
 
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
