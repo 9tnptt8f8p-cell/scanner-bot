@@ -1062,12 +1062,13 @@ def run_scanner():
                 result["high"] = max(float(c["high"]) for c in candles[-10:])
                 result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
 
-                first_close = float(candles[0]["close"])
-                last_close = float(candles[-1]["close"])
-                result["candle_session_gain"] = (
-                    ((last_close - first_close) / first_close) * 100
-                    if first_close > 0 else 0
-                )
+            day_open = float(candles[0]["open"])
+            last_close = float(candles[-1]["close"])
+
+            result["candle_session_gain"] = (
+                ((last_close - day_open) / day_open) * 100
+                if day_open > 0 else 0
+            )
             else:
                 result["candle_session_gain"] = 0
 
