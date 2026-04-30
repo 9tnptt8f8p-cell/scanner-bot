@@ -1145,45 +1145,7 @@ def run_scanner():
                result["score"] = min(10, result.get("score", 0) + 1)
                result["catalyst_type"] = "⚡ STRONG NEWS"
             
-                      # --- DILUTION BREAKDOWN (CLEAN VERSION) ---
-
-            dilution_text = (filing_text or "").lower()
-
-            active_dilution_words = [
-                "at-the-market",
-                "atm offering",
-                "public offering",
-                "registered direct",
-                "securities purchase agreement",
-                "private placement",
-                "prospectus supplement",
-                "424b",
-            ]
-
-            medium_dilution_words = [
-                "shelf registration",
-                "s-1",
-                "f-1",
-                "warrant",
-                "warrants",
-                "convertible",
-            ]
-
-            active_hits = [w for w in active_dilution_words if w in dilution_text]
-            medium_hits = [w for w in medium_dilution_words if w in dilution_text]
-
-            if active_hits:
-                result.setdefault("risks", []).append(
-                    "🚨 ACTIVE DILUTION: " + ", ".join(active_hits[:3])
-                )
-                result["score"] = max(0, result.get("score", 0) - 2)
-
-            elif medium_hits:
-                result.setdefault("risks", []).append(
-                    "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
-                )
-                result["score"] = max(0, result.get("score", 0) - 1)
-                )
+                 
             # --- SEC FILING CLEANUP (SMART) ---
             risk_list = build_risk(filing_text, filing_date)
             
@@ -1191,23 +1153,23 @@ def run_scanner():
             
             for risk in risk_list:
                 r = risk.lower()
-            
-                # 🚨 TRUE DILUTION / FINANCING
-                if any(x in r for x in [
-                    "offering",
-                    "dilution",
-                    "warrant",
-                    "atm",
-                    "convertible",
-                    "securities purchase"
-                ]):
-                    clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
-            
-                # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
-                else:
-                    clean_risks.append(
-                        risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
-                    )
+        
+            # 🚨 TRUE DILUTION / FINANCING
+            if any(x in r for x in [
+                "offering",
+                "dilution",
+                "warrant",
+                "atm",
+                "convertible",
+                "securities purchase"
+            ]):
+                clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
+        
+            # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
+            else:
+                clean_risks.append(
+                    risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+                )
             
             if clean_risks:
                 result["risks"] = result.get("risks", []) + clean_risks
