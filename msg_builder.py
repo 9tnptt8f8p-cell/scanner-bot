@@ -3,7 +3,7 @@ def build_alert(data):
     ticker = data.get("ticker")
     score = data.get("score")
     rank = data.get("rank")
-
+    rank_score = data.get("rank_score", 0)
     price = data.get("price")
     gain = data.get("gain")
 
@@ -24,7 +24,7 @@ def build_alert(data):
 {emoji} ALERT
 
 Rank: #{rank}
-{ticker} | Score: {score}/10
+{ticker} | Score: {score}/10 | Rank: {rank_score}/10
 
 Price: ${price}
 Gain: +{gain}%
