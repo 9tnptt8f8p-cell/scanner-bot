@@ -1335,7 +1335,7 @@ def run_scanner():
                 elif dip_buy_setup:
                     alert_tag = "\n\n📈 DIP BUY SETUP"
 
-                sent = send_telegram(build_alert(result, rank) + alert_tag)
+                sent = send_alert(build_alert(result) + alert_tag)
 
                 if sent:
                     alert_history[ticker] = now
