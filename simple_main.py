@@ -1336,6 +1336,8 @@ def run_scanner():
                     if sent:
                         alert_history[ticker] = now
                         runner_prices[ticker] = current_price
+                    if second_leg_alert and ticker in second_leg_tracker:
+                       second_leg_tracker[ticker]["sent"] = True
                         print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                     else:
                         print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
