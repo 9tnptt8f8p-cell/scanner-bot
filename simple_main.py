@@ -940,35 +940,43 @@ def check_sec_offering_risk(ticker):
 def classify_news_quality(headline):
     h = (headline or "").lower()
 
-    weak_words = [
-        "stocks moving",
-        "premarket movers",
-        "why shares are trading",
-        "here are",
+    BAD_NEWS_KEYWORDS = [
         "top gainers",
+        "stocks moving",
+        "market movers",
+        "premarket session",
+        "here are",
+        "why these stocks",
         "market update",
         "roundup",
-        "shares are trading higher"
+        "shares are trading higher",
     ]
 
-    strong_words = [
-        "earnings",
+    STRONG_KEYWORDS = [
         "fda",
         "approval",
         "contract",
-        "partnership",
         "acquisition",
+        "merger",
+        "earnings",
         "guidance",
+        "partnership",
         "deal",
-        "merger"
     ]
 
-    if any(word in h for word in strong_words):
-        return "STRONG"
-    elif any(word in h for word in weak_words):
-        return "WEAK"
-    else:
+    # ❌ Fake / aggregator news
+    if any(k in h for k in BAD_NEWS_KEYWORDS):
         return "NONE"
+
+    # ✅ Real catalyst
+    if any(k in h for k in STRONG_KEYWORDS):
+        return "STRONG"
+
+    # ⚠️ Weak / unclear
+    if h:
+        return "WEAK"
+
+    return "NONE"
 
 
 def run_scanner():
@@ -1113,12 +1121,16 @@ def run_scanner():
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
-            # --- NEWS BREAKDOWN ---
             headline = result.get("catalyst_text", "") or result.get("headline", "")
-            news_quality, news_summary = analyze_news(headline)
+
+            # your filter
+            news_quality = classify_news_quality(headline)
+
+            # your existing analyzer
+            _, news_summary = analyze_news(headline)
 
             result["news_quality"] = news_quality
-            result["catalyst_type"] = news_summary
+            result["news_summary"] = news_summary
 
             # --- DILUTION BREAKDOWN ---
             dilution_signals = detect_dilution_type(filing_text)
