@@ -932,10 +932,13 @@ def check_sec_offering_risk(ticker):
 
         return False, "No recent offering-type SEC forms found"
 
-    except Exception as e:
-        return False, f"SEC check error: {e}"
-        
-    port = int(os.getenv("PORT", 10000))
+   except Exception as e:
+    return False, f"SEC check error: {e}"
+
+
+port = int(os.getenv("PORT", 10000))
+
+
 def classify_news_quality(headline):
     h = (headline or "").lower()
 
@@ -969,7 +972,7 @@ def classify_news_quality(headline):
         "orphan drug",
         "fast track",
         "breakthrough therapy",
-    
+
         # business catalysts
         "contract",
         "agreement",
@@ -982,7 +985,7 @@ def classify_news_quality(headline):
         "distribution agreement",
         "license agreement",
         "strategic alliance",
-    
+
         # corporate events
         "acquisition",
         "merger",
@@ -992,7 +995,7 @@ def classify_news_quality(headline):
         "letter of intent",
         "spin-off",
         "spinoff",
-    
+
         # earnings / financial
         "earnings",
         "revenue",
@@ -1000,7 +1003,7 @@ def classify_news_quality(headline):
         "raises guidance",
         "profitability",
         "record revenue",
-    
+
         # crypto / AI / hot sectors
         "bitcoin",
         "ethereum",
@@ -1010,33 +1013,35 @@ def classify_news_quality(headline):
         "ai-powered",
         "nvidia",
     ]
-WEAK_KEYWORDS = [
-    "conference",
-    "webcast",
-    "presentation",
-    "to present",
-    "participate",
-    "appoints",
-    "announces appointment",
-    "corporate update",
-    "shareholder letter",
-]
+
+    WEAK_KEYWORDS = [
+        "conference",
+        "webcast",
+        "presentation",
+        "to present",
+        "participate",
+        "appoints",
+        "announces appointment",
+        "corporate update",
+        "shareholder letter",
+    ]
+
     # ❌ Fake / aggregator news
-if any(k in h for k in BAD_NEWS_KEYWORDS):
+    if any(k in h for k in BAD_NEWS_KEYWORDS):
+        return "NONE"
+
+    # ✅ Real catalyst
+    if any(k in h for k in STRONG_KEYWORDS):
+        return "STRONG"
+
+    # ⚠️ Weak
+    if any(k in h for k in WEAK_KEYWORDS):
+        return "WEAK"
+
+    if h:
+        return "UNKNOWN"
+
     return "NONE"
-
-# ✅ Real catalyst
-if any(k in h for k in STRONG_KEYWORDS):
-    return "STRONG"
-
-if any(k in h for k in WEAK_KEYWORDS):
-    return "WEAK"
-
-if h:
-    return "UNKNOWN"
-
-return "NONE"
-
 def detect_offering_risk(text):
     if not text:
         return []
