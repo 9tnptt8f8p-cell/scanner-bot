@@ -1360,8 +1360,13 @@ def run_scanner():
             
             if not isinstance(risk_list, list):
                 risk_list = [risk_list]
-            
-            if not isinstance(offering_risks, list):
+            if isinstance(offering_risks, tuple):
+                found, msg = offering_risks
+                if found:
+                    offering_risks = [f"🚨 DILUTION RISK: {msg}"]
+                else:
+                    offering_risks = []
+            elif not isinstance(offering_risks, list):
                 offering_risks = [offering_risks]
             
             for r in base_risks + risk_list + offering_risks:
@@ -1369,6 +1374,9 @@ def run_scanner():
                     r = r.get("text") or r.get("message") or str(r)
             
                 r = str(r)
+            
+                if not r or r == "None":
+                    continue
             
                 if "⚠️ SEC offering risk:" in r:
                     r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
