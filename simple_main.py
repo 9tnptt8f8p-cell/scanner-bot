@@ -10,6 +10,7 @@ from risk_engine import build_risk
 from structure_engine import analyze_structure
 from msg_builder import build_alert
 from alerts import send_alert
+from rank_engine import rank_result
 load_dotenv()
 
 
@@ -1312,8 +1313,8 @@ def run_scanner():
             current_price = float(result.get("price", 0))
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = current_price > last_alert_price
+            result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
-
             if should_alert and cooldown_done and new_high_realert and result["score"] >= 6:
                 alert_tag = ""
 
