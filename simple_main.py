@@ -1112,6 +1112,24 @@ def run_scanner():
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
+            # --- NEWS BREAKDOWN ---
+            headline = result.get("catalyst_text", "") or result.get("headline", "")
+            news_quality, news_summary = analyze_news(headline)
+
+            result["news_quality"] = news_quality
+            result["catalyst_type"] = news_summary
+
+            # --- DILUTION BREAKDOWN ---
+            dilution_signals = detect_dilution_type(filing_text)
+
+            if dilution_signals:
+                result["risks"] = result.get("risks", [])
+                result["risks"].append(
+                    "⚠️ Dilution Risk: " + ", ".join(dilution_signals)
+                )
+
+            # --- FINAL TRADE BIAS ---
+            result["trade_bias"] = build_trade_bias(result)
 
             risk_list = build_risk(filing_text, filing_date)
 
