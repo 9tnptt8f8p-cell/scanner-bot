@@ -1341,10 +1341,10 @@ def run_scanner():
                 )
 
 
-            print("[SCAN] Cycle complete", flush=True)
-            print("[HEARTBEAT] alive", flush=True)
+        print("[SCAN] Cycle complete", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
 
-            time.sleep(SCAN_SLEEP)
+        time.sleep(SCAN_SLEEP)
 
 
 if __name__ == "__main__":
