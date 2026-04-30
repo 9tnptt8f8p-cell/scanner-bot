@@ -7,18 +7,18 @@ def build_alert(data):
     price = data.get("price")
     gain = data.get("gain")
 
-    volume = data.get("volume")
-    
-
     catalyst = data.get("catalyst", "none")
+    catalyst_type = data.get("catalyst_type", catalyst)
+    news_quality = data.get("news_quality", "UNKNOWN")
+
     reasons = data.get("reasons", [])
     risks = data.get("risks", [])
 
-    
     regime = data.get("regime", "UNKNOWN")
+    trade_bias = data.get("trade_bias", "🤔 Mixed/unclear")
 
-    reasons_text = "\n- ".join(reasons)
-    risks_text = "\n- ".join(risks)
+    reasons_text = "\n- ".join(reasons) if reasons else "None"
+    risks_text = "\n- ".join(risks) if risks else "None"
 
     msg = f"""
 {emoji} ALERT
@@ -29,8 +29,21 @@ Rank: #{rank}
 Price: ${price}
 Gain: +{gain}%
 
+Catalyst: {catalyst_type}
+News Quality: {news_quality}
 
-Catalyst: {catalyst}
+Reasons:
+- {reasons_text}
+
+Risk:
+- {risks_text}
+
+📊 MARKET REGIME: {regime}
+
+Bias: {trade_bias}
+"""
+
+    return msg.strip()
 
 Reasons:
 - {reasons_text}
