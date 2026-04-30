@@ -1,4 +1,4 @@
- def build_alert(data):
+def build_alert(data):
     emoji = data.get("emoji", "🚨")
     ticker = data.get("ticker")
     score = data.get("score")
