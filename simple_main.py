@@ -1121,28 +1121,30 @@ def run_scanner():
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
             headline = result.get("catalyst_text", "") or result.get("headline", "")
-
-            # your filter
             news_quality = classify_news_quality(headline)
-
-            # your existing analyzer
-            _, news_summary = analyze_news(headline)
-
             result["news_quality"] = news_quality
-            result["news_summary"] = news_summary
-            # --- NEWS QUALITY SCORE ADJUSTMENT ---
-            if news_quality == "NONE":
-               result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-               result["catalyst_type"] = "⚠️ TECHNICAL MOMENTUM ONLY"
-
-            elif news_quality == "WEAK":
-               result["score"] = max(0, result.get("score", 0) - 1)
-               result.setdefault("risks", []).append("⚠️ Weak/unclear news")
-               result["catalyst_type"] = "⚠️ WEAK NEWS"
-
+            
+            if news_quality == "JUNK":
+                result["catalyst_type"] = "🚫 JUNK NEWS"
+                result["score"] = max(0, result.get("score", 0) - 2)
+                result.setdefault("risks", []).append("⚠️ Junk/aggregator headline")
+            
+            elif news_quality == "NONE":
+                result["catalyst_type"] = "❌ NO NEWS"
+                result["score"] = max(0, result.get("score", 0) - 1)
+                result.setdefault("risks", []).append("⚠️ No clear news found")
+            
             elif news_quality == "STRONG":
-               result["score"] = min(10, result.get("score", 0) + 1)
-               result["catalyst_type"] = "⚡ STRONG NEWS"
+                result["catalyst_type"] = "⚡ STRONG NEWS"
+                result["score"] = min(10, result.get("score", 0) + 1)
+            
+            elif news_quality == "WEAK":
+                result["catalyst_type"] = "⚠️ WEAK NEWS"
+                result["score"] = max(0, result.get("score", 0) - 1)
+                result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+            
+            else:
+                result["catalyst_type"] = "❓ UNKNOWN NEWS"
             
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
