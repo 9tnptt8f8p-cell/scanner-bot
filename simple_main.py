@@ -1355,7 +1355,6 @@ def run_scanner():
             
             clean_risks = []
             base_risks = result.get("risks", [])
-            
             if not isinstance(base_risks, list):
                 base_risks = [base_risks]
             
@@ -1377,7 +1376,7 @@ def run_scanner():
                 clean_risks.append(r)
             
             result["risks"] = clean_risks
-            
+                        
             # overwrite with cleaned version
             result["risks"] = clean_risks
             # ===== TRASH FILTERS =====
