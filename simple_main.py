@@ -1239,6 +1239,17 @@ def run_scanner():
 
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
             pullback = price < recent_high * 0.95
+            if ticker not in second_leg_tracker and gain >= 20 and above_vwap:
+                second_leg_tracker[ticker] = {
+                    "high": recent_high,
+                    "sent": False
+                }
+            
+            elif ticker in second_leg_tracker:
+                second_leg_tracker[ticker]["high"] = max(
+                    second_leg_tracker[ticker]["high"],
+                    recent_high
+                )
 
             second_leg_alert = (
                 ticker in second_leg_tracker
