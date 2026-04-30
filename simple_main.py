@@ -1151,7 +1151,24 @@ def run_scanner():
             
             for risk in risk_list:
                 r = risk.lower()
-        
+            
+                if any(x in r for x in [
+                    "offering",
+                    "dilution",
+                    "warrant",
+                    "atm",
+                    "convertible",
+                    "securities purchase"
+                ]):
+                    clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
+                else:
+                    clean_risks.append(
+                        risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+                    )
+            
+            if clean_risks:
+                result["risks"] = result.get("risks", []) + clean_risks
+
             # 🚨 TRUE DILUTION / FINANCING
             if any(x in r for x in [
                 "offering",
