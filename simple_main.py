@@ -1300,7 +1300,6 @@ def run_scanner():
         
             # --- WARRANT / RIGHTS FILTER ---
             bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
-        
             if ticker.endswith(bad_suffixes):
                 print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
                 continue
@@ -1309,6 +1308,11 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             market_cap = result.get("market_cap", 0)
             float_shares = result.get("float", 0)
+        
+            # --- BAD DATA FILTER ---
+            if float_shares == 0 or market_cap == 0:
+                print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
+                continue
 
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
