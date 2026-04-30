@@ -1337,7 +1337,7 @@ def run_scanner():
             
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
-            offering_risks = detect_offering_risk(filing_text)
+            offering_risks = check_sec_offering_risk(filing_text)
             
             clean_risks = []
             
