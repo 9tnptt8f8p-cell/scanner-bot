@@ -941,15 +941,23 @@ def classify_news_quality(headline):
     h = (headline or "").lower()
 
     BAD_NEWS_KEYWORDS = [
-        "top gainers",
-        "stocks moving",
-        "market movers",
-        "premarket session",
-        "here are",
-        "why these stocks",
-        "market update",
-        "roundup",
-        "shares are trading higher",
+    "top gainers",
+    "stocks moving",
+    "stocks are moving",
+    "these stocks are moving",
+    "moving in today's session",
+    "market movers",
+    "premarket session",
+    "here are",
+    "why these stocks",
+    "why shares are trading",
+    "why is it moving",
+    "market update",
+    "roundup",
+    "shares are trading higher",
+    "driving market activity",
+    "attracting the most attention",
+]
     ]
 
     STRONG_KEYWORDS = [
