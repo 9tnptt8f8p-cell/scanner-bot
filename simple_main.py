@@ -1084,6 +1084,16 @@ def find_real_news_headline(ticker, current_headline=""):
 
     return current_headline, "NONE"
     return []
+    
+def find_real_news_headline(ticker, current_headline=""):
+    quality = classify_news_quality(current_headline)
+
+    # keep usable headline
+    if quality in ["STRONG", "WEAK", "UNKNOWN"]:
+        return current_headline, quality
+
+    # no scrape yet — safe placeholder
+    return current_headline, "NONE"
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1229,7 +1239,10 @@ def run_scanner():
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
             headline = result.get("catalyst_text", "") or result.get("headline", "")
+            headline = result.get("catalyst_text", "") or result.get("headline", "")
+            
             headline, news_quality = find_real_news_headline(ticker, headline)
+            
             result["catalyst_text"] = headline
             result["headline"] = headline
             result["news_quality"] = news_quality
