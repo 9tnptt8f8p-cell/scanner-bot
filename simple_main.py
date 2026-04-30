@@ -1354,18 +1354,28 @@ def run_scanner():
             offering_risks = check_sec_offering_risk(filing_text)
             
             clean_risks = []
+            base_risks = result.get("risks", [])
             
-            for r in result.get("risks", []) + risk_list + offering_risks:
+            if not isinstance(base_risks, list):
+                base_risks = [base_risks]
+            
+            if not isinstance(risk_list, list):
+                risk_list = [risk_list]
+            
+            if not isinstance(offering_risks, list):
+                offering_risks = [offering_risks]
+            
+            for r in base_risks + risk_list + offering_risks:
                 if isinstance(r, dict):
                     r = r.get("text") or r.get("message") or str(r)
-
+            
                 r = str(r)
-
+            
                 if "⚠️ SEC offering risk:" in r:
                     r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
-
+            
                 clean_risks.append(r)
-
+            
             result["risks"] = clean_risks
             
             # overwrite with cleaned version
