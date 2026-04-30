@@ -1144,41 +1144,32 @@ def run_scanner():
                result["catalyst_type"] = "⚡ STRONG NEWS"
             
                  
-            # --- SEC FILING CLEANUP (SMART) ---
+            # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
             
             clean_risks = []
             
-            for risk in risk_list:
-                r = risk.lower()
-            
-                if any(x in r for x in [
-                    "offering",
-                    "dilution",
-                    "warrant",
-                    "atm",
-                    "convertible",
-                    "securities purchase"
-                ]):
-                    clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
+            for r in risk_list:
+                if "offering" in r.lower() or "dilution" in r.lower():
+                    clean_risks.append(r)
                 else:
                     clean_risks.append(
-                        risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+                        r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
                     )
             
             if clean_risks:
                 result["risks"] = result.get("risks", []) + clean_risks
-
-            # 🚨 TRUE DILUTION / FINANCING
-            if any(x in r for x in [
-                "offering",
-                "dilution",
-                "warrant",
-                "atm",
-                "convertible",
-                "securities purchase"
-            ]):
-                clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
+            
+                        # 🚨 TRUE DILUTION / FINANCING
+                        if any(x in r for x in [
+                            "offering",
+                            "dilution",
+                            "warrant",
+                            "atm",
+                            "convertible",
+                            "securities purchase"
+                        ]):
+                            clean_risks.append("🚨 " + risk.replace("⚠️ ", ""))
         
             # ⚠️ JUST A FILING (NOT AUTOMATIC RISK)
             else:
