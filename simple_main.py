@@ -1144,31 +1144,23 @@ def run_scanner():
                result["score"] = min(10, result.get("score", 0) + 1)
                result["catalyst_type"] = "⚡ STRONG NEWS"
             
-            # --- SEC FILING CLEANUP (FIXED) ---
+                       # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
-            
+
             clean_risks = []
-            
-            for r in risk_list:
-                if isinstance(r, str):
-                    if "offering" in r.lower() or "dilution" in r.lower():
-                        clean_risks.append(r)
-            
-             clean_risks = []
-            
-            for r in result.get("risks", []):
-                # handle dict risks safely
+
+            for r in result.get("risks", []) + risk_list:
                 if isinstance(r, dict):
                     r = r.get("text") or r.get("message") or str(r)
-            
-                # always convert to string before replace
+
                 r = str(r)
-            
-                # soften wording
+
                 if "⚠️ SEC offering risk:" in r:
                     r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
-            
+
                 clean_risks.append(r)
+
+            result["risks"] = clean_risks
             
             # overwrite with cleaned version
             result["risks"] = clean_risks
