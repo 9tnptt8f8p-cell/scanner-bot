@@ -1133,17 +1133,17 @@ def run_scanner():
             result["news_summary"] = news_summary
             # --- NEWS QUALITY SCORE ADJUSTMENT ---
             if news_quality == "NONE":
-            result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-            result["catalyst_type"] = "⚠️ TECHNICAL MOMENTUM ONLY"
+               result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+               result["catalyst_type"] = "⚠️ TECHNICAL MOMENTUM ONLY"
 
             elif news_quality == "WEAK":
-            result["score"] = max(0, result.get("score", 0) - 1)
-            result.setdefault("risks", []).append("⚠️ Weak/unclear news")
-            result["catalyst_type"] = "⚠️ WEAK NEWS"
+               result["score"] = max(0, result.get("score", 0) - 1)
+               result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+               result["catalyst_type"] = "⚠️ WEAK NEWS"
 
             elif news_quality == "STRONG":
-            result["score"] = min(10, result.get("score", 0) + 1)
-            result["catalyst_type"] = "⚡ STRONG NEWS"
+               result["score"] = min(10, result.get("score", 0) + 1)
+               result["catalyst_type"] = "⚡ STRONG NEWS"
             
             # --- DILUTION BREAKDOWN ---
             dilution_text = (filing_text or "").lower()
@@ -1244,53 +1244,45 @@ def run_scanner():
                 result["gain"] >= 35
                 and total_vol >= 1_000_000
             )
-                  
-            # ===== DILUTION / OFFERING RISK FILTER =====
+            # --- DILUTION BREAKDOWN (CLEAN VERSION) ---
 
-            dilution_text = (
-                result.get("filing_text", "")
-                or result.get("catalyst_text", "")
-                or ""
-            ).lower()
+            dilution_text = (filing_text or "").lower()
 
-            dilution_words = [
-                "at-the-market",
-                "atm offering",
-                "shelf registration",
-                "registered direct",
-                "securities purchase agreement",
-                "warrant",
-                "warrants",
-                "public offering",
-                "private placement",
-                "resale registration",
-                "s-1",
-                "f-1",
-                "424b",
-                "prospectus"
+            active_dilution_words = [
+               "at-the-market",
+               "atm offering",
+               "public offering",
+               "registered direct",
+               "securities purchase agreement",
+               "private placement",
+               "prospectus supplement",
+               "424b",
             ]
 
-            dilution_hits = [word for word in dilution_words if word in dilution_text]
-
-            if dilution_hits:
-                result.setdefault("risks", []).append(
-                    "⚠️ Dilution language: " + ", ".join(dilution_hits[:3])
-                )
-                result["score"] = max(0, result.get("score", 0) - 1)
-           # ===== DILUTION SEVERITY =====
-
-            high_risk_words = [
-                "atm offering",
-                "public offering",
-                "registered direct",
-                "securities purchase agreement"
+            medium_dilution_words = [
+               "shelf registration",
+               "s-1",
+               "f-1",
+               "warrant",
+               "warrants",
+               "convertible",
             ]
 
-            high_risk_hit = any(word in dilution_text for word in high_risk_words)
+            active_hits = [w for w in active_dilution_words if w in dilution_text]
+            medium_hits = [w for w in medium_dilution_words if w in dilution_text]
 
-            if dilution_hits and high_risk_hit:
-                result.setdefault("risks", []).append("🚨 HIGH DILUTION RISK")
-                result["score"] = max(0, result.get("score", 0) - 2)
+            if active_hits:
+               result.setdefault("risks", []).append(
+               "🚨 ACTIVE DILUTION: " + ", ".join(active_hits[:3])
+            )
+               result["score"] = max(0, result.get("score", 0) - 2)
+
+            elif medium_hits:
+               result.setdefault("risks", []).append(
+               "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
+            )
+                result["score"] = max(0, result.get("score", 0) - 1)      
+ 
 
             # ===== SECOND LEG + BREAKOUT BURST =====
 
