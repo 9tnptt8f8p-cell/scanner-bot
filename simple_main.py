@@ -1018,67 +1018,62 @@ def run_scanner():
 
         now = time.time()
 
-for rank, result in enumerate(results, start=1):
-    ticker = result["ticker"]
-    price = result.get("price", 0)
-    recent_vol = result.get("recent_volume", 0)
-    market_cap = result.get("market_cap", 0)
-    float_shares = result.get("float", 0)
+                    for rank, result in enumerate(results, start=1):
+            ticker = result["ticker"]
+            price = result.get("price", 0)
+            recent_vol = result.get("recent_volume", 0)
+            market_cap = result.get("market_cap", 0)
+            float_shares = result.get("float", 0)
 
-    if market_cap == 0:
-        continue
+            # --- RISK HOOK ---
+            filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
+            filing_date = result.get("filing_date", None)
 
-    # --- RISK HOOK ---
-    filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
-    filing_date = result.get("filing_date", None)
+            risk_list = build_risk(filing_text, filing_date)
 
-    risk_list = build_risk(filing_text, filing_date)
+            if risk_list:
+                result["risks"] = result.get("risks", []) + risk_list
 
-    if risk_list:
-        result["risks"] = result.get("risks", []) + risk_list
+            # --- NEWS QUALITY FILTER ---
+            headline = result.get("catalyst_text", "")
+            news_quality = classify_news_quality(headline)
 
-    # --- NEWS QUALITY FILTER ---
-    headline = result.get("catalyst_text", "")
-    news_quality = classify_news_quality(result.get("catalyst_text", ""))
+            if news_quality == "STRONG":
+                result["catalyst_type"] = "⚡ STRONG NEWS"
 
-    if news_quality == "STRONG":
-        result["catalyst_type"] = "⚡ STRONG NEWS"
+            elif news_quality == "WEAK":
+                result["catalyst_type"] = "⚠️ WEAK NEWS"
+                result["reasons"] = [
+                    r for r in result.get("reasons", [])
+                    if "fresh news" not in r.lower()
+                ]
 
-    elif news_quality == "WEAK":
-        result["catalyst_type"] = "⚠️ WEAK NEWS"
-        result["reasons"] = [
-            r for r in result.get("reasons", [])
-            if "fresh news" not in r.lower()
-        ]
+            else:
+                result["catalyst_type"] = "none"
+                result["reasons"] = [
+                    r for r in result.get("reasons", [])
+                    if "fresh news" not in r.lower()
+                ]
 
-    else:
-        result["catalyst_type"] = "none"
-        result["reasons"] = [
-            r for r in result.get("reasons", [])
-            if "fresh news" not in r.lower()
-        ]
+            # ===== TRASH FILTERS =====
 
-    # ===== TRASH FILTERS =====
+            if price < 0.5 or price > 500:
+                print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
+                continue
 
-    # Price range: keep $0.50 to $500
-    if price < 0.5 or price > 500:
-        print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
-        continue
-            # Market cap filter
-            if market_cap == 0:
                 print(f"[WARN] {ticker} no market cap data — allowing through", flush=True)
 
             elif market_cap > 1_000_000_000:
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
-            # Float filter
+
             if float_shares == 0:
                 print(f"[WARN] {ticker} no float data — allowing through", flush=True)
 
-            if float_shares > 50_000_000:
+            elif float_shares > 50_000_000:
                 print(f"[FILTER] {ticker} skipped — float too high", flush=True)
                 continue
-            # Speed filter: blocks slow weak movers
+
             if result.get("gain", 0) < 25 and recent_vol < 200_000:
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
@@ -1115,8 +1110,6 @@ for rank, result in enumerate(results, start=1):
                 and total_vol >= 1_000_000
             )
                   
-            else:
-                result["catalyst_type"] = "❌ NO CLEAR NEWS"
             # ===== DILUTION / OFFERING RISK FILTER =====
 
             dilution_text = (
