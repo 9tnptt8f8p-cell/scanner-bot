@@ -976,7 +976,26 @@ def classify_news_quality(headline):
 
     return "NONE"
 
-
+    filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
+    filing_date = result.get("filing_date", None)
+    
+    risk_list = build_risk(filing_text, filing_date)
+    offering_risks = detect_offering_risk(filing_text)
+    
+    clean_risks = []
+    
+    for r in result.get("risks", []) + risk_list + offering_risks:
+        if isinstance(r, dict):
+            r = r.get("text") or r.get("message") or str(r)
+    
+        r = str(r)
+    
+        if "⚠️ SEC offering risk:" in r:
+            r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+    
+        clean_risks.append(r)
+    
+    result["risks"] = clean_risks
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1148,10 +1167,11 @@ def run_scanner():
             
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
-
+            offering_risks = detect_offering_risk(filing_text)
+            
             clean_risks = []
-
-            for r in result.get("risks", []) + risk_list:
+            
+            for r in result.get("risks", []) + risk_list + offering_risks:
                 if isinstance(r, dict):
                     r = r.get("text") or r.get("message") or str(r)
 
