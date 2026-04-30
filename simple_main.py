@@ -1144,15 +1144,44 @@ def run_scanner():
             elif news_quality == "STRONG":
             result["score"] = min(10, result.get("score", 0) + 1)
             result["catalyst_type"] = "⚡ STRONG NEWS"
-
+            
             # --- DILUTION BREAKDOWN ---
-            dilution_signals = detect_dilution_type(filing_text)
+            dilution_text = (filing_text or "").lower()
 
-            if dilution_signals:
-                result["risks"] = result.get("risks", [])
-                result["risks"].append(
-                    "⚠️ Dilution Risk: " + ", ".join(dilution_signals)
-                )
+            active_dilution_words = [
+           "at-the-market",
+           "atm offering",
+           "public offering",
+           "registered direct",
+           "securities purchase agreement",
+           "private placement",
+           "prospectus supplement",
+           "424b",
+           ]
+
+           medium_dilution_words = [
+          "shelf registration",
+           "s-1",
+           "f-1",
+           "warrant",
+           "warrants",
+           "convertible",
+            ]
+
+            active_hits = [w for w in active_dilution_words if w in dilution_text]
+            medium_hits = [w for w in medium_dilution_words if w in dilution_text]
+
+            if active_hits:
+            result.setdefault("risks", []).append(
+            "🚨 ACTIVE DILUTION: " + ", ".join(active_hits[:3])
+            )
+            result["score"] = max(0, result.get("score", 0) - 2)
+
+            elif medium_hits:
+            result.setdefault("risks", []).append(
+            "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
+            )
+            result["score"] = max(0, result.get("score", 0) - 1)
 
             # --- FINAL TRADE BIAS ---
             risk_list = build_risk(filing_text, filing_date)
