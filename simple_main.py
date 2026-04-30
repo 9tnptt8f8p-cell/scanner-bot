@@ -1129,33 +1129,11 @@ def run_scanner():
                 )
 
             # --- FINAL TRADE BIAS ---
-            result["trade_bias"] = build_trade_bias(result)
-
             risk_list = build_risk(filing_text, filing_date)
 
             if risk_list:
                 result["risks"] = result.get("risks", []) + risk_list
 
-            # --- NEWS QUALITY FILTER ---
-            headline = result.get("catalyst_text", "")
-            news_quality = classify_news_quality(headline)
-
-            if news_quality == "STRONG":
-                result["catalyst_type"] = "⚡ STRONG NEWS"
-
-            elif news_quality == "WEAK":
-                result["catalyst_type"] = "⚠️ WEAK NEWS"
-                result["reasons"] = [
-                    r for r in result.get("reasons", [])
-                    if "fresh news" not in r.lower()
-                ]
-
-            else:
-                result["catalyst_type"] = "none"
-                result["reasons"] = [
-                    r for r in result.get("reasons", [])
-                    if "fresh news" not in r.lower()
-                ]
 
             # ===== TRASH FILTERS =====
 
@@ -1334,8 +1312,9 @@ def run_scanner():
             current_price = float(result.get("price", 0))
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = current_price > last_alert_price
+            result["trade_bias"] = build_trade_bias(result)
 
-            if should_alert and new_high_realert and result["score"] >= 6:
+            if should_alert and cooldown_done and new_high_realert and result["score"] >= 6:
                 alert_tag = ""
 
                 if trend_builder_alert:
