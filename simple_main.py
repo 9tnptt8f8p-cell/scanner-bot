@@ -958,8 +958,7 @@ def classify_news_quality(headline):
     "driving market activity",
     "attracting the most attention",
 ]
-    ]
-
+    
     STRONG_KEYWORDS = [
         # biotech / FDA
         "fda",
