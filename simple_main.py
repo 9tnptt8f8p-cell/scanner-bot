@@ -1182,11 +1182,21 @@ def run_scanner():
                     "⚠️ Dilution Overhang: " + ", ".join(medium_hits[:3])
                 )
                 result["score"] = max(0, result.get("score", 0) - 1)
-            # --- FINAL TRADE BIAS ---
+            # --- SEC FILING CLEANUP (NOT AUTO-DILUTION) ---
             risk_list = build_risk(filing_text, filing_date)
 
-            if risk_list:
-                result["risks"] = result.get("risks", []) + risk_list
+            clean_risks = []
+
+            for risk in risk_list:
+                if "offering" in risk.lower() or "dilution" in risk.lower():
+                    clean_risks.append(risk)  # keep real dilution warnings
+                else:
+                    clean_risks.append(
+                        risk.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
+                    )
+
+            if  clean_risks:
+                result["risks"] = result.get("risks", []) + clean_risks
 
 
             # ===== TRASH FILTERS =====
