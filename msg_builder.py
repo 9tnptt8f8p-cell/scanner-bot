@@ -44,13 +44,3 @@ Bias: {trade_bias}
 """
 
     return msg.strip()
-
-Reasons:
-- {reasons_text}
-
-Risk:
-- {risks_text}
-
-📊 MARKET REGIME: {regime}
-"""
-    return msg.strip()
