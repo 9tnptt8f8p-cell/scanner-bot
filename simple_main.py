@@ -1315,8 +1315,15 @@ def run_scanner():
             new_high_realert = current_price > last_alert_price
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
-            if should_alert and cooldown_done and new_high_realert and result["score"] >= 6:
-                alert_tag = ""
+            if should_alert and result["score"] >= 6:
+            if cooldown_done or new_high_realert:
+                sent = send_alert(build_alert(result, rank) + alert_tag)
+
+                if sent:
+                    alert_history[ticker] = now
+                    runner_prices[ticker] = current_price
+            else:
+                print(f"[NO ALERT] #{rank} {ticker} cooldown active")
 
                 if trend_builder_alert:
                     alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
