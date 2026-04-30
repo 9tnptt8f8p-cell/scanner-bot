@@ -951,65 +951,65 @@ def classify_news_quality(headline):
         "shares are trading higher",
     ]
 
-  STRONG_KEYWORDS = [
-    # biotech / FDA
-    "fda",
-    "approval",
-    "approved",
-    "clearance",
-    "cleared",
-    "510(k)",
-    "clinical trial",
-    "phase 1",
-    "phase 2",
-    "phase 3",
-    "positive data",
-    "topline",
-    "endpoint",
-    "orphan drug",
-    "fast track",
-    "breakthrough therapy",
-
-    # business catalysts
-    "contract",
-    "agreement",
-    "partnership",
-    "collaboration",
-    "deal",
-    "order",
-    "purchase order",
-    "supply agreement",
-    "distribution agreement",
-    "license agreement",
-    "strategic alliance",
-
-    # corporate events
-    "acquisition",
-    "merger",
-    "buyout",
-    "takeover",
-    "definitive agreement",
-    "letter of intent",
-    "spin-off",
-    "spinoff",
-
-    # earnings / financial
-    "earnings",
-    "revenue",
-    "guidance",
-    "raises guidance",
-    "profitability",
-    "record revenue",
-
-    # crypto / AI / hot sectors
-    "bitcoin",
-    "ethereum",
-    "crypto",
-    "blockchain",
-    "artificial intelligence",
-    "ai-powered",
-    "nvidia",
-]
+    STRONG_KEYWORDS = [
+        # biotech / FDA
+        "fda",
+        "approval",
+        "approved",
+        "clearance",
+        "cleared",
+        "510(k)",
+        "clinical trial",
+        "phase 1",
+        "phase 2",
+        "phase 3",
+        "positive data",
+        "topline",
+        "endpoint",
+        "orphan drug",
+        "fast track",
+        "breakthrough therapy",
+    
+        # business catalysts
+        "contract",
+        "agreement",
+        "partnership",
+        "collaboration",
+        "deal",
+        "order",
+        "purchase order",
+        "supply agreement",
+        "distribution agreement",
+        "license agreement",
+        "strategic alliance",
+    
+        # corporate events
+        "acquisition",
+        "merger",
+        "buyout",
+        "takeover",
+        "definitive agreement",
+        "letter of intent",
+        "spin-off",
+        "spinoff",
+    
+        # earnings / financial
+        "earnings",
+        "revenue",
+        "guidance",
+        "raises guidance",
+        "profitability",
+        "record revenue",
+    
+        # crypto / AI / hot sectors
+        "bitcoin",
+        "ethereum",
+        "crypto",
+        "blockchain",
+        "artificial intelligence",
+        "ai-powered",
+        "nvidia",
+    ]
 WEAK_KEYWORDS = [
     "conference",
     "webcast",
@@ -1022,22 +1022,22 @@ WEAK_KEYWORDS = [
     "shareholder letter",
 ]
     # ❌ Fake / aggregator news
-    if any(k in h for k in BAD_NEWS_KEYWORDS):
-        return "NONE"
-
-    # ✅ Real catalyst
-    if any(k in h for k in STRONG_KEYWORDS):
-    return "STRONG"
-
-    if any(k in h for k in WEAK_KEYWORDS):
-        return "WEAK"
-    
-    if h:
-        return "UNKNOWN"
-
+if any(k in h for k in BAD_NEWS_KEYWORDS):
     return "NONE"
 
-   def detect_offering_risk(text):
+# ✅ Real catalyst
+if any(k in h for k in STRONG_KEYWORDS):
+return "STRONG"
+
+if any(k in h for k in WEAK_KEYWORDS):
+    return "WEAK"
+
+if h:
+    return "UNKNOWN"
+
+return "NONE"
+
+def detect_offering_risk(text):
     if not text:
         return []
 
