@@ -8,9 +8,10 @@ def build_alert(data):
     gain = data.get("gain")
 
     catalyst = data.get("catalyst", "none")
-    catalyst_type = data.get("catalyst_type", catalyst)
-    news_quality = data.get("news_quality", "UNKNOWN")
-
+    Catalyst: {catalyst_type}
+    Headline: {headline}
+    News Quality: {news_quality}
+    headline = headline[:120] + "..." if len(headline) > 120 else headline
     reasons = data.get("reasons", [])
     risks = data.get("risks", [])
 
