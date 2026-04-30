@@ -8,10 +8,13 @@ def build_alert(data):
     gain = data.get("gain")
 
     catalyst = data.get("catalyst", "none")
-    Catalyst: {catalyst_type}
-    Headline: {headline}
-    News Quality: {news_quality}
+    catalyst_type = data.get("catalyst_type", catalyst)
+    news_quality = data.get("news_quality", "UNKNOWN")
+
+    # ✅ Headline handling (FIXED)
+    headline = data.get("headline") or data.get("catalyst_text") or "No headline found"
     headline = headline[:120] + "..." if len(headline) > 120 else headline
+
     reasons = data.get("reasons", [])
     risks = data.get("risks", [])
 
@@ -24,7 +27,7 @@ def build_alert(data):
     reasons_text = "\n- ".join(reasons) if reasons else "None"
     risks_text = "\n- ".join(risks) if risks else "None"
 
-    # --- SESSION BLOCK (NEW 🔥) ---
+    # --- SESSION BLOCK ---
     session_block = ""
     if session == "PREMARKET":
         session_block = """
@@ -47,6 +50,7 @@ Price: ${price}
 Gain: +{gain}%
 
 Catalyst: {catalyst_type}
+Headline: {headline}
 News Quality: {news_quality}
 
 Reasons:
@@ -56,6 +60,11 @@ Risk:
 - {risks_text}
 
 📊 MARKET REGIME: {regime}
+
+Bias: {trade_bias}
+"""
+
+    return msg.strip()
 
 Bias: {trade_bias}
 """
