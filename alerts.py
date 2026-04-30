@@ -1,33 +1,50 @@
-import requests
 import os
+import requests
 
 TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")  # comma separated
 
-print(f"[TELEGRAM DEBUG] token={bool(TOKEN)} chat_id={bool(CHAT_ID)}")
+def get_chat_ids():
+    ids = []
+
+    if CHAT_IDS:
+        ids.extend([x.strip() for x in CHAT_IDS.split(",") if x.strip()])
+
+    if CHAT_ID:
+        ids.append(CHAT_ID.strip())
+
+    return list(set(ids))  # remove duplicates
+
 
 def send_alert(message):
-    if not TOKEN or not CHAT_ID:
-        print("[ALERT ERROR] Missing TELEGRAM token or chat id")
+    chat_ids = get_chat_ids()
+
+    print(f"[TELEGRAM DEBUG] token={bool(TOKEN)} chats={chat_ids}")
+
+    if not TOKEN or not chat_ids:
+        print("[ALERT LOCAL]", message)
         return False
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    success = True
 
-    try:
-        r = requests.post(url, json=payload, timeout=10)
+    for chat_id in chat_ids:
+        try:
+            r = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": message},
+                timeout=10
+            )
 
-        if r.status_code == 200:
-            print("[ALERT SENT]")
-            return True
-        else:
-            print(f"[ALERT ERROR] status={r.status_code} body={r.text}")
-            return False
+            print(f"[TELEGRAM RESPONSE] chat={chat_id} status={r.status_code}")
 
-    except Exception as e:
-        print(f"[ALERT ERROR] {e}")
-        return False
+            if r.status_code != 200:
+                success = False
+
+        except Exception as e:
+            print(f"[TELEGRAM ERROR] {e}")
+            success = False
+
+    return success
