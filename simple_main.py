@@ -1131,6 +1131,18 @@ def run_scanner():
 
             result["news_quality"] = news_quality
             result["news_summary"] = news_summary
+            # --- NEWS QUALITY SCORE ADJUSTMENT ---
+            if news_quality == "NONE":
+            result["score"] = max(0, result.get("score", 0) - 2)
+            result.setdefault("risks", []).append("⚠️ No real catalyst / aggregator headline")
+
+            elif news_quality == "WEAK":
+            result["score"] = max(0, result.get("score", 0) - 1)
+            result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+
+            elif news_quality == "STRONG":
+            result["score"] = min(10, result.get("score", 0) + 1)
+            result["catalyst_type"] = "⚡ STRONG NEWS"
 
             # --- DILUTION BREAKDOWN ---
             dilution_signals = detect_dilution_type(filing_text)
