@@ -1069,6 +1069,39 @@ WEAK_KEYWORDS = [
 
     if hits:
         return [f"🚨 DILUTION RISK (can dump anytime): {', '.join(hits[:3])}"]
+def scrape_pr_headline(ticker):
+    sources = [
+        f"https://www.prnewswire.com/search/news/?keyword={ticker}",
+        f"https://www.globenewswire.com/search/keyword/{ticker}",
+    ]
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for url in sources:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+
+            if r.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            for tag in soup.find_all(["a", "h1", "h2", "h3"]):
+                text = tag.get_text(" ", strip=True)
+
+                if not text or len(text) < 25:
+                    continue
+
+                quality = classify_news_quality(text)
+
+                if quality in ["STRONG", "WEAK", "UNKNOWN"]:
+                    print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
+                    return text
+
+        except Exception as e:
+            print(f"[PR SCRAPE ERROR] {ticker}: {e}", flush=True)
+
+    return ""
 def find_real_news_headline(ticker, current_headline=""):
     """
     Keeps current headline if usable.
@@ -1103,11 +1136,18 @@ def find_real_news_headline(ticker, current_headline=""):
                 if scraped_quality in ["STRONG", "WEAK", "UNKNOWN"]:
                     print(f"[NEWS SCRAPE] {ticker}: {text}", flush=True)
                     return text, scraped_quality
-
     except Exception as e:
         print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
 
-    # ❌ Nothing found
+    # 🔎 Try PR Newswire / GlobeNewswire fallback
+    pr_headline = scrape_pr_headline(ticker)
+
+    if pr_headline:
+        pr_quality = classify_news_quality(pr_headline)
+        print(f"[PR SCRAPE] {ticker}: {pr_headline}", flush=True)
+        return pr_headline, pr_quality
+
+    # ❌ Nothing found anywhere
     return current_headline, "NONE"
     
 def find_real_news_headline(ticker, current_headline=""):
