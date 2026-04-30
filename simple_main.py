@@ -1144,7 +1144,7 @@ def run_scanner():
                result["score"] = min(10, result.get("score", 0) + 1)
                result["catalyst_type"] = "⚡ STRONG NEWS"
             
-                       # --- SEC FILING CLEANUP (FIXED) ---
+            # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
 
             clean_risks = []
