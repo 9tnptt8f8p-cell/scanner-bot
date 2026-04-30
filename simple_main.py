@@ -1485,7 +1485,7 @@ def run_scanner():
                 or breakout_hold_setup
                 or dip_buy_setup
                         )
-           if second_leg_alert:
+            if second_leg_alert:
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
                 result.setdefault("reasons", []).append("Second leg building")
@@ -1522,7 +1522,7 @@ def run_scanner():
             elif dip_buy_setup:
                 alert_tag = "\n\n📈 DIP BUY SETUP"
 
-            if should_alert and result["score"] >= 6:
+            if should_alert and result["score"] >= 7:
                 if cooldown_done or new_high_realert:
                     sent = send_alert(build_alert(result, rank) + alert_tag)
                     if sent:
