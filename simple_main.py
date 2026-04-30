@@ -1018,7 +1018,7 @@ def run_scanner():
 
         now = time.time()
 
-                    for rank, result in enumerate(results, start=1):
+        for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
             price = result.get("price", 0)
             recent_vol = result.get("recent_volume", 0)
