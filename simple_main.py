@@ -1295,9 +1295,16 @@ def run_scanner():
             print("[SCAN] No qualified gainers found", flush=True)
 
         now = time.time()
-
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
+        
+            # --- WARRANT / RIGHTS FILTER ---
+            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
+        
+            if ticker.endswith(bad_suffixes):
+                print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
+                continue
+        
             price = result.get("price", 0)
             recent_vol = result.get("recent_volume", 0)
             market_cap = result.get("market_cap", 0)
