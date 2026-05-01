@@ -1633,10 +1633,12 @@ def run_scanner():
             
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
-            
+            current_price = float(result.get("price", 0))
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-            
+            if not cooldown_done:
+               print(f"[SKIP] {ticker} cooldown active", flush=True)
+               continue
             current_price = float(result.get("price", 0))
             
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
@@ -1662,22 +1664,21 @@ def run_scanner():
                 alert_tag = "📈 DIP BUY"
             else:
                 alert_tag = ""
-
             if should_alert and result["score"] >= 7:
-                if cooldown_done or new_high_realert:
-                    result["setup_tag"] = alert_tag.strip()
-                    sent = send_alert(build_alert(result, rank))
-                    time.sleep(0.3)
-                    if sent:
-                        alert_history[ticker] = now
-                        runner_prices[ticker] = current_price
-
-                        if second_leg_alert and ticker in second_leg_tracker:
-                            second_leg_tracker[ticker]["sent"] = True
-
-                        print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
-                    else:
-                        print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+                result["setup_tag"] = alert_tag.strip()
+                sent = send_alert(build_alert(result, rank))
+                time.sleep(0.3)
+            
+                if sent:
+                    alert_history[ticker] = now
+                    runner_prices[ticker] = current_price
+            
+                    if second_leg_alert and ticker in second_leg_tracker:
+                        second_leg_tracker[ticker]["sent"] = True
+            
+                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+                else:
+                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
                 else:
                     print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
             else:
