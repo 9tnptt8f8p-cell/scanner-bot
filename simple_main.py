@@ -1719,34 +1719,34 @@ def run_scanner():
                 structure_text = " ".join(
                     result.get("reasons", []) + result.get("risks", [])
                 ).lower()
-                
-                bad_chart = (
-                    "below vwap" in structure_text
-                    or "big upper wick" in structure_text
-                    or "possible trap" in structure_text
-                    or "bad structure" in structure_text
-                )
-                
-                if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
-                    print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
-                    continue
-                if alerts_allowed and should_alert and result["score"] >= 7:
+                        
+            bad_chart = (
+                "below vwap" in structure_text
+                or "big upper wick" in structure_text
+                or "possible trap" in structure_text
+                or "bad structure" in structure_text
+            )
+        
+            if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
+                print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
+                continue
+        
+            if alerts_allowed and should_alert and result["score"] >= 7:
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
                 time.sleep(0.3)
-            
+        
                 if sent:
                     alert_history[ticker] = now
                     runner_prices[ticker] = current_price
-                    sent_this_cycle.add(ticker)   # 👈 THIS is the new line you’re adding
-            
+                    sent_this_cycle.add(ticker)
+        
                     if second_leg_alert and ticker in second_leg_tracker:
                         second_leg_tracker[ticker]["sent"] = True
-            
+        
                     print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
-                    
             else:
                 print(
                     f"[NO ALERT] #{rank} {ticker} blocked | "
