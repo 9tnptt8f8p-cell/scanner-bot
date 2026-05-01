@@ -1482,8 +1482,17 @@ def run_scanner():
             
                 if not r or r == "None":
                     continue
-            
+
+                if "SEC offering risk" in r:
+                    continue
+
+                if r in seen:
+                    continue
+
+                seen.add(r)
                 clean_risks.append(r)
+
+            result["risks"] = clean_risks
             
             # ✅ FINALIZE + DEDUPE (only once)
             result["risks"] = list(dict.fromkeys(clean_risks))
