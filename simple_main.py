@@ -1383,7 +1383,7 @@ def run_scanner():
                 and recent_vol >= 5000
                 and result.get("score", 0) >= 5
             )
-              
+            
             if early_spike and ticker not in alert_history:
                 title = get_alert_title(result)
                 status = get_alert_status(result)
@@ -1413,10 +1413,9 @@ def run_scanner():
             """
             
                 send_alert(early_msg)
+                time.sleep(0.3)
                 alert_history[ticker] = now
-                print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
-                continue
-
+               
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
