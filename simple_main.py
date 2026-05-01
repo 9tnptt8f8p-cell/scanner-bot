@@ -1368,17 +1368,17 @@ def run_scanner():
         weekday = now_et.weekday() 
         
         alerts_allowed = True
-        
-        # 🚫 Weekend block
+
+        # 🚫 Weekend
         if weekday >= 5:
             alerts_allowed = False
         
-        # 🚫 After 4:10 PM block
+        # 🚫 After 4:10 PM
         if (hour > 16) or (hour == 16 and minute >= 10):
             alerts_allowed = False
         
         if not alerts_allowed:
-            print("[MARKET] Alerts disabled (after hours/weekend)", flush=True)
+            print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
          
