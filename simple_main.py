@@ -1730,7 +1730,7 @@ def run_scanner():
                 if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
                     print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                     continue
-            if should_alert and result["score"] >= 7:
+                if alerts_allowed and should_alert and result["score"] >= 7:
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
                 time.sleep(0.3)
