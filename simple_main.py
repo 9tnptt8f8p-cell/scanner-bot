@@ -731,16 +731,26 @@ def get_alert_title(result):
     score = result.get("score", 0)
     recent_vol = result.get("recent_volume", 0)
 
+    # 🔥 Special override
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
 
+    # 🔥 Top tier
     if gain >= 35 and score >= 8 and recent_vol >= 200_000:
         return "🔥 MOMENTUM RUNNER"
 
-    if gain >= 20 and score >= 6 and recent_vol >= 100_000:
+    # 🚨 Strong setup forming
+    if gain >= 20 and score >= 7 and recent_vol >= 100_000:
         return "🚨 BUILDING MOMENTUM"
 
-    return "⚠️ EARLY SPIKE"
+    # 👀 Mid tier watch
+    if score == 7:
+        return "👀 POTENTIAL RUNNER"
+
+    # ⚠️ Default (early / weak)
+    return "⚠️ EARLY SPIKE WATCH"
+
+    return "⚠️ EARLY SPIKE WATCH"
 def build_alert(result, rank):
     clean_reasons = [r for r in result.get("reasons", []) if "market cap" not in r.lower()]
     reasons = ", ".join(clean_reasons) or "None"
