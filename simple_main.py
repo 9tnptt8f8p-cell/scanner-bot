@@ -1393,12 +1393,12 @@ def run_scanner():
             - early move can fade fast
             - wait for confirmation
             """
-            
-            send_alert(early_msg)
-            time.sleep(0.3)
-            alert_history[f"{ticker}_early"] = now
-            runner_prices[f"{ticker}_early"] = price
-            continue
+                
+                send_alert(early_msg)
+                time.sleep(0.3)
+                alert_history[f"{ticker}_early"] = now
+                runner_prices[f"{ticker}_early"] = price
+                continue
             
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
