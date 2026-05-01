@@ -955,108 +955,58 @@ def check_sec_offering_risk(ticker):
 
 
 port = int(os.getenv("PORT", 10000))
-
 def classify_news_quality(headline):
     h = (headline or "").lower()
 
     BAD_NEWS_KEYWORDS = [
-    "top gainers",
-    "stocks moving",
-    "stocks are moving",
-    "these stocks are moving",
-    "moving in today's session",
-    "market movers",
-    "premarket session",
-    "here are",
-    "why these stocks",
-    "why shares are trading",
-    "why is it moving",
-    "market update",
-    "roundup",
-    "shares are trading higher",
-    "driving market activity",
-    "attracting the most attention",
-]
-    
+        "top gainers",
+        "stocks moving",
+        "stocks are moving",
+        "these stocks are moving",
+        "moving in today's session",
+        "market movers",
+        "premarket session",
+        "here are",
+        "why these stocks",
+        "why shares are trading",
+        "why is it moving",
+        "market update",
+        "roundup",
+        "shares are trading higher",
+        "driving market activity",
+        "attracting the most attention",
+    ]
+
     STRONG_KEYWORDS = [
-        # biotech / FDA
-        "fda",
-        "approval",
-        "approved",
-        "clearance",
-        "cleared",
-        "510(k)",
-        "clinical trial",
-        "phase 1",
-        "phase 2",
-        "phase 3",
-        "positive data",
-        "topline",
-        "endpoint",
-        "orphan drug",
-        "fast track",
-        "breakthrough therapy",
-
-        # business catalysts
-        "contract",
-        "agreement",
-        "partnership",
-        "collaboration",
-        "deal",
-        "order",
-        "purchase order",
-        "supply agreement",
-        "distribution agreement",
-        "license agreement",
-        "strategic alliance",
-
-        # corporate events
-        "acquisition",
-        "merger",
-        "buyout",
-        "takeover",
-        "definitive agreement",
-        "letter of intent",
-        "spin-off",
-        "spinoff",
-
-        # earnings / financial
-        "earnings",
-        "revenue",
-        "guidance",
-        "raises guidance",
-        "profitability",
-        "record revenue",
-
-        # crypto / AI / hot sectors
-        "bitcoin",
-        "ethereum",
-        "crypto",
-        "blockchain",
-        "artificial intelligence",
-        "ai-powered",
-        "nvidia",
+        "fda","approval","approved","clearance","cleared","510(k)",
+        "clinical trial","phase 1","phase 2","phase 3",
+        "positive data","topline","endpoint","orphan drug",
+        "fast track","breakthrough therapy",
+        "contract","agreement","partnership","collaboration","deal","order",
+        "purchase order","supply agreement","distribution agreement",
+        "license agreement","strategic alliance",
+        "acquisition","merger","buyout","takeover",
+        "definitive agreement","letter of intent",
+        "spin-off","spinoff",
+        "earnings","revenue","guidance","raises guidance",
+        "profitability","record revenue",
+        "bitcoin","ethereum","crypto","blockchain",
+        "artificial intelligence","ai-powered","nvidia",
     ]
 
     WEAK_KEYWORDS = [
-        "conference",
-        "webcast",
-        "presentation",
-        "to present",
-        "participate",
-        "appoints",
-        "announces appointment",
-        "corporate update",
-        "shareholder letter",
+        "conference","webcast","presentation","to present",
+        "participate","appoints","announces appointment",
+        "corporate update","shareholder letter",
     ]
 
-    # ❌ Fake / aggregator news
-    if any(k in h for k in BAD_NEWS_KEYWORDS):
-        return "NONE"
-
-    # ✅ Real catalyst
+    # ✅ STRONG FIRST
     if any(k in h for k in STRONG_KEYWORDS):
         return "STRONG"
+
+    # ❌ Junk aggregator
+    if any(k in h for k in BAD_NEWS_KEYWORDS):
+        return "WEAK"
 
     # ⚠️ Weak
     if any(k in h for k in WEAK_KEYWORDS):
@@ -1066,7 +1016,6 @@ def classify_news_quality(headline):
         return "UNKNOWN"
 
     return "NONE"
-import re
 
 def extract_warrant_price(text):
     t = (text or "").lower()
