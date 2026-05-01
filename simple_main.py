@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -1056,38 +1057,100 @@ def classify_news_quality(headline):
         return "UNKNOWN"
 
     return "NONE"
-def detect_offering_risk(text):
+import re
+
+def extract_warrant_price(text):
+    t = (text or "").lower()
+
+    patterns = [
+        r"exercise price of \$?(\d+(?:\.\d+)?)",
+        r"exercise price equal to \$?(\d+(?:\.\d+)?)",
+        r"exercisable at \$?(\d+(?:\.\d+)?)",
+        r"exercise price is \$?(\d+(?:\.\d+)?)",
+        r"warrants.*?exercise price.*?\$?(\d+(?:\.\d+)?)",
+        r"warrants.*?\$?(\d+(?:\.\d+)?) per share",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, t)
+        if match:
+            try:
+                return float(match.group(1))
+            except:
+                return None
+
+    return None
+
+
+def extract_warrant_price(text):
+    t = (text or "").lower()
+
+    patterns = [
+        r"exercise price of \$?(\d+(?:\.\d+)?)",
+        r"exercise price equal to \$?(\d+(?:\.\d+)?)",
+        r"exercisable at \$?(\d+(?:\.\d+)?)",
+        r"exercise price is \$?(\d+(?:\.\d+)?)",
+        r"warrants.*?exercise price.*?\$?(\d+(?:\.\d+)?)",
+        r"warrants.*?\$?(\d+(?:\.\d+)?) per share",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, t)
+        if match:
+            try:
+                return float(match.group(1))
+            except:
+                return None
+
+    return None
+
+
+def detect_offering_risk(text, price=0):
     if not text:
         return []
 
     t = text.lower()
+    risks = []
 
-    offering_keywords = [
-        "at-the-market",
-        "at the market",
-        "atm offering",
-        "equity distribution agreement",
-        "sales agreement",
-        "shelf registration",
-        "form s-3",
-        "form f-3",
-        "registered direct offering",
-        "private placement",
-        "securities purchase agreement",
-        "purchase agreement",
-        "warrants",
-        "pre-funded warrants",
-        "common warrants",
-        "exercise price",
-        "convertible note",
-        "convertible preferred",
-        "shares of common stock",
-    ]
+    if (
+        "at-the-market" in t
+        or "at the market" in t
+        or "atm offering" in t
+        or "equity distribution agreement" in t
+        or "sales agreement" in t
+    ):
+        risks.append("🚨 ATM offering — company can sell shares anytime")
 
-    hits = [k for k in offering_keywords if k in t]
+    if "registered direct offering" in t:
+        risks.append("🚨 Registered direct offering — immediate dilution")
 
-    if hits:
-        return [f"🚨 DILUTION RISK (can dump anytime): {', '.join(hits[:3])}"]
+    if "private placement" in t:
+        risks.append("🚨 Private placement — dilution risk")
+
+    if "securities purchase agreement" in t or "purchase agreement" in t:
+        risks.append("🚨 Securities purchase agreement — financing/dilution")
+
+    if "shelf registration" in t or "form s-3" in t or "form f-3" in t:
+        risks.append("⚠️ Shelf registration — future dilution possible")
+
+    if "resale" in t or "resale prospectus" in t:
+        risks.append("⚠️ Resale registration — shares may unlock for selling")
+
+    if "convertible" in t:
+        risks.append("🚨 Convertible financing — can convert into shares")
+
+    if "warrant" in t:
+        warrant_price = extract_warrant_price(t)
+
+        if warrant_price:
+            if price and price >= warrant_price:
+                risks.append(f"🚨 Warrants in-the-money — ${warrant_price:.2f} vs current ${price:.2f}")
+            else:
+                risks.append(f"⚠️ Warrants detected — exercise ${warrant_price:.2f} not active yet")
+        else:
+            risks.append("⚠️ Warrants detected — exercise price unknown")
+
+    return risks
 def scrape_pr_headline(ticker):
     sources = [
         f"https://www.prnewswire.com/search/news/?keyword={ticker}",
@@ -1385,7 +1448,10 @@ def run_scanner():
                     result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
-            offering_risks = detect_offering_risk(filing_text) or []
+            offering_risks = detect_offering_risk(
+                filing_text,
+                price=float(result.get("price", 0) or 0)
+            ) or []
             
             clean_risks = []
             base_risks = result.get("risks", [])
