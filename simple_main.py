@@ -929,7 +929,7 @@ def check_sec_offering_risk(ticker):
         forms = data.get("filings", {}).get("recent", {}).get("form", [])
         dates = data.get("filings", {}).get("recent", {}).get("filingDate", [])
 
-        risky_forms = {"S-1", "S-3", "424B5", "424B3", "F-1", "F-3", "6-K", "8-K"}
+        risky_forms = {"S-1", "S-3", "424B5", "424B3", "F-1", "F-3"}
 
         hits = []
         for form, date in zip(forms[:20], dates[:20]):
@@ -1238,10 +1238,10 @@ def run_scanner():
 
             sec_risk, sec_note = check_sec_offering_risk(ticker)
             result["sec_note"] = sec_note
-
+            
             if sec_risk:
-                result["risks"].append(f"⚠️ SEC offering risk: {sec_note}")
-                result["score"] -= 2
+                result["risks"].append(f"🚨 Possible dilution form found: {sec_note}")
+                result["score"] = max(0, result.get("score", 0) - 2)
 
             result["session"] = session
             result["session_notes"] = session_notes
@@ -1350,18 +1350,23 @@ def run_scanner():
                 result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ No clear news found")
             
-            elif news_quality == "STRONG":
+                 elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
                 result["score"] = min(10, result.get("score", 0) + 1)
-            
+
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+
             elif news_quality == "UNKNOWN":
                 result["score"] = max(0, result.get("score", 0) - 1)
-                result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+
+                if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
+                    result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+
                 result["catalyst_type"] = "❓ UNKNOWN NEWS"
+            
             # --- VWAP DISTANCE SCORE IMPACT ---
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
@@ -1377,7 +1382,7 @@ def run_scanner():
                     result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
-            offering_risks = check_sec_offering_risk(filing_text)
+            offering_risks = detect_offering_risk(filing_text) or []
             
             clean_risks = []
             base_risks = result.get("risks", [])
@@ -1403,9 +1408,6 @@ def run_scanner():
             
                 if not r or r == "None":
                     continue
-            
-                if "⚠️ SEC offering risk:" in r:
-                    r = r.replace("⚠️ SEC offering risk:", "⚠️ SEC filing nearby:")
             
                 clean_risks.append(r)
             
