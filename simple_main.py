@@ -1296,11 +1296,41 @@ def run_scanner():
 
             structure = analyze_structure(ticker, candles)
             result["structure"] = structure
-            result["score"] += structure.get("structure_score", 0)
+            
+            structure_score = structure.get("structure_score", 0)
+            structure_reasons = structure.get("reasons", [])
+            structure_risks = structure.get("risk_flags", [])
+            
+            result["risks"].extend(structure_risks)
+            result["reasons"].extend(structure_reasons)
+            
+            structure_text = " ".join(structure_reasons + structure_risks).lower()
+            
+            bad_structure = (
+                "below vwap" in structure_text
+                or "upper wick" in structure_text
+                or "trap" in structure_text
+                or "failed" in structure_text
+            )
+            
+            good_structure = (
+                structure_score >= 2
+                and "price above vwap" in structure_text
+            )
+            
+            # ✅ structure now matters more
+            if bad_structure:
+                result["score"] = max(0, result["score"] - 3)
+                result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
+            
+            elif good_structure:
+                result["score"] = min(10, result["score"] + 2)
+                result.setdefault("reasons", []).append("✅ Clean structure confirmation")
+            
+            else:
+                result["score"] = max(0, result["score"] + structure_score)
+            
             result["score"] = max(0, min(result["score"], 10))
-
-            result["risks"].extend(structure.get("risk_flags", []))
-            result["reasons"].extend(structure.get("reasons", []))
 
             trend_builder_alert = is_trend_builder(result, candles)
             result["trend_builder_alert"] = trend_builder_alert
@@ -1664,6 +1694,20 @@ def run_scanner():
                 alert_tag = "📈 DIP BUY"
             else:
                 alert_tag = ""
+                structure_text = " ".join(
+                    result.get("reasons", []) + result.get("risks", [])
+                ).lower()
+                
+                bad_chart = (
+                    "below vwap" in structure_text
+                    or "big upper wick" in structure_text
+                    or "possible trap" in structure_text
+                    or "bad structure" in structure_text
+                )
+                
+                if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
+                    print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
+                    continue
             if should_alert and result["score"] >= 7:
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
