@@ -1420,8 +1420,8 @@ def run_scanner():
             - early move can fade fast
             - wait for confirmation
             """
-                    send_alert(early_msg)
-                    alert_history[ticker] = now
+                send_alert(early_msg)
+                alert_history[ticker] = now
             # --- BAD DATA FILTER ---
             if float_shares == 0 or market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
