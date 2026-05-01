@@ -1639,7 +1639,7 @@ def run_scanner():
             if not cooldown_done:
                print(f"[SKIP] {ticker} cooldown active", flush=True)
                continue
-            current_price = float(result.get("price", 0))
+           
             
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
                 first_alert_price[ticker] = current_price
@@ -1679,7 +1679,7 @@ def run_scanner():
                     print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
-                else:
+                
                     print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
             else:
                 print(
