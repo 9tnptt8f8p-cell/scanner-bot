@@ -752,7 +752,7 @@ def get_alert_title(result):
 
     return "⚠️ EARLY SPIKE WATCH"
     
-    def get_alert_status(result):
+def get_alert_status(result):
     score = result.get("score", 0)
 
     if score >= 9:
