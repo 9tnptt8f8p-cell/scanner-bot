@@ -727,7 +727,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
         "risks": risks
     }
 def get_alert_title(result):
-    gain = result.get("gain", 0)
     score = result.get("score", 0)
     recent_vol = result.get("recent_volume", 0)
 
@@ -735,21 +734,17 @@ def get_alert_title(result):
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
 
-    # 🔥 Top tier
-    if gain >= 35 and score >= 8 and recent_vol >= 200_000:
+    # 🔥 TOP PRIORITY = SCORE (not gain)
+    if score >= 9 and recent_vol >= 200_000:
         return "🔥 MOMENTUM RUNNER"
 
-    # 🚨 Strong setup forming
-    if gain >= 20 and score >= 7 and recent_vol >= 100_000:
+    if score == 8:
         return "🚨 BUILDING MOMENTUM"
 
-    # 👀 Mid tier watch
     if score == 7:
         return "👀 POTENTIAL RUNNER"
 
-    # ⚠️ Default (early / weak)
-    return "⚠️ EARLY SPIKE WATCH"
-
+    # ⚠️ Default
     return "⚠️ EARLY SPIKE WATCH"
     
 def get_alert_status(result):
