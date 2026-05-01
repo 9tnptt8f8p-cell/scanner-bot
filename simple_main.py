@@ -1377,7 +1377,7 @@ def run_scanner():
             early_spike = (
                 gain >= 25
                 and recent_vol >= 5000
-                and result.get("score", 0) >= 5
+                and result.get("score", 0) >= 6
             )
             
             if early_spike and now - alert_history.get(ticker, 0) > EARLY_ALERT_COOLDOWN:
