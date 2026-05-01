@@ -83,12 +83,23 @@ def build_trade_bias(result):
 
     if news_quality == "NEGATIVE":
         return "❌ Negative catalyst — avoid unless extreme scalp only"
-
     if news_quality == "WEAK":
         return "⚠️ Weak catalyst — could fade fast"
-
-    if "below vwap" in structure:
-        return "⚠️ Below VWAP — wait for reclaim"
+    
+    price = float(result.get("price", 0) or 0)
+    vwap = float(result.get("vwap", 0) or 0)
+    
+    if vwap and price:
+        vwap_distance = ((price - vwap) / vwap) * 100
+    
+        if vwap_distance <= -5:
+            return "🚨 Way below VWAP — failed momentum / avoid"
+    
+        elif vwap_distance <= -2:
+            return "⚠️ Below VWAP — wait for reclaim"
+    
+        elif vwap_distance < 0:
+            return "👀 Near VWAP — reclaim watch"
 
     if "upper wick" in structure or "trap" in structure:
         return "⚠️ Trap risk — wait for cleaner setup"
