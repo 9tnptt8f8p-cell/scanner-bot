@@ -1066,27 +1066,6 @@ def extract_warrant_price(text):
 
     return None
 
-
-    patterns = [
-        r"exercise price of \$?(\d+(?:\.\d+)?)",
-        r"exercise price equal to \$?(\d+(?:\.\d+)?)",
-        r"exercisable at \$?(\d+(?:\.\d+)?)",
-        r"exercise price is \$?(\d+(?:\.\d+)?)",
-        r"warrants.*?exercise price.*?\$?(\d+(?:\.\d+)?)",
-        r"warrants.*?\$?(\d+(?:\.\d+)?) per share",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, t)
-        if match:
-            try:
-                return float(match.group(1))
-            except:
-                return None
-
-    return None
-
-
 def detect_offering_risk(text, price=0):
     if not text:
         return []
