@@ -708,19 +708,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 1
         reasons.append(f"strong catalyst: {catalyst_type}")
 
-    dilution_hits = check_dilution_risk(catalyst_text)
-
-    if dilution_hits:
-        if len(dilution_hits) >= 3:
-            score -= 5
-            risks.append("HIGH dilution risk: " + ", ".join(dilution_hits))
-        elif len(dilution_hits) == 2:
-            score -= 4
-            risks.append("MEDIUM/HIGH dilution risk: " + ", ".join(dilution_hits))
-        else:
-            score -= 3
-            risks.append("dilution risk: " + ", ".join(dilution_hits))
-
     if gain > 30 and volume < 1_000_000:
         score -= 2
         risks.append("low volume spike")
@@ -1082,9 +1069,6 @@ def extract_warrant_price(text):
     return None
 
 
-def extract_warrant_price(text):
-    t = (text or "").lower()
-
     patterns = [
         r"exercise price of \$?(\d+(?:\.\d+)?)",
         r"exercise price equal to \$?(\d+(?:\.\d+)?)",
@@ -1409,13 +1393,7 @@ def run_scanner():
             elif news_quality == "NONE":
                 result["catalyst_type"] = "❌ NO NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
-                result.setdefault("risks", []).append("⚠️ No clear news found")
-            
-            elif news_quality == "STRONG":
-                result["catalyst_type"] = "⚡ STRONG NEWS"
-                result["score"] = min(10, result.get("score", 0) + 1)
-                result.setdefault("risks", []).append("⚠️ No clear news found")
-            
+                        
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
                 result["score"] = min(10, result.get("score", 0) + 1)
