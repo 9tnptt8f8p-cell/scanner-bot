@@ -1334,8 +1334,6 @@ def run_scanner():
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
             headline = result.get("catalyst_text", "") or result.get("headline", "")
-            headline = result.get("catalyst_text", "") or result.get("headline", "")
-            
             headline, news_quality = find_real_news_headline(ticker, headline)
             
             result["catalyst_text"] = headline
@@ -1350,7 +1348,12 @@ def run_scanner():
                 result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ No clear news found")
             
-                 elif news_quality == "STRONG":
+            elif news_quality == "STRONG":
+                result["catalyst_type"] = "⚡ STRONG NEWS"
+                result["score"] = min(10, result.get("score", 0) + 1)
+                result.setdefault("risks", []).append("⚠️ No clear news found")
+            
+            elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
                 result["score"] = min(10, result.get("score", 0) + 1)
 
