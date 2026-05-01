@@ -83,23 +83,21 @@ def build_trade_bias(result):
 
     if news_quality == "NEGATIVE":
         return "❌ Negative catalyst — avoid unless extreme scalp only"
+
     if news_quality == "WEAK":
         return "⚠️ Weak catalyst — could fade fast"
-    
+
     price = float(result.get("price", 0) or 0)
     vwap = float(result.get("vwap", 0) or 0)
-    
+
     if vwap and price:
         vwap_distance = ((price - vwap) / vwap) * 100
-    
-        if vwap_distance <= -5:
+
+        if vwap_distance <= -12:
             return "🚨 Way below VWAP — failed momentum / avoid"
-    
-        elif vwap_distance <= -2:
-            return "⚠️ Below VWAP — wait for reclaim"
-    
+
         elif vwap_distance < 0:
-            return "👀 Near VWAP — reclaim watch"
+            return "👀 Slightly below VWAP — reclaim watch"
 
     if "upper wick" in structure or "trap" in structure:
         return "⚠️ Trap risk — wait for cleaner setup"
@@ -1371,16 +1369,12 @@ def run_scanner():
             if vwap and price:
                 vwap_distance = ((price - vwap) / vwap) * 100
             
-                if vwap_distance <= -5:
+                if vwap_distance <= -12:
                     result["score"] = max(0, result.get("score", 0) - 3)
-                    result.setdefault("risks", []).append("🚨 Way below VWAP / failed momentum")
-            
-                elif vwap_distance <= -2:
-                    result["score"] = max(0, result.get("score", 0) - 1)
-                    result.setdefault("risks", []).append("⚠️ Below VWAP")
+                    result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
             
                 elif vwap_distance < 0:
-                    result.setdefault("risks", []).append("👀 Near VWAP / reclaim watch")
+                    result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
             offering_risks = check_sec_offering_risk(filing_text)
