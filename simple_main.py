@@ -1356,7 +1356,7 @@ def run_scanner():
         else:
             print("[SCAN] No qualified gainers found", flush=True)
 
-        
+        now = time.time()
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
         
@@ -1372,31 +1372,36 @@ def run_scanner():
             float_shares = result.get("float", 0)
          
 
-                # --- WARRANT / RIGHTS FILTER ---
-                bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
-                if ticker.endswith(bad_suffixes):
-                    print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
-                    continue
+            # --- WARRANT / RIGHTS FILTER ---
+            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
+            if ticker.endswith(bad_suffixes):
+                print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
+                continue
             
-                price = result.get("price", 0)
-                recent_vol = result.get("recent_volume", 0)
-                market_cap = result.get("market_cap", 0)
-                float_shares = result.get("float", 0)
-                gain = float(result.get("gain", 0))
+            price = result.get("price", 0)
+            recent_vol = result.get("recent_volume", 0)
+            market_cap = result.get("market_cap", 0)
+            float_shares = result.get("float", 0)
+            gain = float(result.get("gain", 0))
             
-                # --- EARLY SPIKE MODE ---
-                early_spike = (
-                    gain >= 25
-                    and recent_vol >= 5000
-                    and result.get("score", 0) >= 5
-                )
+            # --- BAD DATA FILTER ---
+            if float_shares == 0 or market_cap == 0:
+                print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
+                continue
             
-                if early_spike and ticker not in alert_history:
-                   title = get_alert_title(result)
-                   status = get_alert_status(result) 
-                   early_msg = f"""
-                {title}
-            ⚠️ EARLY SPIKE WATCH
+            # --- EARLY SPIKE MODE ---
+            early_spike = (
+                gain >= 25
+                and recent_vol >= 5000
+                and result.get("score", 0) >= 5
+            )
+            
+            if early_spike and ticker not in alert_history:
+                title = get_alert_title(result)
+                status = get_alert_status(result)
+            
+            early_msg = f"""
+            {title}
             
             Rank: #{rank}
             {ticker} | Score: {result.get("score", 0)}/10
@@ -1404,6 +1409,7 @@ def run_scanner():
             Price: ${price}
             Gain: {gain:.1f}%
             Recent Vol: {recent_vol:,}
+            
             Status:
             {status}
             
@@ -1417,6 +1423,7 @@ def run_scanner():
             - early move can fade fast
             - wait for confirmation
             """
+            
                 send_alert(early_msg)
                 alert_history[ticker] = now
             # --- BAD DATA FILTER ---
