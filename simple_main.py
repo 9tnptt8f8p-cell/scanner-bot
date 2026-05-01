@@ -1383,9 +1383,8 @@ def run_scanner():
             if early_spike and now - alert_history.get(ticker, 0) > EARLY_ALERT_COOLDOWN:
                 title = get_alert_title(result)
                 status = get_alert_status(result)
-
-
-            early_msg = f"""
+            
+                early_msg = f"""
             {title}
             
             {ticker} | Score: {result.get("score", 0)}/10
@@ -1407,6 +1406,7 @@ def run_scanner():
             - early move can fade fast
             - wait for confirmation
             """
+            
                 send_alert(early_msg)
                 time.sleep(0.3)
                 alert_history[ticker] = now
