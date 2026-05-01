@@ -150,6 +150,7 @@ MIN_GAIN = 12
 SCAN_MIN_GAIN = MIN_GAIN
 SCAN_SLEEP = 100
 ALERT_COOLDOWN_SECONDS = 1800
+EARLY_ALERT_COOLDOWN = 200
 MAX_GAINERS = 25
 MAX_ALERTS_PER_CYCLE = 3
 
@@ -1376,7 +1377,7 @@ def run_scanner():
                 and result.get("score", 0) >= 5
             )
             
-            if early_spike and ticker not in alert_history:
+            if early_spike and now - alert_history.get(ticker, 0) > EARLY_ALERT_COOLDOWN:
                 title = get_alert_title(result)
                 status = get_alert_status(result)
 
