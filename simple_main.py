@@ -1373,11 +1373,13 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
                 continue
                         
-            # --- EARLY SPIKE MODE ---
             early_spike = (
                 gain >= 25
-                and recent_vol >= 5000
+                and recent_vol >= 25000
                 and result.get("score", 0) >= 6
+                and price >= 0.50
+                and float_shares > 0
+                and market_cap > 0
             )
             
             if early_spike and now - alert_history.get(ticker, 0) > EARLY_ALERT_COOLDOWN:
