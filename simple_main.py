@@ -1395,7 +1395,10 @@ def run_scanner():
                 )
             
                 if early_spike and ticker not in alert_history:
-                    early_msg = f"""
+                   title = get_alert_title(result)
+                   status = get_alert_status(result) 
+                   early_msg = f"""
+                {title}
             ⚠️ EARLY SPIKE WATCH
             
             Rank: #{rank}
@@ -1404,9 +1407,8 @@ def run_scanner():
             Price: ${price}
             Gain: {gain:.1f}%
             Recent Vol: {recent_vol:,}
-            
             Status:
-            Early move detected — NOT confirmed yet.
+            {status}
             
             Watch For:
             - volume expansion
