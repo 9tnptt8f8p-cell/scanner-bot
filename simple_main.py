@@ -1648,19 +1648,20 @@ def run_scanner():
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
             alert_tag = ""
-
             if trend_builder_alert:
-                alert_tag = "\n\n🚨 TREND BUILDER\nControlled trend forming: VWAP hold + EMAs stacked + higher lows"
+                alert_tag = "🚨 TREND BUILDER"
             elif second_leg_alert:
-                alert_tag = "\n\n🔥 SECOND LEG CONFIRMED"
+                alert_tag = "🔥 SECOND LEG"
             elif breakout_burst_alert:
-                alert_tag = "\n\n🚀 BREAKOUT BURST"
+                alert_tag = "🚀 BREAKOUT BURST"
             elif vwap_reclaim_setup:
-                alert_tag = "\n\n🟢 VWAP RECLAIM SETUP"
+                alert_tag = "🟢 VWAP RECLAIM"
             elif breakout_hold_setup:
-                alert_tag = "\n\n🚀 BREAKOUT HOLD SETUP"
+                alert_tag = "🚀 BREAKOUT HOLD"
             elif dip_buy_setup:
-                alert_tag = "\n\n📈 DIP BUY SETUP"
+                alert_tag = "📈 DIP BUY"
+            else:
+                alert_tag = ""
 
             if should_alert and result["score"] >= 7:
                 if cooldown_done or new_high_realert:
