@@ -1361,15 +1361,11 @@ def run_scanner():
             print("[SCAN] No qualified gainers found", flush=True)
 
         now = time.time()
-        from datetime import datetime
-        import pytz
-        
-        et = pytz.timezone("US/Eastern")
-        now_et = datetime.now(et)
+        now_et = datetime.now(ZoneInfo("America/New_York"))
         
         hour = now_et.hour
         minute = now_et.minute
-        weekday = now_et.weekday()  # 0=Mon ... 6=Sun
+        weekday = now_et.weekday() 
         
         alerts_allowed = True
         
@@ -1418,7 +1414,7 @@ def run_scanner():
             early_cooldown_done = now - last_early_alert >= EARLY_ALERT_COOLDOWN
             early_new_high = price > last_early_price * 1.03
             
-            if early_spike and early_cooldown_done and early_new_high:
+            if alerts_allowed and early_spike and early_cooldown_done and early_new_high:
                      
                 title = get_alert_title(result)
                 status = get_alert_status(result)
