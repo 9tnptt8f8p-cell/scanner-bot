@@ -768,8 +768,11 @@ def build_alert(result, rank):
     float_shares = result.get("float", 0)
     title = get_alert_title(result)
     status = get_alert_status(result)
-
     setup = result.get("setup_tag", "")
+    
+    # ❌ prevent duplicate (same as title)
+    if setup and setup in title:
+        setup = ""
     
     return (
         f"{title} {setup}\n\n"
