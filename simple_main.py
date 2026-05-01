@@ -1351,7 +1351,56 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             market_cap = result.get("market_cap", 0)
             float_shares = result.get("float", 0)
-        
+            now = time.time()
+
+            for rank, result in enumerate(results, start=1):
+                ticker = result["ticker"]
+            
+                # --- WARRANT / RIGHTS FILTER ---
+                bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
+                if ticker.endswith(bad_suffixes):
+                    print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
+                    continue
+            
+                price = result.get("price", 0)
+                recent_vol = result.get("recent_volume", 0)
+                market_cap = result.get("market_cap", 0)
+                float_shares = result.get("float", 0)
+                gain = float(result.get("gain", 0))
+            
+                # --- EARLY SPIKE MODE ---
+                early_spike = (
+                    gain >= 25
+                    and recent_vol >= 5000
+                    and result.get("score", 0) >= 5
+                )
+            
+                if early_spike and ticker not in alert_history:
+                    early_msg = f"""
+            ⚠️ EARLY SPIKE WATCH
+            
+            Rank: #{rank}
+            {ticker} | Score: {result.get("score", 0)}/10
+            
+            Price: ${price}
+            Gain: {gain:.1f}%
+            Recent Vol: {recent_vol:,}
+            
+            Status:
+            Early move detected — NOT confirmed yet.
+            
+            Watch For:
+            - volume expansion
+            - VWAP reclaim/hold
+            - clean pullback
+            - second leg setup
+            
+            Risk:
+            - early move can fade fast
+            - wait for confirmation
+            """
+                    send_alert(early_msg)
+                    alert_history[ticker] = now
             # --- BAD DATA FILTER ---
             if float_shares == 0 or market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
