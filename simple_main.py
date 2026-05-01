@@ -771,7 +771,6 @@ def build_alert(result, rank):
     setup = result.get("setup_tag", "")
     
     return (
-        setup = result.get("setup_tag", "")
         f"{title} {setup}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
         f"Price: ${result['price']:.4f}\n"
@@ -1382,7 +1381,7 @@ def run_scanner():
                 status = get_alert_status(result)
 
 
-                early_msg = f"""
+            early_msg = f"""
             {title}
             
             {ticker} | Score: {result.get("score", 0)}/10
