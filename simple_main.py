@@ -769,8 +769,8 @@ def build_alert(result, rank):
     status = get_alert_status(result)
 
     return (
-        f"{title}\n\n"
-        f"Rank: #{rank}\n"
+        setup = result.get("setup_tag", "")
+        f"{title} {setup}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
@@ -1672,7 +1672,10 @@ def run_scanner():
 
             if should_alert and result["score"] >= 7:
                 if cooldown_done or new_high_realert:
-                    sent = send_alert(build_alert(result, rank) + alert_tag)
+                    result["setup_tag"] = alert_tag.strip()
+                    result["setup_tag"] = alert_tag.strip()
+                    sent = send_alert(build_alert(result, rank))
+                    time.sleep(0.3)
                     time.sleep(0.3)
                     if sent:
                         alert_history[ticker] = now
