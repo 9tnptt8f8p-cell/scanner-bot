@@ -1359,19 +1359,7 @@ def run_scanner():
         now = time.time()
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
-        
-            # --- WARRANT / RIGHTS FILTER ---
-            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
-            if ticker.endswith(bad_suffixes):
-                print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
-                continue
-        
-            price = result.get("price", 0)
-            recent_vol = result.get("recent_volume", 0)
-            market_cap = result.get("market_cap", 0)
-            float_shares = result.get("float", 0)
          
-
             # --- WARRANT / RIGHTS FILTER ---
             bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
             if ticker.endswith(bad_suffixes):
@@ -1400,7 +1388,7 @@ def run_scanner():
                 title = get_alert_title(result)
                 status = get_alert_status(result)
             
-                early_msg = f"""
+            early_msg = f"""
             {title}
             
             Rank: #{rank}
@@ -1426,8 +1414,6 @@ def run_scanner():
             
                 send_alert(early_msg)
                 alert_history[ticker] = now
-            # --- BAD DATA FILTER ---
-            if float_shares == 0 or market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
                 continue
 
@@ -1687,6 +1673,7 @@ def run_scanner():
             if should_alert and result["score"] >= 7:
                 if cooldown_done or new_high_realert:
                     sent = send_alert(build_alert(result, rank) + alert_tag)
+                    time.sleep(0.3)
                     if sent:
                         alert_history[ticker] = now
                         runner_prices[ticker] = current_price
