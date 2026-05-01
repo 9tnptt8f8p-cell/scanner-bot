@@ -1360,13 +1360,27 @@ def run_scanner():
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ Weak/unclear news")
-            
             elif news_quality == "UNKNOWN":
+                result["score"] = max(0, result.get("score", 0) - 1)
+                result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
                 result["catalyst_type"] = "❓ UNKNOWN NEWS"
+            # --- VWAP DISTANCE SCORE IMPACT ---
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
             
-            else:
-                result["catalyst_type"] = "❓ UNKNOWN NEWS"
+            if vwap and price:
+                vwap_distance = ((price - vwap) / vwap) * 100
             
+                if vwap_distance <= -5:
+                    result["score"] = max(0, result.get("score", 0) - 3)
+                    result.setdefault("risks", []).append("🚨 Way below VWAP / failed momentum")
+            
+                elif vwap_distance <= -2:
+                    result["score"] = max(0, result.get("score", 0) - 1)
+                    result.setdefault("risks", []).append("⚠️ Below VWAP")
+            
+                elif vwap_distance < 0:
+                    result.setdefault("risks", []).append("👀 Near VWAP / reclaim watch")
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
             offering_risks = check_sec_offering_risk(filing_text)
