@@ -701,8 +701,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
     if catalyst_type not in ["none", "unknown"]:
         score += 2
         reasons.append("fresh news")
-    else:
-       risks.append("⚠️ No confirmed catalyst / technical momentum only")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
@@ -1287,8 +1285,11 @@ def run_scanner():
             result["sec_note"] = sec_note
             
             if sec_risk:
-                result["risks"].append(f"🚨 Possible dilution form found: {sec_note}")
-                result["score"] = max(0, result.get("score", 0) - 2)
+                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                    result["risks"].append(f"🚨 Active dilution filing: {sec_note}")
+                    result["score"] = max(0, result.get("score", 0) - 2)
+                else:
+                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
 
             result["session"] = session
             result["session_notes"] = session_notes
@@ -1390,9 +1391,12 @@ def run_scanner():
                 result["catalyst_type"] = "🚫 JUNK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 2)
                 result.setdefault("risks", []).append("⚠️ Junk/aggregator headline")
-            elif news_quality == "NONE":
+           elif news_quality == "NONE":
                 result["catalyst_type"] = "❌ NO NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
+            
+                if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
+                    result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
                         
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
@@ -1446,7 +1450,7 @@ def run_scanner():
                     offering_risks = []
             elif not isinstance(offering_risks, list):
                 offering_risks = [offering_risks]
-            
+            seen = set()
             for r in base_risks + risk_list + offering_risks:
                 if isinstance(r, dict):
                     r = r.get("text") or r.get("message") or str(r)
@@ -1458,10 +1462,8 @@ def run_scanner():
             
                 clean_risks.append(r)
             
-            result["risks"] = clean_risks
-                        
-            # overwrite with cleaned version
-            result["risks"] = clean_risks
+            # ✅ FINALIZE + DEDUPE (only once)
+            result["risks"] = list(dict.fromkeys(clean_risks))
             # ===== TRASH FILTERS =====
 
             if price < 0.5 or price > 500:
