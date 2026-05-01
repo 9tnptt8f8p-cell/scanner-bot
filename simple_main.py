@@ -1382,7 +1382,14 @@ def run_scanner():
                 and market_cap > 0
             )
             
-            if early_spike and now - alert_history.get(ticker, 0) > EARLY_ALERT_COOLDOWN:
+            last_early_alert = alert_history.get(f"{ticker}_early", 0)
+            last_early_price = runner_prices.get(f"{ticker}_early", 0)
+            
+            early_cooldown_done = now - last_early_alert >= EARLY_ALERT_COOLDOWN
+            early_new_high = price > last_early_price * 1.03
+            
+            if early_spike and early_cooldown_done and early_new_high:
+                     
                 title = get_alert_title(result)
                 status = get_alert_status(result)
             
@@ -1409,10 +1416,11 @@ def run_scanner():
             - wait for confirmation
             """
             
-                send_alert(early_msg)
-                time.sleep(0.3)
-                alert_history[ticker] = now
-                continue
+            send_alert(early_msg)
+            time.sleep(0.3)
+            alert_history[f"{ticker}_early"] = now
+            runner_prices[f"{ticker}_early"] = price
+            continue
             
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
