@@ -1163,8 +1163,37 @@ def find_real_news_headline(ticker, current_headline=""):
         print(f"[PR SCRAPE] {ticker}: {pr_headline}", flush=True)
         return pr_headline, pr_quality
 
-    # ❌ Nothing found anywhere
+       # ❌ Nothing found anywhere
     return current_headline, "NONE"
+
+
+def detect_dilution_risk(text):
+    t = (text or "").lower()
+
+    offering_keywords = [
+        "registered direct offering",
+        "public offering",
+        "private placement",
+        "securities purchase agreement",
+        "at-the-market",
+        "atm offering",
+        "shelf registration",
+        "form s-3",
+        "form f-3",
+        "warrant",
+        "pre-funded warrant",
+        "convertible note",
+        "convertible preferred",
+        "equity line",
+        "resale prospectus",
+    ]
+
+    found = [k for k in offering_keywords if k in t]
+
+    if found:
+        return f"⚠️ REAL DILUTION RISK: {', '.join(found[:3])}"
+
+    return None
     
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
