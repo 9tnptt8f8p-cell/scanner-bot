@@ -1406,6 +1406,7 @@ def run_scanner():
                 send_alert(early_msg)
                 time.sleep(0.3)
                 alert_history[ticker] = now
+                continue
             
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
@@ -1641,7 +1642,7 @@ def run_scanner():
                 first_alert_price[ticker] = current_price
             
             last_alert_price = runner_prices.get(ticker, 0)
-            new_high_realert = current_price > last_alert_price * 1.01
+            new_high_realert = current_price > last_alert_price * 1.05
             
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
