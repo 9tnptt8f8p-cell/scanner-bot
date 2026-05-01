@@ -1370,13 +1370,14 @@ def run_scanner():
                 result["catalyst_type"] = "🚫 JUNK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 2)
                 result.setdefault("risks", []).append("⚠️ Junk/aggregator headline")
+
             elif news_quality == "NONE":
                 result["catalyst_type"] = "❌ NO NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
-            
+
                 if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
                     result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-                        
+
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
                 result["score"] = min(10, result.get("score", 0) + 1)
