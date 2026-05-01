@@ -1356,7 +1356,7 @@ def run_scanner():
         else:
             print("[SCAN] No qualified gainers found", flush=True)
 
-        now = time.time()
+        
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
         
@@ -1370,11 +1370,8 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             market_cap = result.get("market_cap", 0)
             float_shares = result.get("float", 0)
-            now = time.time()
+         
 
-            for rank, result in enumerate(results, start=1):
-                ticker = result["ticker"]
-            
                 # --- WARRANT / RIGHTS FILTER ---
                 bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
                 if ticker.endswith(bad_suffixes):
