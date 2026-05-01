@@ -1376,7 +1376,7 @@ def run_scanner():
             if float_shares == 0 or market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
                 continue
-            
+                        
             # --- EARLY SPIKE MODE ---
             early_spike = (
                 gain >= 25
@@ -1387,8 +1387,9 @@ def run_scanner():
             if early_spike and ticker not in alert_history:
                 title = get_alert_title(result)
                 status = get_alert_status(result)
-            
-            early_msg = f"""
+
+                
+                early_msg = f"""
             {title}
             
             Rank: #{rank}
@@ -1415,7 +1416,7 @@ def run_scanner():
                 send_alert(early_msg)
                 time.sleep(0.3)
                 alert_history[ticker] = now
-               
+            
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
