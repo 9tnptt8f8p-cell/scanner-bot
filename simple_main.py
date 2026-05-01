@@ -768,6 +768,8 @@ def build_alert(result, rank):
     title = get_alert_title(result)
     status = get_alert_status(result)
 
+    setup = result.get("setup_tag", "")
+    
     return (
         setup = result.get("setup_tag", "")
         f"{title} {setup}\n\n"
@@ -1212,15 +1214,6 @@ def find_real_news_headline(ticker, current_headline=""):
     # ❌ Nothing found anywhere
     return current_headline, "NONE"
     
-def find_real_news_headline(ticker, current_headline=""):
-    quality = classify_news_quality(current_headline)
-
-    # keep usable headline
-    if quality in ["STRONG", "WEAK", "UNKNOWN"]:
-        return current_headline, quality
-
-    # no scrape yet — safe placeholder
-    return current_headline, "NONE"
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1389,10 +1382,9 @@ def run_scanner():
                 status = get_alert_status(result)
 
                 
-                early_msg = f"""
+            early_msg = f"""
             {title}
             
-            Rank: #{rank}
             {ticker} | Score: {result.get("score", 0)}/10
             
             Price: ${price}
@@ -1673,9 +1665,7 @@ def run_scanner():
             if should_alert and result["score"] >= 7:
                 if cooldown_done or new_high_realert:
                     result["setup_tag"] = alert_tag.strip()
-                    result["setup_tag"] = alert_tag.strip()
                     sent = send_alert(build_alert(result, rank))
-                    time.sleep(0.3)
                     time.sleep(0.3)
                     if sent:
                         alert_history[ticker] = now
