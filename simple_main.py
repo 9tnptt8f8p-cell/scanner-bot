@@ -1395,12 +1395,12 @@ def run_scanner():
                 and recent_vol >= 5000
                 and result.get("score", 0) >= 5
             )
-            
+              
             if early_spike and ticker not in alert_history:
                 title = get_alert_title(result)
                 status = get_alert_status(result)
             
-            early_msg = f"""
+                early_msg = f"""
             {title}
             
             Rank: #{rank}
