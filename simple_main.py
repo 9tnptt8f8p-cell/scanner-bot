@@ -1361,6 +1361,28 @@ def run_scanner():
             print("[SCAN] No qualified gainers found", flush=True)
 
         now = time.time()
+        from datetime import datetime
+        import pytz
+        
+        et = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et)
+        
+        hour = now_et.hour
+        minute = now_et.minute
+        weekday = now_et.weekday()  # 0=Mon ... 6=Sun
+        
+        alerts_allowed = True
+        
+        # 🚫 Weekend block
+        if weekday >= 5:
+            alerts_allowed = False
+        
+        # 🚫 After 4:10 PM block
+        if (hour > 16) or (hour == 16 and minute >= 10):
+            alerts_allowed = False
+        
+        if not alerts_allowed:
+            print("[MARKET] Alerts disabled (after hours/weekend)", flush=True)
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
          
