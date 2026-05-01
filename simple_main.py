@@ -1672,6 +1672,7 @@ def run_scanner():
                 if sent:
                     alert_history[ticker] = now
                     runner_prices[ticker] = current_price
+                    sent_this_cycle.add(ticker)   # 👈 THIS is the new line you’re adding
             
                     if second_leg_alert and ticker in second_leg_tracker:
                         second_leg_tracker[ticker]["sent"] = True
@@ -1679,8 +1680,7 @@ def run_scanner():
                     print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
                 else:
                     print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
-                
-                    print(f"[NO ALERT] #{rank} {ticker} cooldown active", flush=True)
+                    
             else:
                 print(
                     f"[NO ALERT] #{rank} {ticker} blocked | "
