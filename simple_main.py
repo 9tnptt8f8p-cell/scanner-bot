@@ -1145,23 +1145,25 @@ def scrape_pr_headline(ticker):
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
-
+        
             for tag in soup.find_all(["a", "h1", "h2", "h3"]):
                 text = tag.get_text(" ", strip=True)
-
+            
                 if not text or len(text) < 25:
                     continue
-
+            
+                if ticker.lower() not in text.lower():
+                    continue
+            
                 quality = classify_news_quality(text)
-
-                if quality in ["STRONG", "WEAK", "UNKNOWN"]:
+            
+                if quality in ["STRONG", "WEAK"]:
                     print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
                     return text
 
-        except Exception as e:
-            print(f"[PR SCRAPE ERROR] {ticker}: {e}", flush=True)
-
     return ""
+
+
 def find_real_news_headline(ticker, current_headline=""):
     """
     Keeps current headline if usable.
@@ -1171,8 +1173,8 @@ def find_real_news_headline(ticker, current_headline=""):
     quality = classify_news_quality(current_headline)
 
     # ✅ Keep good headline
-    if quality in ["STRONG", "WEAK", "UNKNOWN"]:
-        return current_headline, quality
+    if quality in ["STRONG", "WEAK"]:
+      return current_headline, quality
 
     # 🔎 Try Yahoo scrape
     try:
