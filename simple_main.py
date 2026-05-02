@@ -1234,7 +1234,9 @@ def run_scanner():
         now = time.time()
         now_et = datetime.now(ZoneInfo("America/New_York"))
         for t in list(second_leg_tracker.keys()):
-            if now - alert_history.get(t, 0) > 1800:
+            last_alert = alert_history.get(t)
+        
+            if last_alert and (now - last_alert > 1800):
                 del second_leg_tracker[t]
         hour = now_et.hour
         minute = now_et.minute
