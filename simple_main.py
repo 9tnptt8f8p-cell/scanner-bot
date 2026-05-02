@@ -1009,13 +1009,6 @@ def classify_news_quality(headline):
         "profitability","record revenue",
         "bitcoin","ethereum","crypto","blockchain",
         "artificial intelligence","ai-powered","nvidia",
-            
-        "fda","approval","approved","clearance","cleared","510(k)",
-        "clinical trial","phase 1","phase 2","phase 3",
-        "positive data","topline","endpoint","orphan drug",
-        "fast track","breakthrough therapy",
-    
-        
         "topline results",
         "primary endpoint",
         "met primary endpoint",
@@ -1165,7 +1158,7 @@ def scrape_pr_headline(ticker):
             
                 quality = classify_news_quality(text)
             
-                if quality in ["STRONG", "WEAK"]:
+                if quality == "STRONG":
                     print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
                     return text
 
@@ -1181,8 +1174,8 @@ def find_real_news_headline(ticker, current_headline=""):
     quality = classify_news_quality(current_headline)
 
     # ✅ Keep good headline
-    if quality in ["STRONG", "WEAK"]:
-      return current_headline, quality
+    if quality == "STRONG":
+       return current_headline, quality
 
     # 🔎 Try Yahoo scrape
     try:
