@@ -2,8 +2,6 @@ def build_alert(data):
     emoji = data.get("emoji", "🚨")
     ticker = data.get("ticker")
     score = data.get("score")
-    rank = data.get("rank")
-    rank_score = data.get("rank_score", 0)
     price = data.get("price")
     gain = data.get("gain")
 
