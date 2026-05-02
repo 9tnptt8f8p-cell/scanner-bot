@@ -1678,7 +1678,7 @@ def run_scanner():
             above_vwap = price > vwap if vwap else False
             
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
-                if price > recent_high:
+                if price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Breakout — watch for continuation"
                 elif above_vwap:
                     result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
