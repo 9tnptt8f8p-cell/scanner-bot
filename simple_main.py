@@ -802,34 +802,7 @@ def build_alert(result, rank):
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
     )
-  # ❌ prevent duplicate (same as title)
-    if setup and setup in title:
-        setup = ""
-    
-    catalyst_type = result.get("catalyst_type", "none")
-    news_quality = result.get("news_quality", "")
-    
-    no_news_warning = ""
-    if news_quality in ["NONE", "UNKNOWN"]:
-        no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
-    
-    alert_text = (
-        f"{title} {setup}\n\n"
-        f"{result['ticker']} | Score: {result['score']}/10\n\n"
-        f"Price: ${result['price']:.4f}\n"
-        f"Gain: {result['gain']:.1f}%\n"
-        f"Float: {float_shares/1_000_000:.1f}M\n\n"
-        f"Catalyst: {result.get('catalyst_type', 'none')}\n"
-        f"{result.get('catalyst_text', '')}\n\n"
-        f"{no_news_warning}\n"
-        f"Status:\n{status}\n"
-        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
-        f"Entry: {result.get('entry_hint', 'N/A')}\n"
-        f"Session: {result.get('session', 'UNKNOWN')}\n\n"
-        f"Reasons:\n{reasons}\n\n"
-        f"Risk:\n{risks_text}\n\n"
-        f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
-    )
+
     return alert_text
 def get_market_session():
     now = datetime.now(ET).time()
@@ -1036,8 +1009,43 @@ def classify_news_quality(headline):
         "profitability","record revenue",
         "bitcoin","ethereum","crypto","blockchain",
         "artificial intelligence","ai-powered","nvidia",
+            
+        "fda","approval","approved","clearance","cleared","510(k)",
+        "clinical trial","phase 1","phase 2","phase 3",
+        "positive data","topline","endpoint","orphan drug",
+        "fast track","breakthrough therapy",
+    
+        
+        "topline results",
+        "primary endpoint",
+        "met primary endpoint",
+        "statistically significant",
+        "pivotal trial",
+        "phase 2b",
+        "phase 3 trial",
+        "new drug application",
+        "nda",
+        "bla",
+        "510k",
+        "de novo",
+        "fast track designation",
+        "orphan drug designation",
+        "breakthrough device",
+        "fda clearance",
+        "commercial launch",
+    
+        "contract","agreement","partnership","collaboration","deal","order",
+        "purchase order","supply agreement","distribution agreement",
+        "license agreement","strategic alliance",
+        "acquisition","merger","buyout","takeover",
+        "definitive agreement","letter of intent",
+        "spin-off","spinoff",
+        "earnings","revenue","guidance","raises guidance",
+        "profitability","record revenue",
+        "bitcoin","ethereum","crypto","blockchain",
+        "artificial intelligence","ai-powered","nvidia",
     ]
-
+    
     WEAK_KEYWORDS = [
         "conference","webcast","presentation","to present",
         "participate","appoints","announces appointment",
@@ -1192,10 +1200,16 @@ def find_real_news_headline(ticker, current_headline=""):
 
                 if not text or len(text) < 25:
                     continue
-
+                
+                if ticker.lower() not in text.lower():
+                    continue
+                
+                if any(x in text.lower() for x in ["stocks moving", "top gainers", "market update"]):
+                    continue
+                
                 scraped_quality = classify_news_quality(text)
 
-                if scraped_quality in ["STRONG", "WEAK", "UNKNOWN"]:
+                if scraped_quality in ["STRONG", "WEAK"]:
                     print(f"[NEWS SCRAPE] {ticker}: {text}", flush=True)
                     return text, scraped_quality
     except Exception as e:
@@ -1785,7 +1799,11 @@ def run_scanner():
                     continue
                 if is_trap and result.get("score", 0) < 8:
                     continue
-                if no_news and not above_vwap:
+                if no_news and not (
+                    above_vwap
+                    and result.get("recent_volume", 0) >= 150_000
+                    and float_shares <= 20_000_000
+                ):
                     continue
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
