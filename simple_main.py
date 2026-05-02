@@ -1631,7 +1631,7 @@ def run_scanner():
                 ):
                     continue
                 result["setup_tag"] = alert_tag.strip()
-                sent = send_alert(build_alert(result, rank))
+                sent = send_alert(build_alert(result))
                 time.sleep(0.3)
         
                 if sent:
@@ -1642,12 +1642,12 @@ def run_scanner():
                     if second_leg_alert and ticker in second_leg_tracker:
                         second_leg_tracker[ticker]["sent"] = True
         
-                    print(f"[ALERT SENT] #{rank} {ticker}", flush=True)
+                    print(f"[ALERT SENT] {ticker}", flush=True)
                 else:
-                    print(f"[ALERT FAILED] #{rank} {ticker}", flush=True)
+                    print(f"[ALERT FAILED] {ticker}", flush=True)
             else:
                 print(
-                    f"[NO ALERT] #{rank} {ticker} blocked | "
+                    f"[NO ALERT] {ticker} blocked | "
                     f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
                     flush=True
                 )
