@@ -1756,9 +1756,7 @@ def run_scanner():
                 alert_tag = "📈 DIP BUY"
             else:
                 alert_tag = ""
-                    result.get("reasons", []) + result.get("risks", [])
-                ).lower()
-                        
+                     
             bad_chart = (
                 "below vwap" in structure_text
                 or "big upper wick" in structure_text
