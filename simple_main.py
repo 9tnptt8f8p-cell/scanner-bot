@@ -1014,7 +1014,7 @@ def find_real_news_headline(ticker, current_headline=""):
     quality = classify_news_quality(current_headline)
 
     # ✅ Keep good headline
-    if quality == "STRONG":
+    if quality in ["STRONG", "WEAK"]:
        return current_headline, quality
 
     # 🔎 Try Yahoo scrape
@@ -1183,6 +1183,11 @@ def run_scanner():
                 or "trap" in structure_text
                 or "failed" in structure_text
             )
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
+            
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
             
             good_structure = (
                 structure_score >= 2
