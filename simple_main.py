@@ -15,38 +15,6 @@ from alerts import send_alert
 from rank_engine import rank_result
 load_dotenv()
 
-
-def detect_dilution_type(text):
-    text = (text or "").lower()
-    signals = []
-
-    if "at the market" in text or "atm offering" in text:
-        signals.append("ATM offering")
-
-    if "warrant" in text:
-        signals.append("Warrants")
-
-    if "convertible" in text or "convertible note" in text:
-        signals.append("Convertible notes")
-
-    if "securities purchase agreement" in text:
-        signals.append("Securities purchase agreement")
-
-    if "registered direct" in text:
-        signals.append("Registered direct offering")
-
-    if "shelf registration" in text or "form s-3" in text or "form f-3" in text:
-        signals.append("Shelf registration")
-
-    if "resale" in text:
-        signals.append("Resale registration")
-
-    if "offering" in text and not signals:
-        signals.append("Offering language detected")
-
-    return signals
-
-
 def analyze_news(headline):
     h = (headline or "").lower()
 
