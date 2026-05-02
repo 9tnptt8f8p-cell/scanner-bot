@@ -1186,9 +1186,9 @@ def run_scanner():
             
             good_structure = (
                 structure_score >= 2
-                and "price above vwap" in structure_text
+                and above_vwap
             )
-            
+        
             # ✅ structure now matters more
             if bad_structure:
                 result["score"] = max(0, result["score"] - 3)
@@ -1550,8 +1550,7 @@ def run_scanner():
             
             if "below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
-            
-            elif "price above vwap" in structure_text and result.get("recent_volume", 0) >= 150_000:
+            elif above_vwap and result.get("recent_volume", 0) >= 150_000:
                 result["trap_runner"] = "🚀 RUNNER LEAN"
             
             else:
@@ -1559,9 +1558,9 @@ def run_scanner():
             price = result.get("price", 0)
             vwap = result.get("vwap", 0)
             recent_high = result.get("high", price)
-            
-            above_vwap = price > vwap if vwap else "price above vwap" in structure_text
-            
+            price = float(price or 0)
+            vwap = float(vwap or 0)
+            above_vwap = price > vwap if vwap else False
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
                 if price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Breakout — watch for continuation"
