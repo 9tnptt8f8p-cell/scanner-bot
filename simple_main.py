@@ -745,7 +745,9 @@ def get_alert_title(result):
     if score == 7:
         return "👀 POTENTIAL RUNNER"
 
-    # ⚠️ Default
+    if score == 6:
+        return "⚠️ EARLY MOMENTUM WATCH"
+
     return "⚠️ EARLY SPIKE WATCH"
     
 def get_alert_status(result):
@@ -757,6 +759,10 @@ def get_alert_status(result):
         return "Building momentum — wait for clean entry confirmation."
     elif score == 7:
         return "Potential runner forming — needs more confirmation."
+    else:
+    elif score == 6:
+        return "Early momentum forming — watch only, needs confirmation."
+
     else:
         return "Early move detected — NOT confirmed yet."
 def build_alert(result, rank):
@@ -774,7 +780,14 @@ def build_alert(result, rank):
     if setup and setup in title:
         setup = ""
     
-    return (
+    catalyst_type = result.get("catalyst_type", "none")
+    news_quality = result.get("news_quality", "")
+    
+    no_news_warning = ""
+    if news_quality in ["NONE", "UNKNOWN"]:
+        no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
+    
+    alert_text = (
         f"{title} {setup}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
         f"Price: ${result['price']:.4f}\n"
@@ -782,7 +795,7 @@ def build_alert(result, rank):
         f"Float: {float_shares/1_000_000:.1f}M\n\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
-        f"Status:\n{status}\n\n"
+        f"{no_news_warning}\n"
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
@@ -791,6 +804,35 @@ def build_alert(result, rank):
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
     )
+  # ❌ prevent duplicate (same as title)
+    if setup and setup in title:
+        setup = ""
+    
+    catalyst_type = result.get("catalyst_type", "none")
+    news_quality = result.get("news_quality", "")
+    
+    no_news_warning = ""
+    if news_quality in ["NONE", "UNKNOWN"]:
+        no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
+    
+    alert_text = (
+        f"{title} {setup}\n\n"
+        f"{result['ticker']} | Score: {result['score']}/10\n\n"
+        f"Price: ${result['price']:.4f}\n"
+        f"Gain: {result['gain']:.1f}%\n"
+        f"Float: {float_shares/1_000_000:.1f}M\n\n"
+        f"Catalyst: {result.get('catalyst_type', 'none')}\n"
+        f"{result.get('catalyst_text', '')}\n\n"
+        f"{no_news_warning}\n"
+        f"Status:\n{status}\n"
+        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
+        f"Entry: {result.get('entry_hint', 'N/A')}\n"
+        f"Session: {result.get('session', 'UNKNOWN')}\n\n"
+        f"Reasons:\n{reasons}\n\n"
+        f"Risk:\n{risks_text}\n\n"
+        f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
+    )
+    return alert_text
 def get_market_session():
     now = datetime.now(ET).time()
 
