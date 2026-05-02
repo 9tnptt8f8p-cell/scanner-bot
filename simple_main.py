@@ -1488,7 +1488,6 @@ def run_scanner():
 
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
-                result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ Weak/unclear news")
 
             elif news_quality == "UNKNOWN":
@@ -1783,7 +1782,7 @@ def run_scanner():
             first_alert = last_alert_price == 0
             realert_ok = new_high_realert
 
-            no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "WEAK"]
+            no_news = result.get("news_quality") in ["NONE", "UNKNOWN"]
             
             is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
             
