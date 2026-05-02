@@ -1283,11 +1283,14 @@ def run_scanner():
             market_cap = result.get("market_cap", 0)
             float_shares = result.get("float", 0)
             gain = float(result.get("gain", 0))
-            
-            # --- BAD DATA FILTER ---
-            if float_shares == 0 or market_cap == 0:
-                print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
+            # --- BAD DATA / FLOAT HANDLING ---
+            if market_cap == 0:
+                print(f"[FILTER] {ticker} skipped — bad market cap", flush=True)
                 continue
+            
+            if float_shares == 0:
+                print(f"[WARN] {ticker} float unknown — allowing", flush=True)
+                result.setdefault("risks", []).append("⚠️ Float unknown")
                         
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
