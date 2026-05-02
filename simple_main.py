@@ -760,7 +760,7 @@ def is_trend_builder(result, candles):
 
     price = float(result.get("price", 0) or 0)
     vwap = float(result.get("vwap", 0) or 0)
-    above_vwap = price > vwap if vwap else False
+ 
 
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
@@ -1411,9 +1411,7 @@ def run_scanner():
             
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
-            
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
+        
 
             above_vwap = price > vwap if vwap else False
             recent_vol = result.get("recent_volume", 0)
@@ -1449,8 +1447,6 @@ def run_scanner():
             price = result.get("price", 0)
             gain = result.get("gain", 0)
             vwap = result.get("vwap", 0)
-
-            above_vwap = price > vwap if vwap else False
             recent_high = result.get("high", price)
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
@@ -1547,6 +1543,7 @@ def run_scanner():
             
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
+            result["score"] = max(0, min(result["score"], 10))
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
             structure_text = " ".join(
@@ -1563,9 +1560,11 @@ def run_scanner():
             price = result.get("price", 0)
             vwap = result.get("vwap", 0)
             recent_high = result.get("high", price)
-            price = float(price or 0)
-            vwap = float(vwap or 0)
-            above_vwap = price > vwap if vwap else False
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
+
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
                 if price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Breakout — watch for continuation"
