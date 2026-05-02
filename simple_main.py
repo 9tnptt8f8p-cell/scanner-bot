@@ -1403,8 +1403,14 @@ def run_scanner():
 
             if early_momentum_alert:
                 print(f"[EARLY] {ticker} building momentum", flush=True)
+            
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
+            
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
 
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
+            above_vwap = price > vwap if vwap else False
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             volume_confirmed = (
@@ -1439,14 +1445,13 @@ def run_scanner():
             gain = result.get("gain", 0)
             vwap = result.get("vwap", 0)
 
-            above_vwap = price > vwap if vwap else "Price above VWAP" in result.get("reasons", [])
-
+            above_vwap = price > vwap if vwap else False
             recent_high = result.get("high", price)
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
 
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
-             if volume_spike:
+            if volume_spike:
                 result["score"] = min(10, result.get("score", 0) + 1)
                 result.setdefault("reasons", []).append("Volume surge")
             pullback = price < recent_high * 0.95
