@@ -1202,7 +1202,6 @@ def run_scanner():
     alert_history = {}
     runner_prices = {}
     first_alert_price = {}
-    second_leg_alerted = set()
     while True:
         sent_this_cycle = set()
         if not should_scan_now():
@@ -1695,7 +1694,11 @@ def run_scanner():
             first_alert = ticker not in alert_history
             realert_ok = new_high_realert
 
-            if alerts_allowed and should_alert and result["score"] >= 7 and (first_alert or realert_ok):
+            no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "WEAK"]
+            
+            if alerts_allowed and should_alert and result["score"] >= 6 and (first_alert or realert_ok):
+                if no_news and not above_vwap:
+                    continue
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
                 time.sleep(0.3)
