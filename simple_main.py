@@ -1051,7 +1051,7 @@ def classify_news_quality(headline):
 
     # ❌ Junk aggregator
     if any(k in h for k in BAD_NEWS_KEYWORDS):
-        return "WEAK"
+        return "JUNK"
 
     # ⚠️ Weak
     if any(k in h for k in WEAK_KEYWORDS):
@@ -1593,7 +1593,10 @@ def run_scanner():
             above_vwap = "Price above VWAP" in result.get("reasons", [])
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
-            volume_confirmed = recent_vol >= result.get("prev_volume", 0)
+            volume_confirmed = (
+                recent_vol >= result.get("prev_volume", 0)
+                and recent_vol >= 75_000
+            )
 
             valid_early_alert = (
                 result["gain"] >= 25
