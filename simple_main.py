@@ -784,7 +784,8 @@ def build_alert(result, rank):
         f"{result.get('catalyst_text', '')}\n\n"
         f"Status:\n{status}\n\n"
         f"Status:\n{status}\n"
-        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n\n"
+        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
+        f"Entry: {result.get('entry_hint', 'N/A')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
@@ -1670,6 +1671,25 @@ def run_scanner():
             
             else:
                 result["trap_runner"] = "🤔 UNCLEAR"
+            price = result.get("price", 0)
+            vwap = result.get("vwap", 0)
+            recent_high = result.get("high", price)
+            
+            above_vwap = price > vwap if vwap else False
+            
+            if result.get("trap_runner") == "🚀 RUNNER LEAN":
+                if price > recent_high:
+                    result["entry_hint"] = "🚀 Breakout — watch for continuation"
+                elif above_vwap:
+                    result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
+                else:
+                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
+            
+            elif result.get("trap_runner") == "⚠️ TRAP RISK":
+                result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
+            
+            else:
+                result["entry_hint"] = "🤔 Wait for setup confirmation"
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
