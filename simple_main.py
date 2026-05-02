@@ -785,7 +785,8 @@ def build_alert(result, rank):
         f"Status:\n{status}\n\n"
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
-        f"Entry: {result.get('entry_hint', 'N/A')}\n\n"
+        f"Entry: {result.get('entry_hint', 'N/A')}\n"
+        f"Session: {result.get('session', 'UNKNOWN')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
@@ -1539,6 +1540,7 @@ def run_scanner():
             above_vwap = "Price above VWAP" in result.get("reasons", [])
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
+            volume_confirmed = recent_vol >= result.get("prev_volume", 0)
 
             valid_early_alert = (
                 result["gain"] >= 25
@@ -1655,8 +1657,7 @@ def run_scanner():
                 first_alert_price[ticker] = current_price
             
             last_alert_price = runner_prices.get(ticker, 0)
-            new_high_realert = current_price > last_alert_price * 1.05
-            
+            new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
             structure_text = " ".join(
@@ -1675,7 +1676,7 @@ def run_scanner():
             vwap = result.get("vwap", 0)
             recent_high = result.get("high", price)
             
-            above_vwap = price > vwap if vwap else False
+            above_vwap = price > vwap if vwap else "price above vwap" in structure_text
             
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
                 if price >= recent_high * 0.98:
@@ -1725,7 +1726,7 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
         
-            first_alert = ticker not in alert_history
+            first_alert = last_alert_price == 0
             realert_ok = new_high_realert
 
             no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "WEAK"]
@@ -1733,6 +1734,8 @@ def run_scanner():
             is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
             
             if alerts_allowed and should_alert and result["score"] >= 6 and (first_alert or realert_ok):
+                if not volume_confirmed and result.get("trap_runner") != "🚀 RUNNER LEAN":
+                    continue
                 if is_trap and result.get("score", 0) < 8:
                     continue
                 if no_news and not above_vwap:
