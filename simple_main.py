@@ -760,7 +760,9 @@ def is_trend_builder(result, candles):
 
     price = float(result.get("price", 0) or 0)
     vwap = float(result.get("vwap", 0) or 0)
- 
+
+    has_vwap = vwap > 0
+    above_vwap = price > vwap if has_vwap else True
 
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
