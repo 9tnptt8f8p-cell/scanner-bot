@@ -15,33 +15,6 @@ from alerts import send_alert
 from rank_engine import rank_result
 load_dotenv()
 
-def analyze_news(headline):
-    h = (headline or "").lower()
-
-    if not h:
-        return "UNKNOWN", "❓ No clear headline found"
-
-    if any(x in h for x in ["here are", "stocks moving", "top movers", "why shares are trading"]):
-        return "WEAK", "📰 Mover-list headline, not company-specific news"
-
-    if any(x in h for x in ["offering", "priced", "registered direct", "atm"]):
-        return "NEGATIVE", "💸 Offering / dilution news"
-
-    if any(x in h for x in ["contract", "agreement", "partnership", "collaboration"]):
-        return "STRONG", "🤝 Deal / partnership news"
-
-    if any(x in h for x in ["fda", "approval", "phase", "trial", "clinical", "data"]):
-        return "STRONG", "💊 FDA / clinical news"
-
-    if any(x in h for x in ["earnings", "revenue", "guidance", "profit", "sales"]):
-        return "STRONG", "📊 Earnings / financial news"
-
-    if any(x in h for x in ["merger", "acquisition", "buyout"]):
-        return "STRONG", "🏢 Merger / acquisition news"
-
-    return "UNKNOWN", "❓ Unclear catalyst"
-
-
 def build_trade_bias(result):
     risks = " ".join(result.get("risks", [])).lower()
     news_quality = result.get("news_quality", "")
@@ -199,69 +172,7 @@ MAX_MARKET_CAP = 1_000_000_000
 TREND_BUILDER_MIN_GAIN = 12
 PREMARKET_MIN_GAIN = 8
 PREMARKET_MIN_VOLUME = 50_000
-def get_yahoo_market_cap(ticker):
-    url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
 
-    params = {
-        "modules": "price"
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        data = r.json()
-
-        result = data.get("quoteSummary", {}).get("result", [])
-        if not result:
-            return 0
-
-        market_cap = (
-            result[0]
-            .get("price", {})
-            .get("marketCap", {})
-            .get("raw", 0)
-        )
-
-        return int(market_cap or 0)
-
-    except Exception as e:
-        print(f"[MARKET CAP ERROR] {ticker}: {e}", flush=True)
-        return 0
-
-def get_float_shares(ticker):   # 👈 NO INDENT (top level)
-    url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-
-    params = {
-        "modules": "defaultKeyStatistics"
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        data = r.json()
-
-        result = data.get("quoteSummary", {}).get("result", [])
-        if not result:
-            return 0
-
-        float_shares = (
-            result[0]
-            .get("defaultKeyStatistics", {})
-            .get("floatShares", {})
-            .get("raw", 0)
-        )
-
-        return int(float_shares or 0)
-
-    except Exception as e:
-        print(f"[FLOAT ERROR] {ticker}: {e}", flush=True)
-        return 0
 def get_finnhub_profile(ticker):
     if not FINNHUB_API_KEY:
         return 0, 0
@@ -602,39 +513,6 @@ def get_finnhub_quote(ticker):
     except Exception as e:
         print(f"[FINNHUB QUOTE ERROR] {ticker}: {e}", flush=True)
         return None
-
-
-def check_dilution_risk(text):
-    text = (text or "").lower()
-
-    danger_words = {
-        "atm": "ATM",
-        "shelf": "shelf registration",
-        "s-1": "S-1",
-        "s-3": "S-3",
-        "f-1": "F-1",
-        "f-3": "F-3",
-        "424b": "424B",
-        "424b5": "424B5",
-        "warrant": "warrants",
-        "exercise price": "warrant exercise price",
-        "convertible": "convertible",
-        "convertible note": "convertible note",
-        "pipe": "PIPE",
-        "equity line": "equity line",
-        "resale": "resale registration",
-        "selling stockholder": "selling stockholder",
-        "reverse split": "reverse split",
-        "offering": "offering"
-    }
-
-    hits = []
-
-    for word, label in danger_words.items():
-        if word in text and label not in hits:
-            hits.append(label)
-
-    return hits
 
 def score_mover(mover, catalyst_type, catalyst_text):
     score = 0
@@ -1178,36 +1056,7 @@ def find_real_news_headline(ticker, current_headline=""):
 
        # ❌ Nothing found anywhere
     return current_headline, "NONE"
-
-
-def detect_dilution_risk(text):
-    t = (text or "").lower()
-
-    offering_keywords = [
-        "registered direct offering",
-        "public offering",
-        "private placement",
-        "securities purchase agreement",
-        "at-the-market",
-        "atm offering",
-        "shelf registration",
-        "form s-3",
-        "form f-3",
-        "warrant",
-        "pre-funded warrant",
-        "convertible note",
-        "convertible preferred",
-        "equity line",
-        "resale prospectus",
-    ]
-
-    found = [k for k in offering_keywords if k in t]
-
-    if found:
-        return f"⚠️ REAL DILUTION RISK: {', '.join(found[:3])}"
-
-    return None
-    
+ 
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1526,9 +1375,6 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
 
-            if float_shares == 0:
-                print(f"[WARN] {ticker} no float data — allowing through", flush=True)
-
             elif float_shares > 50_000_000:
                 print(f"[FILTER] {ticker} skipped — float too high", flush=True)
                 continue
@@ -1593,13 +1439,6 @@ def run_scanner():
                     "high": recent_high,
                     "sent": False
                 }
-            
-            elif ticker in second_leg_tracker:
-                second_leg_tracker[ticker]["high"] = max(
-                    second_leg_tracker[ticker]["high"],
-                    recent_high
-                )
-
             second_leg_alert = (
                 ticker in second_leg_tracker
                 and not second_leg_tracker[ticker]["sent"]
@@ -1607,6 +1446,12 @@ def run_scanner():
                 and above_vwap
                 and price > second_leg_tracker[ticker]["high"] * 1.03
             )
+            
+            if ticker in second_leg_tracker:
+                second_leg_tracker[ticker]["high"] = max(
+                    second_leg_tracker[ticker]["high"],
+                    recent_high
+                )
 
             breakout_burst_alert = (
                 gain >= 25
