@@ -1414,8 +1414,8 @@ def run_scanner():
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
         
-
-            above_vwap = price > vwap if vwap else False
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             volume_confirmed = (
