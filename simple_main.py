@@ -609,7 +609,7 @@ def get_alert_status(result):
         return "Early momentum forming — watch only, needs confirmation."
     else:
         return "Early move detected — NOT confirmed yet."
-def build_alert(result, rank):
+def build_alert(result):
     clean_reasons = [r for r in result.get("reasons", []) if "market cap" not in r.lower()]
     reasons = ", ".join(clean_reasons) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
