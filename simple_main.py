@@ -758,7 +758,9 @@ def is_trend_builder(result, candles):
     if ema9 is None or ema20 is None:
         return False
 
-    above_vwap = "Price above VWAP" in result.get("reasons", [])
+    price = float(result.get("price", 0) or 0)
+    vwap = float(result.get("vwap", 0) or 0)
+    above_vwap = price > vwap if vwap else False
 
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
@@ -1108,14 +1110,21 @@ def run_scanner():
 
             result["market_cap"] = market_cap
             result["float"] = float_shares
-
+            if 0 < float_shares <= 10_000_000:
+                result["score"] = min(10, result.get("score", 0) + 1)
+                result.setdefault("reasons", []).append("Low float momentum potential")
             print(f"[MARKET CAP] {ticker}: {market_cap}", flush=True)
             print(f"[FLOAT] {ticker}: {float_shares}", flush=True)
             
             if market_cap:
                 result["reasons"].append(f"Market cap: ${market_cap:,}")
 
-            sec_risk, sec_note = check_sec_offering_risk(ticker)
+            sec_risk = False
+            sec_note = "SEC check skipped — low score"
+            
+            if result.get("score", 0) >= 7:
+                sec_risk, sec_note = check_sec_offering_risk(ticker)
+            
             result["sec_note"] = sec_note
             
             if sec_risk:
@@ -1203,7 +1212,7 @@ def run_scanner():
                 result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
 
             results.append(result)
-            time.sleep(0.5)
+            time.sleep(0.15)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -1224,7 +1233,9 @@ def run_scanner():
 
         now = time.time()
         now_et = datetime.now(ZoneInfo("America/New_York"))
-        
+        for t in list(second_leg_tracker.keys()):
+            if now - alert_history.get(t, 0) > 1800:
+                del second_leg_tracker[t]
         hour = now_et.hour
         minute = now_et.minute
         weekday = now_et.weekday() 
@@ -1433,6 +1444,9 @@ def run_scanner():
             prev_vol = result.get("prev_volume", 0)
 
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
+             if volume_spike:
+                result["score"] = min(10, result.get("score", 0) + 1)
+                result.setdefault("reasons", []).append("Volume surge")
             pullback = price < recent_high * 0.95
             if ticker not in second_leg_tracker and gain >= 20 and above_vwap:
                 second_leg_tracker[ticker] = {
