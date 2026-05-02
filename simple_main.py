@@ -793,7 +793,7 @@ def build_alert(result, rank):
         f"Float: {float_shares/1_000_000:.1f}M\n\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
-        f"{no_news_warning}""
+        f"{no_news_warning}"
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
@@ -1577,13 +1577,6 @@ def run_scanner():
             if early_momentum_alert:
                 print(f"[EARLY] {ticker} building momentum", flush=True)
 
-            if result["gain"] < 20 and not (
-                early_momentum_alert
-                or trend_builder_alert
-                or vwap_reclaim_setup
-            ):
-                continue
-
             above_vwap = "Price above VWAP" in result.get("reasons", [])
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
@@ -1674,6 +1667,13 @@ def run_scanner():
                 and recent_vol >= 150_000
             )
             trend_builder_alert = result.get("trend_builder_alert", False)
+            
+            if result["gain"] < 20 and not (
+                early_momentum_alert
+                or trend_builder_alert
+                or vwap_reclaim_setup
+            ):
+                continue
 
             should_alert = (
                 valid_early_alert
@@ -1710,6 +1710,7 @@ def run_scanner():
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
+            structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
