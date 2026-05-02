@@ -793,7 +793,7 @@ def build_alert(result, rank):
         f"Float: {float_shares/1_000_000:.1f}M\n\n"
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
-        f"{no_news_warning}\n"
+        f"{no_news_warning}""
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
@@ -1027,16 +1027,6 @@ def classify_news_quality(headline):
         "fda clearance",
         "commercial launch",
     
-        "contract","agreement","partnership","collaboration","deal","order",
-        "purchase order","supply agreement","distribution agreement",
-        "license agreement","strategic alliance",
-        "acquisition","merger","buyout","takeover",
-        "definitive agreement","letter of intent",
-        "spin-off","spinoff",
-        "earnings","revenue","guidance","raises guidance",
-        "profitability","record revenue",
-        "bitcoin","ethereum","crypto","blockchain",
-        "artificial intelligence","ai-powered","nvidia",
     ]
     
     WEAK_KEYWORDS = [
@@ -1202,7 +1192,7 @@ def find_real_news_headline(ticker, current_headline=""):
                 
                 scraped_quality = classify_news_quality(text)
 
-                if scraped_quality in ["STRONG", "WEAK"]:
+                if scraped_quality == "STRONG":
                     print(f"[NEWS SCRAPE] {ticker}: {text}", flush=True)
                     return text, scraped_quality
     except Exception as e:
@@ -1587,7 +1577,11 @@ def run_scanner():
             if early_momentum_alert:
                 print(f"[EARLY] {ticker} building momentum", flush=True)
 
-            if result["gain"] < 20 and not early_momentum_alert:
+            if result["gain"] < 20 and not (
+                early_momentum_alert
+                or trend_builder_alert
+                or vwap_reclaim_setup
+            ):
                 continue
 
             above_vwap = "Price above VWAP" in result.get("reasons", [])
@@ -1716,7 +1710,6 @@ def run_scanner():
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
-            structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
