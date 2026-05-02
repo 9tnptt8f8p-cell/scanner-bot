@@ -1692,7 +1692,10 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
         
-            if alerts_allowed and should_alert and result["score"] >= 7:
+            first_alert = ticker not in alert_history
+            realert_ok = new_high_realert
+
+            if alerts_allowed and should_alert and result["score"] >= 7 and (first_alert or realert_ok):
                 result["setup_tag"] = alert_tag.strip()
                 sent = send_alert(build_alert(result, rank))
                 time.sleep(0.3)
