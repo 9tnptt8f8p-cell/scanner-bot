@@ -1139,15 +1139,15 @@ def scrape_pr_headline(ticker):
 
             for tag in soup.find_all(["a", "h1", "h2", "h3"]):
                 text = tag.get_text(" ", strip=True)
-
+            
                 if not text or len(text) < 25:
                     continue
-
+            
                 if ticker.lower() not in text.lower():
                     continue
-
+            
                 quality = classify_news_quality(text)
-
+            
                 if quality == "STRONG":
                     print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
                     return text
