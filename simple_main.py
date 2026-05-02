@@ -783,6 +783,8 @@ def build_alert(result, rank):
         f"Catalyst: {result.get('catalyst_type', 'none')}\n"
         f"{result.get('catalyst_text', '')}\n\n"
         f"Status:\n{status}\n\n"
+        f"Status:\n{status}\n"
+        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
@@ -1656,6 +1658,18 @@ def run_scanner():
             
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
+            structure_text = " ".join(
+                result.get("reasons", []) + result.get("risks", [])
+            ).lower()
+            
+            if "below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
+                result["trap_runner"] = "⚠️ TRAP RISK"
+            
+            elif "price above vwap" in structure_text and result.get("recent_volume", 0) >= 150_000:
+                result["trap_runner"] = "🚀 RUNNER LEAN"
+            
+            else:
+                result["trap_runner"] = "🤔 UNCLEAR"
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
