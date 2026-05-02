@@ -1710,7 +1710,11 @@ def run_scanner():
 
             no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "WEAK"]
             
+            is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
+            
             if alerts_allowed and should_alert and result["score"] >= 6 and (first_alert or realert_ok):
+                if is_trap and result.get("score", 0) < 8:
+                    continue
                 if no_news and not above_vwap:
                     continue
                 result["setup_tag"] = alert_tag.strip()
