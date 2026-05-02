@@ -759,10 +759,8 @@ def get_alert_status(result):
         return "Building momentum — wait for clean entry confirmation."
     elif score == 7:
         return "Potential runner forming — needs more confirmation."
-    else:
     elif score == 6:
         return "Early momentum forming — watch only, needs confirmation."
-
     else:
         return "Early move detected — NOT confirmed yet."
 def build_alert(result, rank):
