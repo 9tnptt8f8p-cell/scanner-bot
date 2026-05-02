@@ -1402,55 +1402,6 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — bad float/market cap", flush=True)
                 continue
                         
-            early_spike = (
-                gain >= 25
-                and recent_vol >= 25000
-                and result.get("score", 0) >= 6
-                and price >= 0.50
-                and float_shares > 0
-                and market_cap > 0
-            )
-            
-            last_early_alert = alert_history.get(f"{ticker}_early", 0)
-            last_early_price = runner_prices.get(f"{ticker}_early", 0)
-            
-            early_cooldown_done = now - last_early_alert >= EARLY_ALERT_COOLDOWN
-            early_new_high = price > last_early_price * 1.03
-            
-            if alerts_allowed and early_spike and early_cooldown_done and early_new_high:
-                     
-                title = get_alert_title(result)
-                status = get_alert_status(result)
-            
-                early_msg = f"""
-            {title}
-            
-            {ticker} | Score: {result.get("score", 0)}/10
-            
-            Price: ${price}
-            Gain: {gain:.1f}%
-            Recent Vol: {recent_vol:,}
-            
-            Status:
-            {status}
-            
-            Watch For:
-            - volume expansion
-            - VWAP reclaim/hold
-            - clean pullback
-            - second leg setup
-            
-            Risk:
-            - early move can fade fast
-            - wait for confirmation
-            """
-                
-                send_alert(early_msg)
-                time.sleep(0.3)
-                alert_history[f"{ticker}_early"] = now
-                runner_prices[f"{ticker}_early"] = price
-                continue
-            
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
             filing_date = result.get("filing_date", None)
@@ -1586,8 +1537,12 @@ def run_scanner():
             total_vol = result.get("total_candle_volume", 0)
 
             valid_early_alert = (
-                result["gain"] >= 15
+                result["gain"] >= 25
+                and result.get("score", 0) >= 6
                 and recent_vol >= 100_000
+                and price >= 0.50
+                and float_shares > 0
+                and market_cap > 0
                 and above_vwap
             )
 
