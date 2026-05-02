@@ -1204,6 +1204,7 @@ def run_scanner():
     first_alert_price = {}
     second_leg_alerted = set()
     while True:
+        sent_this_cycle = set()
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
             time.sleep(60)
@@ -1381,6 +1382,8 @@ def run_scanner():
             print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
         for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
+            if ticker in sent_this_cycle:
+                continue
          
             # --- WARRANT / RIGHTS FILTER ---
             bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
@@ -1697,7 +1700,12 @@ def run_scanner():
             
             result["rank_score"] = rank_result(result)
             result["trade_bias"] = build_trade_bias(result)
+            structure_text = " ".join(
+                result.get("reasons", []) + result.get("risks", [])
+            ).lower()
+
             alert_tag = ""
+
             if trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
             elif second_leg_alert:
