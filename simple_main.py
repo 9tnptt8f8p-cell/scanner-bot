@@ -1381,6 +1381,8 @@ def run_scanner():
         if not alerts_allowed:
             print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
         for rank, result in enumerate(results, start=1):
+        if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
+            break
             ticker = result["ticker"]
             if ticker in sent_this_cycle:
                 continue
