@@ -1425,9 +1425,13 @@ def run_scanner():
         
         if not alerts_allowed:
             print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
-    for rank, result in enumerate(results, start=1):
-        if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
-            break
+            time.sleep(SCAN_SLEEP)
+            continue
+        
+        for rank, result in enumerate(results, start=1):
+            if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
+                break
+        
             ticker = result["ticker"]
             if ticker in sent_this_cycle:
                 continue
@@ -1454,6 +1458,7 @@ def run_scanner():
             filing_date = result.get("filing_date", None)
             headline = result.get("catalyst_text", "") or result.get("headline", "")
             headline, news_quality = find_real_news_headline(ticker, headline)
+            print(f"[NEWS] {ticker}: {headline} ({news_quality})", flush=True)
             
             result["catalyst_text"] = headline
             result["headline"] = headline
