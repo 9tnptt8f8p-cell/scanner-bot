@@ -1552,9 +1552,7 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
                 continue
 
-                print(f"[WARN] {ticker} no market cap data — allowing through", flush=True)
-
-            elif market_cap > 1_000_000_000:
+            elif market_cap > MAX_MARKET_CAP:
                 print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
                 continue
 
@@ -1741,10 +1739,7 @@ def run_scanner():
             
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-            structure_text = " ".join(
-                result.get("reasons", []) + result.get("risks", [])
-            ).lower()
-
+          
             alert_tag = ""
 
             if trend_builder_alert:
@@ -1761,7 +1756,6 @@ def run_scanner():
                 alert_tag = "📈 DIP BUY"
             else:
                 alert_tag = ""
-                structure_text = " ".join(
                     result.get("reasons", []) + result.get("risks", [])
                 ).lower()
                         
