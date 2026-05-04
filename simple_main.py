@@ -48,7 +48,13 @@ def build_trade_bias(result):
         return "✅ Strong catalyst — watch for continuation"
 
     return "🤔 Mixed/unclear — wait for confirmation"
-
+    
+def is_above_vwap(price, vwap):
+    if not vwap or not price:
+        return True
+    return price > (vwap * 0.995)
+    
+    
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 second_leg_tracker = {}
@@ -762,7 +768,7 @@ def is_trend_builder(result, candles):
     vwap = float(result.get("vwap", 0) or 0)
 
     has_vwap = vwap > 0
-    above_vwap = price > vwap if has_vwap else True
+    above_vwap = is_above_vwap(price, vwap)
 
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
@@ -1242,21 +1248,13 @@ def run_scanner():
             if vwap_hug and not result.get("breakout"):
                 result["trend_builder_alert"] = False
                 result["risks"].append("Dead chop / VWAP hug — no alert")
-                
-            # --- TREND BUILDER SCORE BOOST ---
-            if result.get("trend_builder_alert"):
-                result["score"] = min(result.get("score", 0) + 1, 10)
-            
-                if "Trend builder setup / possible second leg" not in result["reasons"]:
-                    result["reasons"].append("Trend builder setup / possible second leg")
-                # ✅ structure now matters more
-                if result.get("bad_structure", False):
-                    result["score"] = max(0, result["score"] - 3)
-                    result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
-                    structure_score = result.get("structure_score", 0)
+      
+                result["score"] = max(0, result["score"] - 3)
+                result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
+                structure_score = result.get("structure_score", 0)
 
-                    price = float(result.get("price", 0) or 0)
-                    vwap = float(result.get("vwap", 0) or 0)
+                price = float(result.get("price", 0) or 0)
+                vwap = float(result.get("vwap", 0) or 0)
                     
             has_vwap = vwap > 0
             above_vwap = price > vwap if has_vwap else True
@@ -1285,7 +1283,7 @@ def run_scanner():
             result["score"] = max(0, min(result["score"], 10))
 
             results.append(result)
-            time.sleep(0.15)
+            time.sleep(0.05)
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -1331,6 +1329,17 @@ def run_scanner():
             continue
             
         for rank, result in enumerate(results, start=1):
+
+            ticker = result["ticker"]   # ✅ MUST be first
+        
+            gain = float(result.get("gain", 0) or 0)
+            recent_vol = result.get("recent_volume", 0)
+            
+            # 🚫 Skip weak movers early (before heavy work)
+            if gain < 20 and recent_vol < 150_000:
+                print(f"[FILTER] {ticker} skipped — weak early", flush=True)
+                continue
+        
             bad_structure = False
             good_structure = False
         
@@ -1488,7 +1497,7 @@ def run_scanner():
             vwap = float(result.get("vwap", 0) or 0)
         
             has_vwap = vwap > 0
-            above_vwap = price > (vwap * 0.995) if has_vwap else True            
+            above_vwap = is_above_vwap(price, vwap)           
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             volume_confirmed = (
@@ -1642,7 +1651,7 @@ def run_scanner():
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
-            if "below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
+            if "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
             elif above_vwap and result.get("recent_volume", 0) >= 150_000:
                 result["trap_runner"] = "🚀 RUNNER LEAN"
@@ -1689,7 +1698,7 @@ def run_scanner():
                 alert_tag = ""
                      
             bad_chart = (
-                "below vwap" in structure_text
+                "clear below vwap" in structure_text
                 or "big upper wick" in structure_text
                 or "possible trap" in structure_text
                 or "bad structure" in structure_text
@@ -1705,22 +1714,38 @@ def run_scanner():
             no_news = result.get("news_quality") in ["NONE", "UNKNOWN"]
             
             is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
+            if not alerts_allowed:
+                continue
+
+            if not should_alert:
+                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
+                continue
             
-            if alerts_allowed and should_alert and result["score"] >= 6 and (first_alert or realert_ok):
-                if not volume_confirmed and result.get("trap_runner") != "🚀 RUNNER LEAN":
-                    continue
-                if is_trap and result.get("score", 0) < 8:
-                    continue
-                if no_news and not (
-                    above_vwap
-                    and result.get("recent_volume", 0) >= 150_000
-                    and float_shares <= 20_000_000
-                ):
-                    continue
-                result["setup_tag"] = alert_tag.strip()
-                sent = send_alert(build_alert(result))
-                time.sleep(0.3)
-        
+            if result["score"] < 6:
+                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
+                continue
+            
+            if not (first_alert or realert_ok):
+                print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
+                continue
+            
+            if not volume_confirmed and result.get("trap_runner") != "🚀 RUNNER LEAN":
+                continue
+            
+            if is_trap and result.get("score", 0) < 8:
+                continue
+            
+            if no_news and not (
+                above_vwap
+                and result.get("recent_volume", 0) >= 150_000
+                and float_shares <= 20_000_000
+            ):
+                continue
+            
+            result["setup_tag"] = alert_tag.strip()
+            sent = send_alert(build_alert(result))
+            time.sleep(0.1)
+            
                 if sent:
                     alert_history[ticker] = now
                     runner_prices[ticker] = current_price
