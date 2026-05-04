@@ -105,7 +105,7 @@ def analyze_structure(ticker, candles):
     score = 0
     reasons = []
     risk_flags = []
-        trend_builder = False
+    trend_builder = False
 
     if above_vwap:
         score += 2
