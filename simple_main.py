@@ -79,7 +79,8 @@ def should_scan_now():
     if now.date().isoformat() in MARKET_HOLIDAYS_2026:
         return False
 
-    if not (dtime(4, 0) <= now.time() <= dtime(20, 0)):
+    # Scan only 6:00 AM ET to 4:10 PM ET
+    if not (dtime(6, 0) <= now.time() < dtime(16, 10)):
         return False
 
     return True
@@ -1125,7 +1126,7 @@ def run_scanner():
 
             result["market_cap"] = market_cap
             result["float"] = float_shares
-            if float_shares > 50_000_000 or market_cap > 1_000_000_000:
+            if float_shares > 40_000_000 or market_cap > 800_000_000:
                 print(f"[FILTER] {ticker} skipped early — too big", flush=True)
                 continue
             if 0 < float_shares <= 10_000_000:
@@ -1349,8 +1350,8 @@ def run_scanner():
                 continue
         
             # 🚫 Skip big / slow names early
-            if float_shares > 50_000_000 or market_cap > 1_000_000_000:
-                print(f"[FILTER] {ticker} skipped — too big early", flush=True)
+            if float_shares > 40_000_000 or market_cap > 800_000_000:
+                print(f"[FILTER] {ticker} skipped early — too big", flush=True)
                 continue
         
             bad_structure = False
