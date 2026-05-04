@@ -842,6 +842,11 @@ def classify_news_quality(headline):
         "shares are trading higher",
         "driving market activity",
         "attracting the most attention",
+        "gapping stocks",
+        "most active stocks",
+        "stocks moving in",
+        "consumer discretionary stocks moving",
+        "industrials stocks moving",
     ]
 
     STRONG_KEYWORDS = [
@@ -885,15 +890,15 @@ def classify_news_quality(headline):
         "corporate update","shareholder letter",
     ]
 
-    # ✅ STRONG FIRST
-    if any(k in h for k in STRONG_KEYWORDS):
-        return "STRONG"
-
-    # ❌ Junk aggregator
+    # ❌ Junk aggregator FIRST
     if any(k in h for k in BAD_NEWS_KEYWORDS):
         return "JUNK"
-
-    # ⚠️ Weak
+    
+    # ✅ Strong second
+    if any(k in h for k in STRONG_KEYWORDS):
+        return "STRONG"
+    
+    # ⚠️ Weak third
     if any(k in h for k in WEAK_KEYWORDS):
         return "WEAK"
 
