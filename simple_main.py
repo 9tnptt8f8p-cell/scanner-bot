@@ -1330,14 +1330,20 @@ def run_scanner():
             
         for rank, result in enumerate(results, start=1):
 
-            ticker = result["ticker"]   # ✅ MUST be first
+            ticker = result["ticker"]
         
             gain = float(result.get("gain", 0) or 0)
             recent_vol = result.get("recent_volume", 0)
+            float_shares = result.get("float", 0)
+            market_cap = result.get("market_cap", 0)
             
-            # 🚫 Skip weak movers early (before heavy work)
             if gain < 20 and recent_vol < 150_000:
                 print(f"[FILTER] {ticker} skipped — weak early", flush=True)
+                continue
+        
+            # 🚫 Skip big / slow names early
+            if float_shares > 50_000_000 or market_cap > 1_000_000_000:
+                print(f"[FILTER] {ticker} skipped — too big early", flush=True)
                 continue
         
             bad_structure = False
