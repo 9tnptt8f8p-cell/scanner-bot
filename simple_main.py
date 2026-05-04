@@ -1212,6 +1212,7 @@ def run_scanner():
                 structure_score >= 2
                 and above_vwap
             )
+            result["good_structure"] = good_structure
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1253,29 +1254,31 @@ def run_scanner():
                     price = float(result.get("price", 0) or 0)
                     vwap = float(result.get("vwap", 0) or 0)
                     
-                    has_vwap = vwap > 0
-                    above_vwap = price > vwap if has_vwap else True
-                    
-                    good_structure = (
-                        structure_score >= 2
-                        and above_vwap
-                    )
-            elif good_structure:
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
+
+            
+            good_structure = (
+                structure_score >= 2
+                and above_vwap
+            )
+            
+            result["good_structure"] = good_structure
+            
+            if result.get("trend_builder_alert"):
+                result["score"] = min(result.get("score", 0) + 1, 10)
+            
+                if "Trend builder setup / possible second leg" not in result["reasons"]:
+                    result["reasons"].append("Trend builder setup / possible second leg")
+            
+            elif result.get("good_structure", False):
                 result["score"] = min(10, result["score"] + 2)
                 result.setdefault("reasons", []).append("✅ Clean structure confirmation")
             
             else:
                 result["score"] = max(0, result["score"] + structure_score)
-            
+                                
             result["score"] = max(0, min(result["score"], 10))
-
-            trend_builder_alert = is_trend_builder(result, candles)
-            result["trend_builder_alert"] = trend_builder_alert
-
-            if trend_builder_alert:
-                result["score"] += 2
-                result["score"] = max(0, min(result["score"], 10))
-                result["reasons"].append("Trend Builder: VWAP + EMAs + higher lows")
 
             results.append(result)
             time.sleep(0.15)
