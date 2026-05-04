@@ -1231,6 +1231,18 @@ def run_scanner():
                 if result.get("bad_structure", False):
                     result["score"] = max(0, result["score"] - 3)
                     result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
+                    structure_score = result.get("structure_score", 0)
+
+                    price = float(result.get("price", 0) or 0)
+                    vwap = float(result.get("vwap", 0) or 0)
+                    
+                    has_vwap = vwap > 0
+                    above_vwap = price > vwap if has_vwap else True
+                    
+                    good_structure = (
+                        structure_score >= 2
+                        and above_vwap
+                    )
             elif good_structure:
                 result["score"] = min(10, result["score"] + 2)
                 result.setdefault("reasons", []).append("✅ Clean structure confirmation")
