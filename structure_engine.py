@@ -97,8 +97,7 @@ def analyze_structure(ticker, candles):
     current_price = float(current["close"])
 
     vwap = calculate_vwap(candles)
-    above_vwap = vwap is not None and current_price > vwap
-
+    above_vwap = vwap is not None and current_price > (vwap * 0.995)
     breakout, breakout_level = detect_breakout(candles)
     higher_lows = detect_higher_lows(candles)
     strength = candle_strength(current)
@@ -106,13 +105,14 @@ def analyze_structure(ticker, candles):
     score = 0
     reasons = []
     risk_flags = []
-    trend_builder = False
+        trend_builder = False
 
     if above_vwap:
         score += 2
         reasons.append("Price above VWAP")
     else:
-       risk_flags.append("Clear below VWAP")
+        if vwap and current_price < (vwap * 0.99):
+            risk_flags.append("Clear below VWAP")
 
     if breakout:
         score += 2
@@ -136,7 +136,7 @@ def analyze_structure(ticker, candles):
 
     # --- TREND BUILDER DETECTION ---
     try:
-        strong_above_vwap = current_price > vwap * 1.002 if vwap else False
+        strong_above_vwap = current_price > (vwap * 0.995) if vwap else False
 
         highs = [float(c["high"]) for c in candles[-5:]]
         lows = [float(c["low"]) for c in candles[-5:]]
