@@ -1291,11 +1291,15 @@ def run_scanner():
         results.sort(key=lambda x: x["score"], reverse=True)
 
         regime, regime_notes = detect_market_regime(results)
+        
 
         for r in results:
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
-
+            
+        print("[SCAN] Cycle complete", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
+        
         if results:
             top_line = " | ".join(
                 f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
@@ -1755,28 +1759,19 @@ def run_scanner():
             sent = send_alert(build_alert(result))
             time.sleep(0.1)
             
-                if sent:
-                    alert_history[ticker] = now
-                    runner_prices[ticker] = current_price
-                    sent_this_cycle.add(ticker)
-        
-                    if second_leg_alert and ticker in second_leg_tracker:
-                        second_leg_tracker[ticker]["sent"] = True
-        
-                    print(f"[ALERT SENT] {ticker}", flush=True)
-                else:
-                    print(f"[ALERT FAILED] {ticker}", flush=True)
+            if sent:
+                alert_history[ticker] = now
+                runner_prices[ticker] = current_price
+                sent_this_cycle.add(ticker)
+            
+                if second_leg_alert and ticker in second_leg_tracker:
+                    second_leg_tracker[ticker]["sent"] = True
+            
+                print(f"[ALERT SENT] {ticker}", flush=True)
+            
             else:
-                print(
-                    f"[NO ALERT] {ticker} blocked | "
-                    f"gain={result['gain']:.1f}% recent_vol={recent_vol:,}",
-                    flush=True
-                )
-
-
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
-
+                print(f"[ALERT FAILED] {ticker}", flush=True)
+            
         time.sleep(SCAN_SLEEP)
 
 
