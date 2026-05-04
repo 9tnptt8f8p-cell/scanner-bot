@@ -1502,10 +1502,28 @@ def run_scanner():
                 and above_vwap
             )
 
+            # --- RUNNER CONFIRMATION FILTER ---
+            breakout_confirmed = (
+                result.get("breakout")
+                and price > (result.get("breakout_level", 0) * 1.01)
+            )
+            
+            volume_expanding = (
+                recent_vol > result.get("prev_volume", 0)
+                and recent_vol >= 200_000
+            )
+            
+            not_extended = (
+                price <= result.get("high", price) * 1.05
+            )
+            
             valid_runner_alert = (
                 result["gain"] >= ALERT_MIN_GAIN
-                and recent_vol >= 200_000
                 and above_vwap
+                and breakout_confirmed
+                and volume_expanding
+                and not_extended
+            )
             )
 
             valid_emergency_runner_alert = (
