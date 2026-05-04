@@ -1524,8 +1524,7 @@ def run_scanner():
                 and volume_expanding
                 and not_extended
             )
-            )
-
+            
             valid_emergency_runner_alert = (
                 result["gain"] >= 35
                 and total_vol >= 1_000_000
