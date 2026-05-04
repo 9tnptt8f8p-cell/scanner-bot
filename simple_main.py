@@ -1370,7 +1370,7 @@ def run_scanner():
             result["news_quality"] = news_quality
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
-                result["score"] = max(0, result.get("score", 0) - 2)
+                result["score"] = max(0, result.get("score", 0) - 1)
                 result.setdefault("risks", []).append("⚠️ Junk/aggregator headline")
 
             elif news_quality == "NONE":
