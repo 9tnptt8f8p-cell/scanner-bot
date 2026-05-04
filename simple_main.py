@@ -574,12 +574,12 @@ def score_mover(mover, catalyst_type, catalyst_text):
         "risks": risks
     }
 def get_alert_title(result):
-    score = result.get("score", 0)
-    recent_vol = result.get("recent_volume", 0)
-
-    # 🔥 Special override
+    # 🚨 Trend Builder override (FIRST PRIORITY)
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
+
+    score = result.get("score", 0)
+    recent_vol = result.get("recent_volume", 0)
 
     # 🔥 TOP PRIORITY = SCORE (not gain)
     if score >= 9 and recent_vol >= 200_000:
@@ -1166,36 +1166,67 @@ def run_scanner():
                 )
             else:
                 result["candle_session_gain"] = 0
+                structure = analyze_structure(ticker, candles)
+                
+                # --- STRUCTURE DATA ---
+                result["structure_score"] = structure.get("structure_score", 0)
+                result["above_vwap"] = structure.get("above_vwap", False)
+                result["vwap"] = structure.get("vwap")
+                result["breakout"] = structure.get("breakout", False)
+                result["breakout_level"] = structure.get("breakout_level")
+                result["higher_lows"] = structure.get("higher_lows", False)
+                result["trend_builder"] = structure.get("trend_builder", False)
+                
+                structure_reasons = structure.get("reasons", [])
+                structure_risks = structure.get("risk_flags", [])
+                
+                result["reasons"] = result.get("reasons", [])
+                result["risks"] = result.get("risks", [])
+                
+                result["reasons"].extend(structure_reasons)
+                result["risks"].extend(structure_risks)
+                
+                structure_text = " ".join(structure_reasons + structure_risks).lower()
 
-            structure = analyze_structure(ticker, candles)
-            result["structure"] = structure
-            
-            structure_score = structure.get("structure_score", 0)
-            structure_reasons = structure.get("reasons", [])
-            structure_risks = structure.get("risk_flags", [])
-            
-            result["risks"].extend(structure_risks)
-            result["reasons"].extend(structure_reasons)
-            
-            structure_text = " ".join(structure_reasons + structure_risks).lower()
-            
-            bad_structure = (
-                "below vwap" in structure_text
-                or "upper wick" in structure_text
-                or "trap" in structure_text
-                or "failed" in structure_text
+                bad_structure = (
+                    "below vwap" in structure_text
+                    or "upper wick" in structure_text
+                    or "trap" in structure_text
+                    or "failed" in structure_text
+                )
+                
+            # --- TREND BUILDER QUALITY FILTER ---
+            trend_builder_ok = (
+                result.get("trend_builder")
+                and not bad_structure
+                and result.get("above_vwap")
+                and result.get("recent_volume", 0) >= 100000
+                and result.get("gain", 0) >= 15
             )
+            
+            if trend_builder_ok:
+                result["trend_builder_alert"] = True
+            else:
+                result["trend_builder_alert"] = False
+            
+            # --- DEAD CHOP / VWAP HUG FILTER ---
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
             
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+            vwap_hug = False
+            if vwap > 0 and price > 0:
+                vwap_hug = abs(price - vwap) / price < 0.003
             
-            good_structure = (
-                structure_score >= 2
-                and above_vwap
-            )
-        
+            if vwap_hug and not result.get("breakout"):
+                result["trend_builder_alert"] = False
+                result["risks"].append("Dead chop / VWAP hug — no alert")
+                
+            # --- TREND BUILDER SCORE BOOST ---
+            if result.get("trend_builder_alert"):
+                result["score"] = min(result.get("score", 0) + 1, 10)
+            
+                if "Trend builder setup / possible second leg" not in result["reasons"]:
+                    result["reasons"].append("Trend builder setup / possible second leg")
             # ✅ structure now matters more
             if bad_structure:
                 result["score"] = max(0, result["score"] - 3)
