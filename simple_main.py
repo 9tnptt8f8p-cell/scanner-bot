@@ -1190,9 +1190,8 @@ def run_scanner():
             result["risks"].extend(structure_risks)
             
             structure_text = " ".join(structure_reasons + structure_risks).lower()
-            
             bad_structure = (
-                "below vwap" in structure_text
+                "clear below vwap" in structure_text
                 or "upper wick" in structure_text
                 or "trap" in structure_text
                 or "failed" in structure_text
@@ -1484,7 +1483,7 @@ def run_scanner():
             vwap = float(result.get("vwap", 0) or 0)
         
             has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+            above_vwap = price > (vwap * 0.995) if has_vwap else True            
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             volume_confirmed = (
