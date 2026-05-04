@@ -133,28 +133,30 @@ def analyze_structure(ticker, candles):
     if strength == "weak":
         score -= 1
         risk_flags.append("Weak candle close")
-
+    
     # --- TREND BUILDER DETECTION ---
+    trend_builder = False
+    
     try:
-        strong_above_vwap = current_price > (vwap * 0.995) if vwap else False
-
+        strong_above_vwap = current_price > vwap * 1.002 if vwap else False
+    
         highs = [float(c["high"]) for c in candles[-5:]]
         lows = [float(c["low"]) for c in candles[-5:]]
-
+    
         recent_high = max(highs)
         recent_low = min(lows)
+    
         range_pct = (recent_high - recent_low) / current_price if current_price > 0 else 999
-
         tight_range = range_pct < 0.03
-        higher_lows_ok = higher_lows or "Higher lows forming" in reasons
-
+    
+        higher_lows_ok = higher_lows
+    
         if strong_above_vwap and higher_lows_ok and tight_range:
             trend_builder = True
             reasons.append("Trend builder: tight consolidation above VWAP")
-
+    
     except Exception:
         trend_builder = False
-
     return {
         "ticker": ticker,
         "structure_score": score,
