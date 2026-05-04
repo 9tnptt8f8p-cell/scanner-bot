@@ -1125,6 +1125,9 @@ def run_scanner():
 
             result["market_cap"] = market_cap
             result["float"] = float_shares
+            if float_shares > 50_000_000 or market_cap > 1_000_000_000:
+                print(f"[FILTER] {ticker} skipped early — too big", flush=True)
+                continue
             if 0 < float_shares <= 10_000_000:
                 result["score"] = min(10, result.get("score", 0) + 1)
                 result.setdefault("reasons", []).append("Low float momentum potential")
