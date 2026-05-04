@@ -112,7 +112,7 @@ def analyze_structure(ticker, candles):
         score += 2
         reasons.append("Price above VWAP")
     else:
-        risk_flags.append("Below VWAP")
+       risk_flags.append("Clear below VWAP")
 
     if breakout:
         score += 2
