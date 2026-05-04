@@ -1082,6 +1082,8 @@ def run_scanner():
         results = []
 
         for mover in movers:
+            bad_structure = False
+            good_structure = False
             sec_risk = False
             sec_note = ""
 
@@ -1156,45 +1158,60 @@ def run_scanner():
             if candles:
                 result["high"] = max(float(c["high"]) for c in candles[-10:])
                 result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
-
+            
                 day_open = float(candles[0]["open"])
                 last_close = float(candles[-1]["close"])
-
+            
                 result["candle_session_gain"] = (
                     ((last_close - day_open) / day_open) * 100
                     if day_open > 0 else 0
                 )
             else:
                 result["candle_session_gain"] = 0
-                structure = analyze_structure(ticker, candles)
-                
-                # --- STRUCTURE DATA ---
-                result["structure_score"] = structure.get("structure_score", 0)
-                result["above_vwap"] = structure.get("above_vwap", False)
-                result["vwap"] = structure.get("vwap")
-                result["breakout"] = structure.get("breakout", False)
-                result["breakout_level"] = structure.get("breakout_level")
-                result["higher_lows"] = structure.get("higher_lows", False)
-                result["trend_builder"] = structure.get("trend_builder", False)
-                
-                structure_reasons = structure.get("reasons", [])
-                structure_risks = structure.get("risk_flags", [])
-                
-                result["reasons"] = result.get("reasons", [])
-                result["risks"] = result.get("risks", [])
-                
-                result["reasons"].extend(structure_reasons)
-                result["risks"].extend(structure_risks)
-                
-                structure_text = " ".join(structure_reasons + structure_risks).lower()
-
-                bad_structure = (
-                    "below vwap" in structure_text
-                    or "upper wick" in structure_text
-                    or "trap" in structure_text
-                    or "failed" in structure_text
-                )
-                result["bad_structure"] = bad_structure
+            
+            # --- STRUCTURE DATA ---
+            structure = analyze_structure(ticker, candles)
+            
+            result["structure_score"] = structure.get("structure_score", 0)
+            result["above_vwap"] = structure.get("above_vwap", False)
+            result["vwap"] = structure.get("vwap")
+            result["breakout"] = structure.get("breakout", False)
+            result["breakout_level"] = structure.get("breakout_level")
+            result["higher_lows"] = structure.get("higher_lows", False)
+            result["trend_builder"] = structure.get("trend_builder", False)
+            
+            structure_reasons = structure.get("reasons", [])
+            structure_risks = structure.get("risk_flags", [])
+            
+            result["reasons"] = result.get("reasons", [])
+            result["risks"] = result.get("risks", [])
+            
+            result["reasons"].extend(structure_reasons)
+            result["risks"].extend(structure_risks)
+            
+            structure_text = " ".join(structure_reasons + structure_risks).lower()
+            
+            bad_structure = (
+                "below vwap" in structure_text
+                or "upper wick" in structure_text
+                or "trap" in structure_text
+                or "failed" in structure_text
+            )
+            
+            result["bad_structure"] = bad_structure
+            
+            structure_score = result.get("structure_score", 0)
+            
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
+            
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
+            
+            good_structure = (
+                structure_score >= 2
+                and above_vwap
+            )
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1308,6 +1325,7 @@ def run_scanner():
             
         for rank, result in enumerate(results, start=1):
             bad_structure = False
+            good_structure = False
         
             if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
                 break
