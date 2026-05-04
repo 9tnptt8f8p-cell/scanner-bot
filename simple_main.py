@@ -1194,7 +1194,7 @@ def run_scanner():
                     or "trap" in structure_text
                     or "failed" in structure_text
                 )
-                
+                result["bad_structure"] = bad_structure
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1227,11 +1227,10 @@ def run_scanner():
             
                 if "Trend builder setup / possible second leg" not in result["reasons"]:
                     result["reasons"].append("Trend builder setup / possible second leg")
-            # ✅ structure now matters more
-            if bad_structure:
-                result["score"] = max(0, result["score"] - 3)
-                result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
-            
+                # ✅ structure now matters more
+                if result.get("bad_structure", False):
+                    result["score"] = max(0, result["score"] - 3)
+                    result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
             elif good_structure:
                 result["score"] = min(10, result["score"] + 2)
                 result.setdefault("reasons", []).append("✅ Clean structure confirmation")
@@ -1294,15 +1293,18 @@ def run_scanner():
             print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
             time.sleep(SCAN_SLEEP)
             continue
-        
+            
         for rank, result in enumerate(results, start=1):
+            bad_structure = False
+        
             if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
                 break
         
             ticker = result["ticker"]
+        
             if ticker in sent_this_cycle:
                 continue
-         
+        
             # --- WARRANT / RIGHTS FILTER ---
             bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
             if ticker.endswith(bad_suffixes):
