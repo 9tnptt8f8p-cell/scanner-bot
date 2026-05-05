@@ -36,10 +36,15 @@ def build_alert(data):
 → Build watchlist only
 → Wait for open setup
 """
-
     setup_tag = ""
-    if data.get("alert_type") == "SECOND_LEG" or data.get("second_leg"):
-        setup_tag = "🟢 SECOND LEG COIL BREAKOUT — continuation setup"
+
+    # 🟢 VWAP RECLAIM TAG (ONLY IF VALID)
+    if "Price above VWAP" in reasons:
+        setup_tag += "🟢 VWAP RECLAIM\n"
+
+    # 🌀 COIL BREAKOUT TAG
+    if data.get("alert_type") == "SECOND_LEG" or data.get("coil_breakout"):
+        setup_tag += "🌀 SECOND LEG COIL — continuation setup\n"
 
     msg = f"""
 {emoji} {title}
@@ -47,8 +52,7 @@ def build_alert(data):
 
 Rank: #{rank}
 {ticker} | Score: {score}/10 | Rank: {rank_score}/10
-{setup_tag}
-
+{setup_tag.strip()}
 Price: ${price}
 Gain: +{gain}%
 
