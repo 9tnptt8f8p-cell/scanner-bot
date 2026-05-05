@@ -1092,10 +1092,6 @@ def detect_consolidation(candles, lookback=6):
 
     return tight, lookback
 
-
-def run_scanner():
-    print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1824,6 +1820,10 @@ def run_scanner():
                 continue
             
             result["setup_tag"] = alert_tag.strip()
+            
+            result["title"] = get_alert_title(result)
+            result["emoji"] = "🚨"
+            
             sent = send_alert(build_alert(result))
             time.sleep(0.1)
             
