@@ -580,6 +580,23 @@ def score_mover(mover, catalyst_type, catalyst_text):
         "risks": risks
     }
 def get_alert_title(result):
+    risks_text = " ".join(result.get("risks", [])).lower()
+
+    if any(x in risks_text for x in [
+        "below vwap",
+        "weak candle",
+        "dead chop",
+        "bad structure"
+    ]):
+    if any(x in risks_text for x in [
+        "below vwap",
+        "weak candle",
+        "dead chop",
+        "bad structure",
+        "avoid chasing",
+        "vwap rejection"
+    ]):
+        return "⚠️ TRAP / AVOID"
     # 🚨 Trend Builder override (FIRST PRIORITY)
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
@@ -1397,33 +1414,85 @@ def run_scanner():
             
         for rank, result in enumerate(results, start=1):
 
-            ticker = result["ticker"]
-        
             gain = float(result.get("gain", 0) or 0)
             recent_vol = result.get("recent_volume", 0)
             float_shares = result.get("float", 0)
             market_cap = result.get("market_cap", 0)
             
-            if gain < 20 and recent_vol < 150_000:
-                print(f"[FILTER] {ticker} skipped — weak early", flush=True)
-                continue
-        
-            # 🚫 Skip big / slow names early
-            if float_shares > 40_000_000 or market_cap > 800_000_000:
-                print(f"[FILTER] {ticker} skipped early — too big", flush=True)
-                continue
-        
-            bad_structure = False
-            good_structure = False
-        
-            if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
-                break
-        
-            ticker = result["ticker"]
-        
-            if ticker in sent_this_cycle:
-                continue
-        
+        if gain < 20 and recent_vol < 150_000:
+            print(f"[FILTER] {ticker} skipped — weak early", flush=True)
+            continue
+    
+        # 🚫 Skip big / slow names early
+        if float_shares > 40_000_000 or market_cap > 800_000_000:
+            print(f"[FILTER] {ticker} skipped early — too big", flush=True)
+            continue
+    
+        bad_structure = False
+        good_structure = False
+    
+        if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
+            break
+    
+        ticker = result["ticker"]
+    
+        if ticker in sent_this_cycle:
+            continue
+        # --- SECOND LEG vs DEAD BOUNCE DETECTOR ---
+        current_price = float(result.get("price", 0) or 0)
+        risks_text = " ".join(result.get("risks", [])).lower()
+
+        last_price = runner_prices.get(ticker, 0)
+
+        second_leg = (
+            last_price > 0
+            and current_price > last_price * 1.02
+        )
+         dead_bounce = (
+            "below vwap" in risks_text
+            and not second_leg
+        )
+
+        if dead_bounce:
+            result["alert_type"] = "TRAP"
+            result["bias"] = "⚠️ TRAP RISK"
+            result["entry"] = "⛔ No trade — weak bounce below VWAP"
+            result["score"] = min(result.get("score", 0), 6)
+            # --- COIL BREAKOUT DETECTOR ---
+            current_price = float(result.get("price", 0) or 0)
+            recent_high = float(result.get("recent_high", current_price) or current_price)
+            range_pct = float(result.get("range_pct", 999) or 999)
+
+            near_high = current_price >= recent_high * 0.97
+            tight_range = range_pct <= 5
+            above_vwap = "Price above VWAP" in result.get("reasons", [])
+            clean_structure = "Clean structure confirmation" in " ".join(result.get("reasons", []))
+
+            coil_breakout = (
+                above_vwap
+                and near_high
+                and tight_range
+                and clean_structure
+                and not dead_bounce
+            )
+
+            if coil_breakout:
+                result["coil_breakout"] = True
+                result["alert_type"] = "SECOND_LEG"
+                result["bias"] = "🚀 RUNNER LEAN"
+                result["entry"] = "🟢 Coil near highs — wait for breakout/hold"
+            # --- EXTENDED RUNNER / LATE CHASE DETECTOR ---
+            extended_runner = (
+                gain >= 60
+                and "Price above VWAP" in result.get("reasons", [])
+                and not result.get("coil_breakout", False)
+            )
+
+            if extended_runner:
+                result["alert_type"] = "EXTENDED"
+                result["bias"] = "⚠️ COOLING / EXTENDED"
+                result["entry"] = "⏳ No chase — wait for VWAP hold or reset"
+                result["status"] = "Extended runner — pullback risk, wait for clean setup."
             # --- WARRANT / RIGHTS FILTER ---
             bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
             if ticker.endswith(bad_suffixes):
