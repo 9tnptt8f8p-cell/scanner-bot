@@ -1291,14 +1291,15 @@ def run_scanner():
             good_structure = (
                 structure_score >= 2
                 and above_vwap
+                and not result.get("bad_structure", False)
             )
             result["good_structure"] = good_structure
+            
             # --- FINAL SECOND LEG VWAP CONFIRM ---
             if result.get("second_leg") and above_vwap:
                 result["alert_type"] = "SECOND_LEG"
                 result["setup_tag"] = "🔥 SECOND LEG"
-            else:
-                result["second_leg"] = False
+           
             
             # --- CLEANUP (CRITICAL) ---
             if not result.get("second_leg", False):
@@ -1501,6 +1502,13 @@ def run_scanner():
             float_shares = result.get("float", 0)
             gain = float(result.get("gain", 0))
             
+            candles = result.get("candles", [])
+
+            if candles:
+                recent_high = max(c["high"] for c in candles[-6:])
+            else:
+                recent_high = price
+            
             # --- BAD DATA / FLOAT HANDLING ---
             if market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad market cap", flush=True)
@@ -1532,14 +1540,18 @@ def run_scanner():
 
                 if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
                     result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
-                result["score"] = min(10, result.get("score", 0) + 1)
-
+            
+                structure_text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
+            
+                # Only boost if structure isn't bad
+                if not any(x in structure_text for x in ["below vwap", "bad structure", "trap"]):
+                    result["score"] = min(10, result.get("score", 0) + 1)
+            
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
-
+            
                 if "⚠️ Weak/unclear news" not in result.get("risks", []):
                     result.setdefault("risks", []).append("⚠️ Weak/unclear news")
 
@@ -1687,18 +1699,16 @@ def run_scanner():
        
             # ===== SECOND LEG + BREAKOUT BURST =====
             vwap = result.get("vwap", 0)
-            recent_high = result.get("high", price)
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
 
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
+
             if volume_spike:
                 result["score"] = min(10, result.get("score", 0) + 1)
-            if volume_spike:
-                result["score"] = min(10, result.get("score", 0) + 1)
-        
-            if "Volume surge" not in result.get("reasons", []):
-                result.setdefault("reasons", []).append("Volume surge")
+            
+                if "Volume surge" not in result.get("reasons", []):
+                    result.setdefault("reasons", []).append("Volume surge")
             pullback = price < recent_high * 0.95
            
             breakout_burst_alert = (
