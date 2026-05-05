@@ -1211,15 +1211,16 @@ def run_scanner():
                 volume_spike = recent_vol_3 > prev_vol_3 * 1.5 if prev_vol_3 > 0 else False
                 
                 result["coil_high"] = coil_high
-                result["breakout"] = breakout
+                result["coil_breakout"] = breakout
                 result["volume_spike"] = volume_spike
                 
+                gain = float(result.get("gain", 0) or 0)
+            
                 # --- SECOND LEG COIL SETUP ---
                 second_leg = (
                     gain >= 40
-                    and price > vwap
                     and result.get("coil_tight", False)
-                    and result.get("breakout", False)
+                    and result.get("coil_breakout", False)
                     and result.get("volume_spike", False)
                 )
                 
@@ -1275,6 +1276,12 @@ def run_scanner():
                 and above_vwap
             )
             result["good_structure"] = good_structure
+            # --- FINAL SECOND LEG VWAP CONFIRM ---
+            if result.get("second_leg") and above_vwap:
+                result["alert_type"] = "SECOND_LEG"
+                result["setup_tag"] = "🔥 SECOND LEG"
+            else:
+                result["second_leg"] = False
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1781,7 +1788,7 @@ def run_scanner():
                 or "bad structure" in structure_text
             )
         
-            if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
+            if bad_chart and not result.get("second_leg", False) and not vwap_reclaim_setup:
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
         
@@ -1798,21 +1805,23 @@ def run_scanner():
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
                 continue
             
-            if result["score"] < 6:
+            if result["score"] < 6 and not result.get("second_leg", False):
                 print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
                 continue
             
-            if not (first_alert or realert_ok):
+            if not (first_alert or realert_ok or result.get("second_leg", False)):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
             
-            if not volume_confirmed and result.get("trap_runner") != "🚀 RUNNER LEAN":
+            if (
+                not volume_confirmed
+                and result.get("trap_runner") != "🚀 RUNNER LEAN"
+                and not result.get("second_leg", False)
+            ):
                 continue
-            
-            if is_trap and result.get("score", 0) < 8:
+            if is_trap and result.get("score", 0) < 8 and not result.get("second_leg", False):
                 continue
-            
-            if no_news and not (
+            if no_news and not result.get("second_leg", False) and not (
                 above_vwap
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
