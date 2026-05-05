@@ -1410,32 +1410,44 @@ def run_scanner():
         for rank, result in enumerate(results, start=1):
 
             ticker = result["ticker"]
+
+            price = float(result.get("price", 0) or 0)
+            current_price = price
+            vwap = float(result.get("vwap", 0) or 0)
             gain = float(result.get("gain", 0) or 0)
+
             recent_vol = result.get("recent_volume", 0)
+            prev_vol = result.get("prev_volume", 0)
+            total_vol = result.get("total_candle_volume", 0)
+
             float_shares = result.get("float", 0)
             market_cap = result.get("market_cap", 0)
+
+            candles = result.get("candles", [])
+
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
+
+            structure_text = " ".join(
+                result.get("reasons", []) + result.get("risks", [])
+            ).lower()
 
             if gain < 20 and recent_vol < 150_000:
                 print(f"[FILTER] {ticker} skipped — weak early", flush=True)
                 continue
 
-            # 🚫 Skip big / slow names early
             if float_shares > 40_000_000 or market_cap > 800_000_000:
                 print(f"[FILTER] {ticker} skipped early — too big", flush=True)
                 continue
-
-            bad_structure = False
-            good_structure = False
 
             if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
                 break
 
             if ticker in sent_this_cycle:
                 continue
-            # --- SECOND LEG vs DEAD BOUNCE DETECTOR ---
-            current_price = float(result.get("price", 0) or 0)
-            risks_text = " ".join(result.get("risks", [])).lower()
 
+            # --- SECOND LEG vs DEAD BOUNCE DETECTOR ---
+            risks_text = " ".join(result.get("risks", [])).lower()
             last_price = runner_prices.get(ticker, 0)
 
             second_leg = (
@@ -1455,14 +1467,18 @@ def run_scanner():
                 result["score"] = min(result.get("score", 0), 6)
 
             # --- COIL BREAKOUT DETECTOR ---
-            current_price = float(result.get("price", 0) or 0)
-            recent_high = float(result.get("recent_high", current_price) or current_price)
-            range_pct = float(result.get("range_pct", 999) or 999)
+            if candles:
+                recent_high = max(c["high"] for c in candles[-6:])
+                high_6 = max(c["high"] for c in candles[-6:])
+                low_6 = min(c["low"] for c in candles[-6:])
+                range_pct = ((high_6 - low_6) / high_6) * 100 if high_6 else 999
+            else:
+                recent_high = price
+                range_pct = 999
 
             near_high = current_price >= recent_high * 0.97
             tight_range = range_pct <= 5
-            above_vwap = "Price above VWAP" in result.get("reasons", [])
-            clean_structure = "Clean structure confirmation" in " ".join(result.get("reasons", []))
+            clean_structure = "clean structure confirmation" in structure_text
 
             coil_breakout = (
                 above_vwap
@@ -1481,7 +1497,7 @@ def run_scanner():
             # --- EXTENDED RUNNER / LATE CHASE DETECTOR ---
             extended_runner = (
                 gain >= 60
-                and "Price above VWAP" in result.get("reasons", [])
+                and above_vwap
                 and not result.get("coil_breakout", False)
             )
 
@@ -1496,12 +1512,6 @@ def run_scanner():
             if ticker.endswith(bad_suffixes):
                 print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
                 continue
-            price = result.get("price", 0)
-            recent_vol = result.get("recent_volume", 0)
-            market_cap = result.get("market_cap", 0)
-            float_shares = result.get("float", 0)
-            gain = float(result.get("gain", 0))
-            
             candles = result.get("candles", [])
 
             if candles:
@@ -1516,6 +1526,7 @@ def run_scanner():
             
             if float_shares == 0:
                 print(f"[WARN] {ticker} float unknown — allowing", flush=True)
+            if "⚠️ Float unknown" not in result.get("risks", []):
                 result.setdefault("risks", []).append("⚠️ Float unknown")
                         
             # --- RISK HOOK ---
@@ -1568,11 +1579,14 @@ def run_scanner():
             if vwap and price:
                 vwap_distance = ((price - vwap) / vwap) * 100
             
-                if vwap_distance <= -12:
-                    result["score"] = max(0, result.get("score", 0) - 3)
+            if vwap_distance <= -12:
+                result["score"] = max(0, result.get("score", 0) - 3)
+            
+                if "🚨 Way below VWAP (-12%+) / failed momentum" not in result.get("risks", []):
                     result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
             
-                elif vwap_distance < 0:
+            elif vwap_distance < 0:
+                if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
                     result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
                     
             # --- SEC FILING CLEANUP (FIXED) ---
@@ -1767,8 +1781,10 @@ def run_scanner():
             if result.get("alert_type") == "SECOND_LEG":
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
-            if "Second leg building" not in result.get("reasons", []):
-                result.setdefault("reasons", []).append("Second leg building")
+            
+                if "Second leg building" not in result.get("reasons", []):
+                    result.setdefault("reasons", []).append("Second leg building")
+            
                 print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
@@ -1815,12 +1831,7 @@ def run_scanner():
             
             else:
                 result["trap_runner"] = "🤔 UNCLEAR"
-            recent_high = result.get("high", price)
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
-
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+                
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
                 if price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Breakout — watch for continuation"
@@ -1879,7 +1890,11 @@ def run_scanner():
             if result["score"] < 6 and not result.get("second_leg", False):
                 print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
                 continue
-            
+            if result.get("trap_runner") == "🤔 UNCLEAR" and not result.get("second_leg", False):
+                
+                print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
+                continue
+                
             if not (first_alert or realert_ok or result.get("second_leg", False)):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
@@ -1891,6 +1906,7 @@ def run_scanner():
             ):
                 continue
             if is_trap and not result.get("second_leg", False):
+                print(f"[FILTER] {ticker} skipped — trap", flush=True)
                 continue
             if no_news and not result.get("second_leg", False) and not (
                 above_vwap
