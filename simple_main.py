@@ -585,6 +585,10 @@ def get_alert_title(result):
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
 
+    # 🚨 SECOND LEG (HIGH PRIORITY)
+    if result.get("alert_type") == "SECOND_LEG":
+        return "🚨 SECOND LEG COIL BREAKOUT"
+
     score = result.get("score", 0)
     recent_vol = result.get("recent_volume", 0)
 
@@ -1072,7 +1076,26 @@ def find_real_news_headline(ticker, current_headline=""):
 
        # ❌ Nothing found anywhere
     return current_headline, "NONE"
- 
+    
+ # --- CONSOLIDATION / COIL DETECTION ---
+def detect_consolidation(candles, lookback=6):
+    if not candles or len(candles) < lookback:
+        return False, 0
+
+    recent = candles[-lookback:]
+    highs = [c["high"] for c in recent]
+    lows = [c["low"] for c in recent]
+
+    range_pct = (max(highs) - min(lows)) / max(highs)
+
+    tight = range_pct <= 0.15
+
+    return tight, lookback
+
+
+def run_scanner():
+    print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
+    print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1167,22 +1190,51 @@ def run_scanner():
             recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
             total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
 
+            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
+            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
+            
             result["recent_volume"] = recent_volume
             result["total_candle_volume"] = total_candle_volume
+            
+            # --- COIL / CONSOLIDATION CHECK ---
+            tight, coil_len = detect_consolidation(candles)
+            result["coil_tight"] = tight
+            result["coil_len"] = coil_len
 
             if candles:
                 result["high"] = max(float(c["high"]) for c in candles[-10:])
                 result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
-            
+                # --- SECOND LEG BREAKOUT CHECK ---
+                recent_high = max(float(c["high"]) for c in candles[-3:])
+                coil_high = max(float(c["high"]) for c in candles[-9:-3]) if len(candles) >= 9 else result["high"]
+                
+                recent_vol_3 = sum(c["volume"] for c in candles[-3:])
+                prev_vol_3 = sum(c["volume"] for c in candles[-6:-3]) if len(candles) >= 6 else 0
+                
+                breakout = recent_high > coil_high * 1.01
+                volume_spike = recent_vol_3 > prev_vol_3 * 1.5 if prev_vol_3 > 0 else False
+                
+                result["coil_high"] = coil_high
+                result["breakout"] = breakout
+                result["volume_spike"] = volume_spike
+                
+                # --- SECOND LEG COIL SETUP ---
+                second_leg = (
+                    gain >= 40
+                    and price > vwap
+                    and result.get("coil_tight", False)
+                    and result.get("breakout", False)
+                    and result.get("volume_spike", False)
+                )
+                
+                result["second_leg"] = second_leg
+                
+                if second_leg:
+                    result["alert_type"] = "SECOND_LEG"
+                    result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
+                
                 day_open = float(candles[0]["open"])
                 last_close = float(candles[-1]["close"])
-            
-                result["candle_session_gain"] = (
-                    ((last_close - day_open) / day_open) * 100
-                    if day_open > 0 else 0
-                )
-            else:
-                result["candle_session_gain"] = 0
             
             # --- STRUCTURE DATA ---
             structure = analyze_structure(ticker, candles)
@@ -1618,13 +1670,19 @@ def run_scanner():
             )
             trend_builder_alert = result.get("trend_builder_alert", False)
             
+            second_leg_alert = result.get("second_leg", False)
+            
+            if second_leg_alert:
+                print(f"[SECOND LEG] {ticker} detected", flush=True)
+            
             if result["gain"] < 20 and not (
                 early_momentum_alert
                 or trend_builder_alert
+                or second_leg_alert
                 or vwap_reclaim_setup
             ):
                 continue
-
+            
             should_alert = (
                 valid_early_alert
                 or valid_runner_alert
@@ -1636,22 +1694,31 @@ def run_scanner():
                 or vwap_reclaim_setup
                 or breakout_hold_setup
                 or dip_buy_setup
-                        )
+            )
             if second_leg_alert:
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
                 result.setdefault("reasons", []).append("Second leg building")
                 print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
-            
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+            
             current_price = float(result.get("price", 0))
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-            if not cooldown_done:
-               print(f"[SKIP] {ticker} cooldown active", flush=True)
-               continue
-           
+            
+            if not cooldown_done and not result.get("second_leg", False):
+                print(f"[SKIP] {ticker} cooldown active", flush=True)
+                continue
+            
+            if result.get("second_leg", False) and not cooldown_done:
+                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
+            if result.get("second_leg", False):
+                last_price = runner_prices.get(ticker, 0)
+            
+                if last_price > 0 and current_price <= last_price * 1.02:
+                    print(f"[SKIP] {ticker} second leg not enough new high", flush=True)
+                    continue
             
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
                 first_alert_price[ticker] = current_price
