@@ -1193,7 +1193,9 @@ def run_scanner():
                 candles = get_yahoo_candles(ticker)
             else:
                 print(f"[DATA] {ticker} candles from Alpaca", flush=True)
-
+                
+            result["candles"] = candles
+            
             recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
             total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
 
@@ -1523,11 +1525,12 @@ def run_scanner():
             if market_cap == 0:
                 print(f"[FILTER] {ticker} skipped — bad market cap", flush=True)
                 continue
-            
+             
             if float_shares == 0:
                 print(f"[WARN] {ticker} float unknown — allowing", flush=True)
-            if "⚠️ Float unknown" not in result.get("risks", []):
-                result.setdefault("risks", []).append("⚠️ Float unknown")
+            
+                if "⚠️ Float unknown" not in result.get("risks", []):
+                    result.setdefault("risks", []).append("⚠️ Float unknown")
                         
             # --- RISK HOOK ---
             filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
@@ -1572,23 +1575,23 @@ def run_scanner():
 
                 if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
                     result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-            # --- VWAP DISTANCE SCORE IMPACT ---
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
-            
-            if vwap and price:
-                vwap_distance = ((price - vwap) / vwap) * 100
-            
-            if vwap_distance <= -12:
-                result["score"] = max(0, result.get("score", 0) - 3)
-            
-                if "🚨 Way below VWAP (-12%+) / failed momentum" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
-            
-            elif vwap_distance < 0:
-                if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
-                    
+                # --- VWAP DISTANCE SCORE IMPACT ---
+                price = float(result.get("price", 0) or 0)
+                vwap = float(result.get("vwap", 0) or 0)
+    
+                if vwap and price:
+                    vwap_distance = ((price - vwap) / vwap) * 100
+    
+                    if vwap_distance <= -12:
+                        result["score"] = max(0, result.get("score", 0) - 3)
+    
+                        if "🚨 Way below VWAP (-12%+) / failed momentum" not in result.get("risks", []):
+                            result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
+    
+                    elif vwap_distance < 0:
+                        if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
+                            result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
+                        
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
             offering_risks = detect_offering_risk(
@@ -1883,38 +1886,43 @@ def run_scanner():
             if not alerts_allowed:
                 continue
 
-            if not should_alert:
+                   if not should_alert:
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
                 continue
-            
-            if result["score"] < 6 and not result.get("second_leg", False):
+
+            # 🚫 SCORE FILTER
+            if result.get("score", 0) < 6 and not result.get("second_leg", False):
                 print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
                 continue
+
+            # 🚫 UNCLEAR SETUP FILTER
             if result.get("trap_runner") == "🤔 UNCLEAR" and not result.get("second_leg", False):
-                
                 print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
                 continue
-                
+
+            # 🚫 TRAP FILTER
+            if result.get("trap_runner") == "⚠️ TRAP RISK" and not result.get("second_leg", False):
+                print(f"[FILTER] {ticker} skipped — trap", flush=True)
+                continue
+
             if not (first_alert or realert_ok or result.get("second_leg", False)):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
-            
+
             if (
                 not volume_confirmed
                 and result.get("trap_runner") != "🚀 RUNNER LEAN"
                 and not result.get("second_leg", False)
             ):
                 continue
-            if is_trap and not result.get("second_leg", False):
-                print(f"[FILTER] {ticker} skipped — trap", flush=True)
-                continue
+
             if no_news and not result.get("second_leg", False) and not (
                 above_vwap
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
             ):
                 continue
-            
+
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
