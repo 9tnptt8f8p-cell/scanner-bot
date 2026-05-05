@@ -1226,13 +1226,19 @@ def run_scanner():
                 
                 result["second_leg"] = second_leg
                 
-                if second_leg:
-                    result["alert_type"] = "SECOND_LEG"
-                    result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
-                
-                day_open = float(candles[0]["open"])
-                last_close = float(candles[-1]["close"])
-            
+               
+             if second_leg and result.get("coil_breakout", False):
+                 result["alert_type"] = "SECOND_LEG"
+                 result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
+                # --- BLOCK FAKE SECOND LEGS ---
+                # --- BLOCK FAKE SECOND LEGS ---
+                if result.get("second_leg"):
+                    if not result.get("coil_tight") or not result.get("volume_spike"):
+                        result["second_leg"] = False
+                        result.pop("alert_type", None)
+                    day_open = float(candles[0]["open"])
+                    last_close = float(candles[-1]["close"])
+                    
             # --- STRUCTURE DATA ---
             structure = analyze_structure(ticker, candles)
             
@@ -1282,6 +1288,10 @@ def run_scanner():
                 result["setup_tag"] = "🔥 SECOND LEG"
             else:
                 result["second_leg"] = False
+            
+            # --- CLEANUP (CRITICAL) ---
+            if not result.get("second_leg", False):
+                result.pop("alert_type", None)
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1679,8 +1689,7 @@ def run_scanner():
                 or vwap_reclaim_setup
                 or breakout_hold_setup
                 or dip_buy_setup
-            )
-            if second_leg_alert:
+            if result.get("alert_type") == "SECOND_LEG":
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
                 result.setdefault("reasons", []).append("Second leg building")
@@ -1692,16 +1701,38 @@ def run_scanner():
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             
-            if not cooldown_done and not result.get("second_leg", False):
+            second_leg_bypass = (
+                result.get("alert_type") == "SECOND_LEG"
+                and result.get("coil_breakout", False)
+            )
+            
+            # --- STRICT SECOND LEG COOLDOWN BYPASS ---
+            second_leg_bypass = (
+                result.get("alert_type") == "SECOND_LEG"
+                and result.get("coil_breakout", False)
+            )
+            
+            if not cooldown_done and not second_leg_bypass:
+                print(f"[SKIP] {ticker} cooldown active", flush=True)
+                continue
+            
+            if second_leg_bypass and not cooldown_done:
+                last_price = runner_prices.get(ticker, 0)
+            
+                if last_price > 0 and current_price <= last_price * 1.05:
+                    print(f"[SKIP] {ticker} second leg bypass blocked — not 5% new high", flush=True)
+                    continue
+
+                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
+            
+          
+                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
                 print(f"[SKIP] {ticker} cooldown active", flush=True)
                 continue
             
             if result.get("second_leg", False) and not cooldown_done:
                 print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
-            if result.get("second_leg", False):
-                last_price = runner_prices.get(ticker, 0)
-            
-                if last_price > 0 and current_price <= last_price * 1.02:
+          
                     print(f"[SKIP] {ticker} second leg not enough new high", flush=True)
                     continue
             
@@ -1750,8 +1781,8 @@ def run_scanner():
 
             if trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
-            elif second_leg_alert:
-                 alert_tag = "🟢 COIL BREAKOUT"
+            elif result.get("alert_type") == "SECOND_LEG":
+                alert_tag = "🟢 COIL BREAKOUT"
             elif breakout_burst_alert:
                 alert_tag = "🚀 BREAKOUT BURST"
             elif vwap_reclaim_setup:
