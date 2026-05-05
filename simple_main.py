@@ -1886,7 +1886,7 @@ def run_scanner():
             if not alerts_allowed:
                 continue
 
-                   if not should_alert:
+            if not should_alert:
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
                 continue
 
