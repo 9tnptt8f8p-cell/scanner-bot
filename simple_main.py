@@ -1626,25 +1626,7 @@ def run_scanner():
                 result["score"] = min(10, result.get("score", 0) + 1)
                 result.setdefault("reasons", []).append("Volume surge")
             pullback = price < recent_high * 0.95
-            if ticker not in second_leg_tracker and gain >= 20 and above_vwap:
-                second_leg_tracker[ticker] = {
-                    "high": recent_high,
-                    "sent": False
-                }
-            second_leg_alert = (
-                ticker in second_leg_tracker
-                and not second_leg_tracker[ticker]["sent"]
-                and gain >= 25
-                and above_vwap
-                and price > second_leg_tracker[ticker]["high"] * 1.03
-            )
-            
-            if ticker in second_leg_tracker:
-                second_leg_tracker[ticker]["high"] = max(
-                    second_leg_tracker[ticker]["high"],
-                    recent_high
-                )
-
+           
             breakout_burst_alert = (
                 gain >= 25
                 and price > recent_high
@@ -1769,7 +1751,7 @@ def run_scanner():
             if trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
             elif second_leg_alert:
-                alert_tag = "🔥 SECOND LEG"
+                 alert_tag = "🟢 COIL BREAKOUT"
             elif breakout_burst_alert:
                 alert_tag = "🚀 BREAKOUT BURST"
             elif vwap_reclaim_setup:
@@ -1841,8 +1823,7 @@ def run_scanner():
                 runner_prices[ticker] = current_price
                 sent_this_cycle.add(ticker)
             
-                if second_leg_alert and ticker in second_leg_tracker:
-                    second_leg_tracker[ticker]["sent"] = True
+                second_leg_tracker[ticker]["sent"] = True
             
                 print(f"[ALERT SENT] {ticker}", flush=True)
             
