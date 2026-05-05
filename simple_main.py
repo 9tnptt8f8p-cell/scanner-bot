@@ -1854,8 +1854,6 @@ def run_scanner():
                 runner_prices[ticker] = current_price
                 sent_this_cycle.add(ticker)
             
-                second_leg_tracker[ticker]["sent"] = True
-            
                 print(f"[ALERT SENT] {ticker}", flush=True)
             
             else:
