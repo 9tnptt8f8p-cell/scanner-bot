@@ -57,7 +57,6 @@ def is_above_vwap(price, vwap):
     
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-second_leg_tracker = {}
 ET = ZoneInfo("America/New_York")
 
 MARKET_HOLIDAYS_2026 = {
