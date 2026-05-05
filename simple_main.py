@@ -1225,19 +1225,19 @@ def run_scanner():
                 )
                 
                 result["second_leg"] = second_leg
+
+                if second_leg and result.get("coil_breakout", False):
+                    result["alert_type"] = "SECOND_LEG"
+                    result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
                 
-               
-             if second_leg and result.get("coil_breakout", False):
-                 result["alert_type"] = "SECOND_LEG"
-                 result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
-                # --- BLOCK FAKE SECOND LEGS ---
                 # --- BLOCK FAKE SECOND LEGS ---
                 if result.get("second_leg"):
                     if not result.get("coil_tight") or not result.get("volume_spike"):
                         result["second_leg"] = False
                         result.pop("alert_type", None)
-                    day_open = float(candles[0]["open"])
-                    last_close = float(candles[-1]["close"])
+                        
+                day_open = float(candles[0]["open"])
+                last_close = float(candles[-1]["close"])
                     
             # --- STRUCTURE DATA ---
             structure = analyze_structure(ticker, candles)
