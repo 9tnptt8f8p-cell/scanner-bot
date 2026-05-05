@@ -1,15 +1,19 @@
 def build_alert(data):
     emoji = data.get("emoji", "🚨")
+    title = data.get("title", "ALERT")
+
     ticker = data.get("ticker")
-    score = data.get("score")
-    price = data.get("price")
-    gain = data.get("gain")
+    score = data.get("score", 0)
+    price = data.get("price", 0)
+    gain = data.get("gain", 0)
+
+    rank = data.get("rank", "?")
+    rank_score = data.get("rank_score", "?")
 
     catalyst = data.get("catalyst", "none")
     catalyst_type = data.get("catalyst_type", catalyst)
     news_quality = data.get("news_quality", "UNKNOWN")
 
-    # ✅ Headline handling (FIXED)
     headline = data.get("headline") or data.get("catalyst_text") or "No headline found"
     headline = headline[:120] + "..." if len(headline) > 120 else headline
 
@@ -18,14 +22,11 @@ def build_alert(data):
 
     regime = data.get("regime", "UNKNOWN")
     trade_bias = data.get("trade_bias", "🤔 Mixed/unclear")
-
     session = data.get("session", "").upper()
 
-    # --- TEXT FORMATTING ---
     reasons_text = "\n- ".join(reasons) if reasons else "None"
     risks_text = "\n- ".join(risks) if risks else "None"
 
-    # --- SESSION BLOCK ---
     session_block = ""
     if session == "PREMARKET":
         session_block = """
@@ -36,13 +37,17 @@ def build_alert(data):
 → Wait for open setup
 """
 
-    # --- MESSAGE BUILD ---
+    setup_tag = ""
+    if data.get("alert_type") == "SECOND_LEG" or data.get("second_leg"):
+        setup_tag = "🟢 SECOND LEG COIL BREAKOUT — continuation setup"
+
     msg = f"""
-{emoji} ALERT
+{emoji} {title}
 {session_block}
 
 Rank: #{rank}
 {ticker} | Score: {score}/10 | Rank: {rank_score}/10
+{setup_tag}
 
 Price: ${price}
 Gain: +{gain}%
@@ -63,5 +68,4 @@ Bias: {trade_bias}
 """
 
     return msg.strip()
-
 
