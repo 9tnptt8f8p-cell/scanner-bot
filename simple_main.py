@@ -1927,8 +1927,44 @@ def run_scanner():
             
             result["title"] = get_alert_title(result)
             result["emoji"] = "🚨"
+            # --- RUNNER STRUCTURE FILTER ---
+            structure = result.get("structure", []) or []
             
+            # convert to text so we can scan it
+            structure_text = " ".join(structure).lower()
+            
+            is_above_vwap = "above vwap" in structure_text
+            has_higher_lows = "higher lows" in structure_text
+            
+            bad_structure = any(x in structure_text for x in [
+                "below vwap",
+                "big upper wick",
+                "possible trap",
+                "lower highs"
+            ])
+            
+            if not (is_above_vwap and has_higher_lows and not bad_structure):
+                print(f"[FILTER] {ticker} failed runner structure", flush=True)
+                continue
+                # --- VWAP HOLD CONFIRMATION ---
+            if is_above_vwap and has_higher_lows:
+                result["score"] += 2
+                result.setdefault("reasons", []).append("VWAP HOLD + HL CONFIRMED")
+            
+            print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
             sent = send_alert(build_alert(result))
+            # --- COIL / SECOND LEG DETECTION ---
+            recent_range = result.get("recent_range_pct", None)
+            
+            if recent_range is not None:
+                if recent_range < 3 and is_above_vwap:
+                    result["coil_breakout"] = True
+                    result["alert_type"] = "SECOND_LEG"
+                    result["score"] += 2
+            
+                    result.setdefault("reasons", []).append("Tight coil near highs")
+            
+                    print(f"[COIL] {ticker} tight range breakout potential", flush=True)
             time.sleep(0.1)
             
             if sent:
