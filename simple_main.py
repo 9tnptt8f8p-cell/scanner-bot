@@ -1689,6 +1689,7 @@ def run_scanner():
                 or vwap_reclaim_setup
                 or breakout_hold_setup
                 or dip_buy_setup
+            )
             if result.get("alert_type") == "SECOND_LEG":
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
