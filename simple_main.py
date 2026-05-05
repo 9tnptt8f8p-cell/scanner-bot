@@ -1713,6 +1713,12 @@ def run_scanner():
                 and result.get("coil_breakout", False)
             )
             
+            # --- COOLDOWN LOGIC ---
+            second_leg_bypass = (
+                result.get("alert_type") == "SECOND_LEG"
+                and result.get("coil_breakout", False)
+            )
+            
             if not cooldown_done and not second_leg_bypass:
                 print(f"[SKIP] {ticker} cooldown active", flush=True)
                 continue
@@ -1721,21 +1727,10 @@ def run_scanner():
                 last_price = runner_prices.get(ticker, 0)
             
                 if last_price > 0 and current_price <= last_price * 1.05:
-                    print(f"[SKIP] {ticker} second leg bypass blocked — not 5% new high", flush=True)
-                    continue
-
-                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
-            
-          
-                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
-                print(f"[SKIP] {ticker} cooldown active", flush=True)
-                continue
-            
-            if result.get("second_leg", False) and not cooldown_done:
-                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
-          
                     print(f"[SKIP] {ticker} second leg not enough new high", flush=True)
                     continue
+            
+                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
             
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
                 first_alert_price[ticker] = current_price
