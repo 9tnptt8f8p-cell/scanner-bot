@@ -665,8 +665,8 @@ def build_alert(result):
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
-        f"Session: {result.get('session', 'UNKNOWN')}\n\n"
-        Daily: {result.get("daily_context", "N/A")}
+        f"Session: {result.get('session', 'N/A')}"
+        f"Daily: {result.get('daily_context', 'N/A')}",
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
