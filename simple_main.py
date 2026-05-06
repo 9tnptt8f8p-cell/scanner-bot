@@ -1934,8 +1934,16 @@ def run_scanner():
                 print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
                 continue
                 
-            # 🚨 A+ FILTER (FINAL QUALITY GATE)
-            if not result.get("a_plus_runner", False):
+            # 🚨 A+ FILTER — allow special setups through
+            if (
+                not result.get("a_plus_runner", False)
+                and not second_leg_alert
+                and not breakout_burst_alert
+                and not vwap_reclaim_setup
+                and not breakout_hold_setup
+                and not dip_buy_setup
+                and result.get("score", 0) < 7
+            ):
                 print(f"[FILTER] {ticker} skipped — not A+ runner", flush=True)
                 continue
                 
@@ -1966,7 +1974,18 @@ def run_scanner():
                 and float_shares <= 20_000_000
             ):
                 continue
-
+            # --- COIL / SECOND LEG DETECTION ---
+            recent_range = result.get("recent_range_pct", None)
+            
+            if recent_range is not None:
+                if recent_range < 3 and above_vwap:
+                    result["coil_breakout"] = True
+                    result["alert_type"] = "SECOND_LEG"
+                    result["score"] = min(10, result.get("score", 0) + 2)
+            
+                    result.setdefault("reasons", []).append("Tight coil near highs")
+            
+                    print(f"[COIL] {ticker} tight range breakout potential", flush=True)
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
@@ -2003,18 +2022,6 @@ def run_scanner():
             
             print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
             sent = send_alert(build_alert(result))
-            # --- COIL / SECOND LEG DETECTION ---
-            recent_range = result.get("recent_range_pct", None)
-            
-            if recent_range is not None:
-                if recent_range < 3 and is_above_vwap:
-                    result["coil_breakout"] = True
-                    result["alert_type"] = "SECOND_LEG"
-                    result["score"] += 2
-            
-                    result.setdefault("reasons", []).append("Tight coil near highs")
-            
-                    print(f"[COIL] {ticker} tight range breakout potential", flush=True)
             time.sleep(0.1)
             
             if sent:
