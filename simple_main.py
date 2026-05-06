@@ -1897,28 +1897,24 @@ def run_scanner():
             if "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
             elif above_vwap and result.get("recent_volume", 0) >= 150_000:
-                result["trap_runner"] = "🚀 RUNNER LEAN"
-            
-            else:
-                result["trap_runner"] = "🤔 UNCLEAR"
                 
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
-                
+
             if result.get("clean_trend_runner", False):
-                   result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
-                
-                if price >= recent_high * 0.98:
-                    result["entry_hint"] = "🚀 Breakout — watch for continuation"
+                result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+        
+            elif price >= recent_high * 0.98:
+                result["entry_hint"] = "🚀 Breakout — watch for continuation"
+        
+            elif above_vwap:
+                result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
+        
+            else:
+                result["entry_hint"] = "👀 Watch for VWAP reclaim"
                     
-                elif above_vwap:
-                    result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
+                    elif result.get("trap_runner") == "⚠️ TRAP RISK":
+                        result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
                     
-                else:
-                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
-            
-            elif result.get("trap_runner") == "⚠️ TRAP RISK":
-                result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
-            
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
           
