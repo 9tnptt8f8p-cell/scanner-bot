@@ -1725,9 +1725,8 @@ def run_scanner():
                 recent_vol > prev_vol
                 and recent_vol >= 200_000
             )
-            
             not_extended = (
-                price <= float(result.get("high", price) or price) * 1.05
+                price >= recent_high * 0.95
             )
             
             valid_runner_alert = (
