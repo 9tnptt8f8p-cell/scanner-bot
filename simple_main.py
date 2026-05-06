@@ -1564,6 +1564,8 @@ def run_scanner():
             result["catalyst_text"] = headline
             result["headline"] = headline
             result["news_quality"] = news_quality
+            result["strong_news"] = news_quality == "STRONG"
+            
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
@@ -1729,12 +1731,15 @@ def run_scanner():
             )
             
             valid_runner_alert = (
-                gain >= ALERT_MIN_GAIN
-                and above_vwap
-                and breakout_confirmed
-                and volume_expanding
-                and not_extended
+            gain >= ALERT_MIN_GAIN
+            and above_vwap
+            and (
+                breakout_confirmed
+                or volume_expanding
+                or result.get("strong_news", False)
             )
+            and not_extended
+        )
             
             valid_emergency_runner_alert = (
                 gain >= 35
