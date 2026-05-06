@@ -1922,18 +1922,7 @@ def run_scanner():
             no_news = result.get("news_quality") in ["NONE", "UNKNOWN"]
             
             is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
-            if not alerts_allowed:
-                continue
-
-            if not should_alert:
-                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
-                continue
-
-            # 🚫 SCORE FILTER
-            if result.get("score", 0) < 6 and not result.get("second_leg", False):
-                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
-                continue
-                
+          
             # 🚨 A+ FILTER — allow special setups through
             if (
                 not result.get("a_plus_runner", False)
@@ -1974,18 +1963,7 @@ def run_scanner():
                 and float_shares <= 20_000_000
             ):
                 continue
-            # --- COIL / SECOND LEG DETECTION ---
-            recent_range = result.get("recent_range_pct", None)
-            
-            if recent_range is not None:
-                if recent_range < 3 and above_vwap:
-                    result["coil_breakout"] = True
-                    result["alert_type"] = "SECOND_LEG"
-                    result["score"] = min(10, result.get("score", 0) + 2)
-            
-                    result.setdefault("reasons", []).append("Tight coil near highs")
-            
-                    print(f"[COIL] {ticker} tight range breakout potential", flush=True)
+    
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
@@ -1996,9 +1974,8 @@ def run_scanner():
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
-            is_above_vwap = "above vwap" in structure_text
-            has_higher_lows = "higher lows" in structure_text
-            
+            has_higher_lows = result.get("higher_lows", False)
+
             bad_structure = any(x in structure_text for x in [
                 "below vwap",
                 "big upper wick",
@@ -2007,23 +1984,28 @@ def run_scanner():
             ])
             
             good_structure = (
-                is_above_vwap
+                above_vwap
                 and has_higher_lows
                 and not bad_structure
             )
             
-            if not (is_above_vwap and has_higher_lows and not bad_structure):
+            if not good_structure and not result.get("second_leg", False):
                 print(f"[FILTER] {ticker} failed runner structure", flush=True)
                 continue
-                # --- VWAP HOLD CONFIRMATION ---
+                
+            # --- VWAP HOLD CONFIRMATION ---
             if above_vwap and has_higher_lows:
-                result["score"] += 2
+                result["score"] = min(10, result.get("score", 0) + 2)
                 result.setdefault("reasons", []).append("VWAP HOLD + HL CONFIRMED")
+                print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
             
-            print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
+            result["setup_tag"] = alert_tag.strip()
+            result["title"] = get_alert_title(result)
+            result["emoji"] = "🚨"
+            
             sent = send_alert(build_alert(result))
             time.sleep(0.1)
-            
+                        
             if sent:
                 alert_history[ticker] = now
                 runner_prices[ticker] = current_price
