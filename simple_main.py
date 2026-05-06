@@ -1809,6 +1809,10 @@ def run_scanner():
                 or dip_buy_setup
             )
             
+            # --- STRONG NEWS OVERRIDE ---
+            if result.get("strong_news", False) and gain >= 25:
+                should_alert = True
+                
             if result.get("alert_type") == "SECOND_LEG":
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
