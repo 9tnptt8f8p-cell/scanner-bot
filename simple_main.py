@@ -1299,8 +1299,22 @@ def run_scanner():
                 and not result.get("bad_structure", False)
             )
             result["good_structure"] = good_structure
-            # --- A+ RUNNER FILTER ---
+
             recent_vol = result.get("recent_volume", 0)
+            # --- CLEAN TREND RUNNER CATCH ---
+            clean_trend_runner = (
+                gain >= 20
+                and structure_score >= 2
+                and above_vwap
+                and not bad_structure
+                and recent_vol >= 50000
+            )
+            
+            if clean_trend_runner:
+                result["clean_trend_runner"] = True
+                result["score"] = min(10, result.get("score", 0) + 2)
+                result.setdefault("reasons", []).append("📈 Clean trend runner structure")
+            # --- A+ RUNNER FILTER ---
             price = float(result.get("price", 0) or 0)
             recent_high = result.get("high", price)
             
@@ -1677,7 +1691,12 @@ def run_scanner():
             if result.get("gain", 0) < 25 and recent_vol < 200_000:
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
-                
+                # --- CLEAN TREND RUNNER ALERT ---
+            if result.get("clean_trend_runner", False):
+                result["alert_type"] = "TREND_RUNNER"
+                result["bias"] = "🚀 RUNNER LEAN"
+                result["entry"] = "🟢 Trend holding above VWAP"
+                result["status"] = "Clean trend runner — breakout/hold structure forming."
             early_momentum_alert = (
                 result["gain"] >= 12
                 and result.get("volume", 0) >= 500_000
@@ -1807,6 +1826,7 @@ def run_scanner():
                 or vwap_reclaim_setup
                 or breakout_hold_setup
                 or dip_buy_setup
+                or result.get("clean_trend_runner", False)
             )
             
             # --- STRONG NEWS OVERRIDE ---
@@ -1883,10 +1903,16 @@ def run_scanner():
                 result["trap_runner"] = "🤔 UNCLEAR"
                 
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
+                
+            if result.get("clean_trend_runner", False):
+                   result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+                
                 if price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Breakout — watch for continuation"
+                    
                 elif above_vwap:
                     result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
+                    
                 else:
                     result["entry_hint"] = "👀 Watch for VWAP reclaim"
             
@@ -1898,7 +1924,9 @@ def run_scanner():
           
             alert_tag = ""
 
-            if trend_builder_alert:
+            if result.get("clean_trend_runner", False):
+                alert_tag = "📈 CLEAN TREND RUNNER"
+            elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
             elif result.get("alert_type") == "SECOND_LEG":
                 alert_tag = "🟢 COIL BREAKOUT"
@@ -1934,6 +1962,7 @@ def run_scanner():
             # 🚨 A+ FILTER — allow special setups through
             if (
                 not result.get("a_plus_runner", False)
+                and not result.get("clean_trend_runner", False)
                 and not second_leg_alert
                 and not breakout_burst_alert
                 and not vwap_reclaim_setup
