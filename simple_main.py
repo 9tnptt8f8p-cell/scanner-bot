@@ -666,6 +666,7 @@ def build_alert(result):
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
         f"Session: {result.get('session', 'UNKNOWN')}\n\n"
+        Daily: {result.get("daily_context", "N/A")}
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
@@ -1324,7 +1325,38 @@ def run_scanner():
             # --- A+ RUNNER FILTER ---
             price = float(result.get("price", 0) or 0)
             recent_high = result.get("high", price)
+            # --- DAILY CONTEXT ---
+            day_high = float(result.get("day_high", recent_high) or recent_high)
             
+            daily_clear_skies = (
+                price >= day_high * 0.985
+            )
+            
+            daily_breakout_strength = (
+                price >= day_high
+            )
+            daily_far_from_high = (
+                price < day_high * 0.90
+            )
+            if daily_breakout_strength:
+                result["daily_context"] = "🚀 Fresh daily breakout"
+            
+            elif daily_clear_skies:
+                result["daily_context"] = "🟢 Clear skies breakout"
+            
+            elif daily_far_from_high:
+                result["daily_context"] = "⚠️ Fading from daily highs"
+            
+                if "⚠️ Fading from daily highs" not in result.get("risks", []):
+                    result.setdefault("risks", []).append("⚠️ Fading from daily highs")
+
+else:
+    result["daily_context"] = "⚠️ Daily resistance nearby"
+
+    if "⚠️ Daily resistance nearby" not in result.get("risks", []):
+        result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
+                    
+        result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
             has_momentum = result.get("second_leg") or result.get("trend_builder_alert")
@@ -1847,6 +1879,20 @@ def run_scanner():
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
                 
+            # 🚫 MOMENTUM DECAY FILTER
+            if result.get("momentum_decay", False):
+            
+                strong_override = (
+                    result.get("clean_trend_runner", False)
+                    or breakout_burst_alert
+                    or second_leg_alert
+                    or vwap_reclaim_setup
+                )
+            
+                if not strong_override:
+                    print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
+                    continue
+                    
             # --- FINAL ALERT BLOCKERS ---
             if not should_alert:
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
@@ -1972,6 +2018,7 @@ def run_scanner():
             if (
                 not result.get("a_plus_runner", False)
                 and not result.get("clean_trend_runner", False)
+                and not result.get("momentum_decay", False)
                 and not second_leg_alert
                 and not breakout_burst_alert
                 and not vwap_reclaim_setup
@@ -2009,7 +2056,14 @@ def run_scanner():
                 and float_shares <= 20_000_000
             ):
                 continue
-    
+                daily_context = result.get("daily_context", "")
+
+            if (
+                daily_context
+                and daily_context not in result.get("reasons", [])
+            ):
+                result.setdefault("reasons", []).append(daily_context)
+                
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
@@ -2019,7 +2073,39 @@ def run_scanner():
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
+            # --- MOMENTUM DECAY / BAD ALERT SUPPRESSOR ---
+            recent_vol = result.get("recent_volume", 0)
+            prev_vol = result.get("prev_volume", 0)
+            price = float(result.get("price", 0) or 0)
+            vwap = float(result.get("vwap", 0) or 0)
             
+            has_vwap = vwap > 0
+            above_vwap = price > vwap if has_vwap else True
+            
+            volume_fading = (
+                prev_vol > 0
+                and recent_vol < prev_vol * 0.60
+            )
+            
+            lost_vwap = (
+                has_vwap
+                and price < vwap
+            )
+            
+            bad_momentum_decay = (
+                volume_fading
+                or lost_vwap
+                or "lower highs" in structure_text
+                or "failed" in structure_text
+                or "rejection" in structure_text
+            )
+            
+            if bad_momentum_decay:
+                result["momentum_decay"] = True
+                result["score"] = max(0, result.get("score", 0) - 2)
+                result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
+            else:
+                result["momentum_decay"] = False
             has_higher_lows = result.get("higher_lows", False)
 
             bad_structure = any(x in structure_text for x in [
