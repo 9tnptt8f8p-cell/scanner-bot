@@ -1130,7 +1130,14 @@ def run_scanner():
             sec_note = ""
 
             ticker = mover["ticker"]
-
+            
+            # --- WARRANT / RIGHTS / UNIT FILTER EARLY ---
+            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
+            
+            if ticker.endswith(bad_suffixes):
+                print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
+                continue
+                
             # 🔥 Finnhub quote confirmation
             finnhub_quote = get_finnhub_quote(ticker)
 
@@ -1544,11 +1551,6 @@ def run_scanner():
                 result["entry"] = "⏳ No chase — wait for VWAP hold or reset"
                 result["status"] = "Extended runner — pullback risk, wait for clean setup."
 
-            # --- WARRANT / RIGHTS FILTER ---
-            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
-            if ticker.endswith(bad_suffixes):
-                print(f"[FILTER] {ticker} skipped — warrant/unit/rights ticker", flush=True)
-                continue
             candles = result.get("candles", [])
 
             if candles:
