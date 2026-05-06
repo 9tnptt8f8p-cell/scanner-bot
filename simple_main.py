@@ -1900,24 +1900,23 @@ def run_scanner():
                 
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
 
-            if result.get("clean_trend_runner", False):
-                result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
-        
-            elif price >= recent_high * 0.98:
-                result["entry_hint"] = "🚀 Breakout — watch for continuation"
-        
-            elif above_vwap:
-                result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
-        
-            else:
-                result["entry_hint"] = "👀 Watch for VWAP reclaim"
-                    
-                    elif result.get("trap_runner") == "⚠️ TRAP RISK":
-                        result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
-                    
+                if result.get("clean_trend_runner", False):
+                    result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+            
+                elif price >= recent_high * 0.98:
+                    result["entry_hint"] = "🚀 Breakout — watch for continuation"
+            
+                elif above_vwap:
+                    result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
+            
+                else:
+                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
+            
+            elif result.get("trap_runner") == "⚠️ TRAP RISK":
+                result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
+            
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-          
             alert_tag = ""
 
             if result.get("clean_trend_runner", False):
