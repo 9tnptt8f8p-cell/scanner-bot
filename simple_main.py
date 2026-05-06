@@ -1273,11 +1273,14 @@ def run_scanner():
             result["risks"].extend(structure_risks)
             
             structure_text = " ".join(structure_reasons + structure_risks).lower()
+
             bad_structure = (
-                "clear below vwap" in structure_text
+                "below vwap" in structure_text
                 or "upper wick" in structure_text
                 or "trap" in structure_text
                 or "failed" in structure_text
+                or "lower highs" in structure_text
+                or "rejection" in structure_text
             )
             
             result["bad_structure"] = bad_structure
@@ -1296,7 +1299,25 @@ def run_scanner():
                 and not result.get("bad_structure", False)
             )
             result["good_structure"] = good_structure
+            # --- A+ RUNNER FILTER ---
+            recent_vol = result.get("recent_volume", 0)
+            price = float(result.get("price", 0) or 0)
+            recent_high = result.get("high", price)
             
+            strong_volume = recent_vol >= 150_000
+            near_high = price >= recent_high * 0.97
+            has_momentum = result.get("second_leg") or result.get("trend_builder_alert")
+            
+            a_plus_runner = (
+                good_structure
+                and (
+                    strong_volume
+                    or near_high
+                    or has_momentum
+                )
+            )
+            
+            result["a_plus_runner"] = a_plus_runner
             # --- FINAL SECOND LEG VWAP CONFIRM ---
             if result.get("second_leg") and above_vwap:
                 result["alert_type"] = "SECOND_LEG"
@@ -1894,7 +1915,12 @@ def run_scanner():
             if result.get("score", 0) < 6 and not result.get("second_leg", False):
                 print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
                 continue
-
+                
+            # 🚨 A+ FILTER (FINAL QUALITY GATE)
+            if not result.get("a_plus_runner", False):
+                print(f"[FILTER] {ticker} skipped — not A+ runner", flush=True)
+                continue
+                
             # 🚫 UNCLEAR SETUP FILTER
             if result.get("trap_runner") == "🤔 UNCLEAR" and not result.get("second_leg", False):
                 print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
@@ -1928,10 +1954,10 @@ def run_scanner():
             result["title"] = get_alert_title(result)
             result["emoji"] = "🚨"
             # --- RUNNER STRUCTURE FILTER ---
-            structure = result.get("structure", []) or []
-            
-            # convert to text so we can scan it
-            structure_text = " ".join(structure).lower()
+           
+            structure_text = " ".join(
+                result.get("reasons", []) + result.get("risks", [])
+            ).lower()
             
             is_above_vwap = "above vwap" in structure_text
             has_higher_lows = "higher lows" in structure_text
@@ -1942,6 +1968,11 @@ def run_scanner():
                 "possible trap",
                 "lower highs"
             ])
+            good_structure = (
+                is_above_vwap
+                and has_higher_lows
+                and not bad_structure
+            )
             
             if not (is_above_vwap and has_higher_lows and not bad_structure):
                 print(f"[FILTER] {ticker} failed runner structure", flush=True)
