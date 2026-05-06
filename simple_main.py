@@ -1684,21 +1684,27 @@ def run_scanner():
 
             if early_momentum_alert:
                 print(f"[EARLY] {ticker} building momentum", flush=True)
-            
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
-        
+            
             has_vwap = vwap > 0
-            above_vwap = is_above_vwap(price, vwap)           
+            above_vwap = has_vwap and price > vwap
+            
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
+            
             volume_confirmed = (
                 recent_vol >= result.get("prev_volume", 0)
                 and recent_vol >= 75_000
             )
 
+            gain = float(result.get("gain", 0) or 0)
+            recent_high = float(result.get("recent_high", result.get("high", price)) or price)
+            early_momentum_alert = result.get("early_momentum_alert", False)
+            prev_vol = result.get("prev_volume", 0)
+            
             valid_early_alert = (
-                result["gain"] >= 25
+                gain >= 25
                 and result.get("score", 0) >= 6
                 and recent_vol >= 100_000
                 and price >= 0.50
@@ -1706,24 +1712,24 @@ def run_scanner():
                 and market_cap > 0
                 and above_vwap
             )
-
+            
             # --- RUNNER CONFIRMATION FILTER ---
             breakout_confirmed = (
-                result.get("breakout")
-                and price > (result.get("breakout_level", 0) * 1.01)
+                result.get("breakout", False)
+                and price > (float(result.get("breakout_level", 0) or 0) * 1.01)
             )
             
             volume_expanding = (
-                recent_vol > result.get("prev_volume", 0)
+                recent_vol > prev_vol
                 and recent_vol >= 200_000
             )
             
             not_extended = (
-                price <= result.get("high", price) * 1.05
+                price <= float(result.get("high", price) or price) * 1.05
             )
             
             valid_runner_alert = (
-                result["gain"] >= ALERT_MIN_GAIN
+                gain >= ALERT_MIN_GAIN
                 and above_vwap
                 and breakout_confirmed
                 and volume_expanding
@@ -1731,58 +1737,54 @@ def run_scanner():
             )
             
             valid_emergency_runner_alert = (
-                result["gain"] >= 35
+                gain >= 35
                 and total_vol >= 1_000_000
             )
-       
+            
             # ===== SECOND LEG + BREAKOUT BURST =====
-            vwap = result.get("vwap", 0)
-            recent_vol = result.get("recent_volume", 0)
-            prev_vol = result.get("prev_volume", 0)
-
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
-
+            
             if volume_spike:
                 result["score"] = min(10, result.get("score", 0) + 1)
             
                 if "Volume surge" not in result.get("reasons", []):
                     result.setdefault("reasons", []).append("Volume surge")
+            
             pullback = price < recent_high * 0.95
-           
+            
             breakout_burst_alert = (
                 gain >= 25
                 and price > recent_high
                 and volume_spike
             )
-
+            
             # ===== ENTRY SETUP ALERTS =====
-
             vwap_reclaim_setup = (
                 gain >= 15
                 and above_vwap
                 and recent_vol >= 150_000
             )
-
+            
             breakout_hold_setup = (
                 gain >= 20
                 and price >= recent_high * 0.98
                 and recent_vol >= 200_000
             )
-
+            
             dip_buy_setup = (
                 gain >= 20
                 and above_vwap
                 and pullback
                 and recent_vol >= 150_000
             )
-            trend_builder_alert = result.get("trend_builder_alert", False)
             
+            trend_builder_alert = result.get("trend_builder_alert", False)
             second_leg_alert = result.get("second_leg", False)
             
             if second_leg_alert:
                 print(f"[SECOND LEG] {ticker} detected", flush=True)
             
-            if result["gain"] < 20 and not (
+            if gain < 20 and not (
                 early_momentum_alert
                 or trend_builder_alert
                 or second_leg_alert
@@ -1802,6 +1804,7 @@ def run_scanner():
                 or breakout_hold_setup
                 or dip_buy_setup
             )
+            
             if result.get("alert_type") == "SECOND_LEG":
                 result["emoji"] = "🚀"
                 result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
@@ -1810,9 +1813,24 @@ def run_scanner():
                     result.setdefault("reasons", []).append("Second leg building")
             
                 print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+            
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+                
+            # --- FINAL ALERT BLOCKERS ---
+            if not should_alert:
+                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
+                continue
             
+            # 🚫 SCORE FILTER
+            if result.get("score", 0) < 6 and not second_leg_alert:
+                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
+                continue
+            
+            # 🚫 BASIC STRUCTURE FILTER
+            if not above_vwap and not second_leg_alert:
+                print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
+                continue
             current_price = float(result.get("price", 0))
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
@@ -1968,6 +1986,7 @@ def run_scanner():
                 "possible trap",
                 "lower highs"
             ])
+            
             good_structure = (
                 is_above_vwap
                 and has_higher_lows
@@ -1978,7 +1997,7 @@ def run_scanner():
                 print(f"[FILTER] {ticker} failed runner structure", flush=True)
                 continue
                 # --- VWAP HOLD CONFIRMATION ---
-            if is_above_vwap and has_higher_lows:
+            if above_vwap and has_higher_lows:
                 result["score"] += 2
                 result.setdefault("reasons", []).append("VWAP HOLD + HL CONFIRMED")
             
