@@ -1925,23 +1925,28 @@ def run_scanner():
             
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-            
-            alert
-
+                
             if result.get("clean_trend_runner", False):
                 alert_tag = "📈 CLEAN TREND RUNNER"
+                
             elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
+                
             elif result.get("alert_type") == "SECOND_LEG":
                 alert_tag = "🟢 COIL BREAKOUT"
+                
             elif breakout_burst_alert:
                 alert_tag = "🚀 BREAKOUT BURST"
+                
             elif vwap_reclaim_setup:
                 alert_tag = "🟢 VWAP RECLAIM"
+                
             elif breakout_hold_setup:
                 alert_tag = "🚀 BREAKOUT HOLD"
+                
             elif dip_buy_setup:
                 alert_tag = "📈 DIP BUY"
+                
             else:
                 alert_tag = ""
                      
