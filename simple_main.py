@@ -1898,10 +1898,16 @@ def run_scanner():
             
             if "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
+            
             elif above_vwap and result.get("recent_volume", 0) >= 150_000:
-                
+                result["trap_runner"] = "🚀 RUNNER LEAN"
+            
+            else:
+                result["trap_runner"] = "🤔 UNCLEAR"
+            
+            
             if result.get("trap_runner") == "🚀 RUNNER LEAN":
-
+            
                 if result.get("clean_trend_runner", False):
                     result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
             
@@ -1919,7 +1925,8 @@ def run_scanner():
             
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-            alert_tag = ""
+            
+            alert
 
             if result.get("clean_trend_runner", False):
                 alert_tag = "📈 CLEAN TREND RUNNER"
