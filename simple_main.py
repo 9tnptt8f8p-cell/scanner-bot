@@ -2282,7 +2282,6 @@ def run_scanner():
             
             result["setup_tag"] = alert_tag.strip()
             result["title"] = get_alert_title(result)
-            result["emoji"] = "🚨"
             last_price = runner_prices.get(ticker, 0)
             last_score = alert_scores.get(ticker, 0)
             
