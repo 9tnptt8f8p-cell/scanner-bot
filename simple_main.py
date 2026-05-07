@@ -1850,11 +1850,6 @@ def run_scanner():
             and not_extended
         )
             
-            valid_emergency_runner_alert = (
-                gain >= 35
-                and total_vol >= 1_000_000
-            )
-            
             # ===== SECOND LEG + BREAKOUT BURST =====
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
             
@@ -1909,7 +1904,6 @@ def run_scanner():
             should_alert = (
                 valid_early_alert
                 or valid_runner_alert
-                or valid_emergency_runner_alert
                 or early_momentum_alert
                 or trend_builder_alert
                 or second_leg_alert
@@ -2013,7 +2007,6 @@ def run_scanner():
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
             result["score"] = max(0, min(result["score"], 10))
-            result["rank_score"] = rank_result(result)
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
@@ -2318,9 +2311,7 @@ def run_scanner():
             if sent:
                 alert_history[ticker] = now
                 runner_prices[ticker] = current_price
-                sent_this_cycle.add(ticker)
-                    
-                
+
                 print(f"[ALERT SENT] {ticker}", flush=True)
             
         time.sleep(SCAN_SLEEP)
