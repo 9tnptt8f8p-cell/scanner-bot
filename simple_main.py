@@ -2158,7 +2158,6 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — volume not confirmed", flush=True)
                 continue
-            
             # 🚫 NO-NEWS FILTER
             if no_news and not result.get("valid_second_leg", False) and not (
                 above_vwap
@@ -2167,11 +2166,11 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
                 continue
-                        result["setup_tag"] = alert_tag.strip()
-                        
-                        result["title"] = get_alert_title(result)
-                        result["emoji"] = "🚨"
-            
+
+            result["setup_tag"] = alert_tag.strip()
+            result["title"] = get_alert_title(result)
+            result["emoji"] = "🚨"
+
             # --- RUNNER STRUCTURE FILTER ---
            
             structure_text = " ".join(
