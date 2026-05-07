@@ -1886,19 +1886,37 @@ def run_scanner():
                 and not result.get("bad_structure", False)
             ):
                 should_alert = True
-                
-            if result.get("alert_type") == "SECOND_LEG":
+            
+            # --- VALID SECOND LEG LOGIC ---
+            if result.get("valid_second_leg", False):
                 result["emoji"] = "🚀"
-                result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
             
-                if "Second leg building" not in result.get("reasons", []):
-                    result.setdefault("reasons", []).append("Second leg building")
+                tight_second_leg_title = (
+                    price >= recent_high * 0.97
+                    and recent_vol >= 150_000
+                    and has_higher_lows
+                )
             
-                print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+                if tight_second_leg_title:
+                    result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
             
+                    if "Second leg building" not in result.get("reasons", []):
+                        result.setdefault("reasons", []).append("Second leg building")
+            
+                    print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+            
+                else:
+                    result["trade_bias"] = "🟢 RUNNER WATCH / continuation watch"
+            
+                    if "Runner watch" not in result.get("reasons", []):
+                        result.setdefault("reasons", []).append("Runner watch")
+            
+                    print(f"🟢 RUNNER WATCH {ticker} {price}", flush=True)
+            
+            # --- BREAKOUT BURST ---
             if breakout_burst_alert:
                 print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
-                
+                            
             # 🚫 MOMENTUM DECAY FILTER
             if result.get("momentum_decay", False):
             
@@ -2007,7 +2025,17 @@ def run_scanner():
                 alert_tag = "🚨 TREND BUILDER"
                 
             elif result.get("valid_second_leg", False):
-                alert_tag = "🟢 COIL BREAKOUT"
+
+                tight_second_leg_title = (
+                    price >= recent_high * 0.97
+                    and recent_vol >= 150_000
+                    and has_higher_lows
+                )
+            
+                if tight_second_leg_title:
+                    alert_tag = "🟢 SECOND LEG BUILDING"
+                else:
+                    alert_tag = "🟢 RUNNER WATCH"
                 
             elif breakout_burst_alert:
                 alert_tag = "🚀 BREAKOUT BURST"
