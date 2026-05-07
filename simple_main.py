@@ -2019,6 +2019,8 @@ def run_scanner():
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
+            # ===== RUNNER / ENTRY ENGINE =====
+
             if "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
             
@@ -2028,18 +2030,18 @@ def run_scanner():
             else:
                 result["trap_runner"] = "🤔 UNCLEAR"
             
-            
             if (
                 above_vwap
                 and has_higher_lows
                 and not bad_structure
             ):
                 result["trap_runner"] = "🟢 RUNNER WATCH"
-                        
+            
+            # ===== ENTRY HINTS =====
+            
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
             
-            if result.get("clean_trend_runner", False):
-                alert_tag = "📈 CLEAN TREND RUNNER"
+                if result.get("clean_trend_runner", False):
                     result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
             
                 elif price >= recent_high * 0.98:
@@ -2056,12 +2058,17 @@ def run_scanner():
             
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-                 
+            
+            # ===== ALERT TAG ENGINE =====
+            
+            if result.get("clean_trend_runner", False):
+                alert_tag = "📈 CLEAN TREND RUNNER"
+            
             elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
-                
+            
             elif result.get("valid_second_leg", False):
-
+            
                 tight_second_leg_title = (
                     price >= recent_high * 0.97
                     and recent_vol >= 150_000
@@ -2072,19 +2079,19 @@ def run_scanner():
                     alert_tag = "🟢 SECOND LEG BUILDING"
                 else:
                     alert_tag = "🟢 RUNNER WATCH"
-                
+            
             elif breakout_burst_alert:
                 alert_tag = "🚀 BREAKOUT BURST"
-                
+            
             elif vwap_reclaim_setup:
                 alert_tag = "🟢 VWAP RECLAIM"
-                
+            
             elif breakout_hold_setup:
                 alert_tag = "🚀 BREAKOUT HOLD"
-                
+            
             elif dip_buy_setup:
                 alert_tag = "📈 DIP BUY"
-                
+            
             else:
                 alert_tag = ""
                      
