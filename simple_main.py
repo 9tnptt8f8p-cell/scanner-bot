@@ -665,12 +665,14 @@ def build_alert(result):
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
-        f"Session: {result.get('session', 'N/A')}"
-        f"Daily: {result.get('daily_context', 'N/A')}",
+        f"Session: {result.get('session', 'N/A')}\n"
+        f"Daily: {result.get('daily_context', 'N/A')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
     )
+
+    return alert_text
 
     return alert_text
 def get_market_session():
@@ -1206,9 +1208,6 @@ def run_scanner():
             
             recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
             total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
-
-            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
-            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
             
             result["recent_volume"] = recent_volume
             result["total_candle_volume"] = total_candle_volume
@@ -1325,33 +1324,27 @@ def run_scanner():
             # --- A+ RUNNER FILTER ---
             price = float(result.get("price", 0) or 0)
             recent_high = result.get("high", price)
+            
             # --- DAILY CONTEXT ---
-            day_high = float(result.get("day_high", recent_high) or recent_high)
-            
-            daily_clear_skies = (
-                price >= day_high * 0.985
-            )
-            
-            daily_breakout_strength = (
-                price >= day_high
-            )
-            daily_far_from_high = (
-                price < day_high * 0.90
-            )
+            day_high = float(result.get("high", recent_high) or recent_high)
+
+            daily_clear_skies = price >= day_high * 0.985
+            daily_breakout_strength = price >= day_high
+            daily_far_from_high = price < day_high * 0.90
+
             if daily_breakout_strength:
                 result["daily_context"] = "🚀 Fresh daily breakout"
-            
+
             elif daily_clear_skies:
                 result["daily_context"] = "🟢 Clear skies breakout"
-            
+
             elif daily_far_from_high:
                 result["daily_context"] = "⚠️ Fading from daily highs"
-            
-                if "⚠️ Fading from daily highs" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("⚠️ Fading from daily highs")
+                result.setdefault("risks", []).append("⚠️ Fading from daily highs")
 
-else:
-    result["daily_context"] = "⚠️ Daily resistance nearby"
+            else:
+                result["daily_context"] = "⚠️ Daily resistance nearby"
+                result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
 
     if "⚠️ Daily resistance nearby" not in result.get("risks", []):
         result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
@@ -1778,8 +1771,9 @@ else:
                 recent_vol > prev_vol
                 and recent_vol >= 200_000
             )
-            not_extended = (
-                price >= recent_high * 0.95
+            
+            not_extended = price <= recent_high * 1.03
+            
             )
             
             valid_runner_alert = (
@@ -1864,7 +1858,12 @@ else:
             )
             
             # --- STRONG NEWS OVERRIDE ---
-            if result.get("strong_news", False) and gain >= 25:
+            if (
+                result.get("strong_news", False)
+                and gain >= 25
+                and above_vwap
+                and not result.get("bad_structure", False)
+            ):
                 should_alert = True
                 
             if result.get("alert_type") == "SECOND_LEG":
@@ -2121,7 +2120,11 @@ else:
                 and not bad_structure
             )
             
-            if not good_structure and not result.get("second_leg", False):
+            if (
+                not good_structure
+                and not result.get("second_leg", False)
+                and not result.get("strong_news", False)
+            ):
                 print(f"[FILTER] {ticker} failed runner structure", flush=True)
                 continue
                 
