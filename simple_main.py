@@ -1354,8 +1354,10 @@ def run_scanner():
 
             result["good_structure"] = good_structure
             result["good_structure"] = good_structure
+            
             recent_vol = result.get("recent_volume", 0)
             gain = float(result.get("gain", 0) or 0)
+            has_higher_lows = result.get("higher_lows", False)
             
             # --- VALID SECOND LEG FILTER ---
             valid_second_leg = (
