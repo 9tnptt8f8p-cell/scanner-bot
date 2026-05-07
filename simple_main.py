@@ -34,8 +34,14 @@ def build_trade_bias(result):
 
     if vwap and price:
         vwap_distance = ((price - vwap) / vwap) * 100
-
+        
+    # --- VWAP DISTANCE SCORE IMPACT ---
+    if vwap and price:
+    
+        vwap_distance = ((price - vwap) / vwap) * 100
+    
         if vwap_distance <= -12:
+       
             return "🚨 Way below VWAP — failed momentum / avoid"
 
         elif vwap_distance < 0:
@@ -94,15 +100,22 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
 MIN_GAIN = 12
-SCAN_MIN_GAIN = MIN_GAIN
+SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 100
+
 ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN = 600
-MAX_GAINERS = 25
 MAX_ALERTS_PER_CYCLE = 3
 
-MIN_VOLUME = 500_000
+MAX_GAINERS = 50
+ALERT_MIN_GAIN = 27
+MIN_VOLUME = 50_000
 MAX_PRICE = 100
+
+MAX_MARKET_CAP = 1_000_000_000
+TREND_BUILDER_MIN_GAIN = 12
+PREMARKET_MIN_GAIN = 8
+PREMARKET_MIN_VOLUME = 50_000
 
 app = Flask(__name__)
 
@@ -166,13 +179,6 @@ def send_telegram(message):
         print("[ALERT LOCAL]", message, flush=True)
 
     return success
-
-
-MAX_GAINERS = 50
-SCAN_MIN_GAIN = 12
-ALERT_MIN_GAIN = 27
-MIN_VOLUME = 50000
-
 
 MAX_MARKET_CAP = 1_000_000_000
 TREND_BUILDER_MIN_GAIN = 12
@@ -1147,7 +1153,6 @@ def run_scanner():
                 print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
             else:
                 print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
-
             if mover.get("volume", 0) == 0:
                 mover["volume"] = 500_000
 
@@ -1158,6 +1163,10 @@ def run_scanner():
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
+
+            initial_news_quality = classify_news_quality(catalyst_text)
+            result["news_quality"] = initial_news_quality
+            result["strong_news"] = initial_news_quality == "STRONG"
 
             market_cap, float_shares = get_finnhub_profile(ticker)
 
@@ -1296,15 +1305,22 @@ def run_scanner():
             
             has_vwap = vwap > 0
             above_vwap = price > vwap if has_vwap else True
-            
             good_structure = (
-                structure_score >= 2
-                and above_vwap
-                and not result.get("bad_structure", False)
+                above_vwap
+                and not bad_structure
+                and (
+                    result.get("higher_lows", False)
+                    or result.get("strong_news", False)
+                    or result.get("breakout", False)
+                )
             )
+
+            result["good_structure"] = good_structure
             result["good_structure"] = good_structure
 
             recent_vol = result.get("recent_volume", 0)
+            gain = float(result.get("gain", 0) or 0)
+            
             # --- CLEAN TREND RUNNER CATCH ---
             clean_trend_runner = (
                 gain >= 20
@@ -1411,6 +1427,7 @@ def run_scanner():
             
             result["good_structure"] = good_structure
             
+           
             if result.get("trend_builder_alert"):
                 result["score"] = min(result.get("score", 0) + 1, 10)
             
@@ -1419,10 +1436,12 @@ def run_scanner():
             
             elif result.get("good_structure", False):
                 result["score"] = min(10, result["score"] + 2)
-                result.setdefault("reasons", []).append("✅ Clean structure confirmation")
             
-            else:
-                result["score"] = max(0, result["score"] + structure_score)
+                if "✅ Clean structure confirmation" not in result["reasons"]:
+                    result.setdefault("reasons", []).append("✅ Clean structure confirmation")
+            
+            elif structure_score > 0 and not bad_structure:
+                result["score"] = min(10, result["score"] + structure_score)
                                 
             result["score"] = max(0, min(result["score"], 10))
 
@@ -1623,6 +1642,7 @@ def run_scanner():
             
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
+                result["score"] = max(0, result.get("score", 0) - 1)
             
                 if "⚠️ Weak/unclear news" not in result.get("risks", []):
                     result.setdefault("risks", []).append("⚠️ Weak/unclear news")
@@ -1634,12 +1654,9 @@ def run_scanner():
                 if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
                     result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
                 # --- VWAP DISTANCE SCORE IMPACT ---
-                price = float(result.get("price", 0) or 0)
-                vwap = float(result.get("vwap", 0) or 0)
-    
                 if vwap and price:
                     vwap_distance = ((price - vwap) / vwap) * 100
-    
+                
                     if vwap_distance <= -12:
                         result["score"] = max(0, result.get("score", 0) - 3)
     
@@ -1712,27 +1729,26 @@ def run_scanner():
             if result.get("gain", 0) < 25 and recent_vol < 200_000:
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
-                # --- CLEAN TREND RUNNER ALERT ---
+                
+            # --- CLEAN TREND RUNNER ALERT ---
             if result.get("clean_trend_runner", False):
                 result["alert_type"] = "TREND_RUNNER"
                 result["bias"] = "🚀 RUNNER LEAN"
                 result["entry"] = "🟢 Trend holding above VWAP"
                 result["status"] = "Clean trend runner — breakout/hold structure forming."
             early_momentum_alert = (
-                result["gain"] >= 12
-                and result.get("volume", 0) >= 500_000
-                and result.get("recent_volume", 0) >= 50_000
+                result["gain"] >= 15
+                and result.get("volume", 0) >= 750_000
+                and result.get("recent_volume", 0) >= 75_000
+                and above_vwap
             )
-
             if early_momentum_alert:
                 print(f"[EARLY] {ticker} building momentum", flush=True)
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
+            
             result["early_momentum_alert"] = early_momentum_alert
+            
             has_vwap = vwap > 0
-            
             above_vwap = price > vwap if has_vwap else True
-            
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             
@@ -2065,12 +2081,6 @@ def run_scanner():
             # --- MOMENTUM DECAY / BAD ALERT SUPPRESSOR ---
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
-            
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
-            
             volume_fading = (
                 prev_vol > 0
                 and recent_vol < prev_vol * 0.60
