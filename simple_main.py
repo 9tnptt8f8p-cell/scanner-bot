@@ -1354,7 +1354,6 @@ def run_scanner():
                 result["second_leg"] = second_leg
 
                 if second_leg and result.get("coil_breakout", False):
-                    result["alert_type"] = "SECOND_LEG"
                     result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
                 
                 # --- BLOCK FAKE SECOND LEGS ---
@@ -1416,7 +1415,6 @@ def run_scanner():
                 )
             )
 
-            result["good_structure"] = good_structure
             result["good_structure"] = good_structure
             
             recent_vol = result.get("recent_volume", 0)
@@ -1628,8 +1626,6 @@ def run_scanner():
 
             if dead_bounce:
                 result["alert_type"] = "TRAP"
-                result["bias"] = "⚠️ TRAP RISK"
-                result["entry"] = "⛔ No trade — weak bounce below VWAP"
                 result["score"] = min(result.get("score", 0), 6)
 
             # --- COIL BREAKOUT DETECTOR ---
@@ -1656,10 +1652,7 @@ def run_scanner():
 
             if coil_breakout:
                 result["coil_breakout"] = True
-                result["alert_type"] = "SECOND_LEG"
-                result["bias"] = "🚀 RUNNER LEAN"
-                result["entry"] = "🟢 Coil near highs — wait for breakout/hold"
-
+            
             # --- EXTENDED RUNNER / LATE CHASE DETECTOR ---
             extended_runner = (
                 gain >= 60
@@ -1668,9 +1661,6 @@ def run_scanner():
             )
 
             if extended_runner:
-                result["alert_type"] = "EXTENDED"
-                result["bias"] = "⚠️ COOLING / EXTENDED"
-                result["entry"] = "⏳ No chase — wait for VWAP hold or reset"
                 result["status"] = "Extended runner — pullback risk, wait for clean setup."
 
             candles = result.get("candles", [])
@@ -1819,9 +1809,6 @@ def run_scanner():
                             
             # --- CLEAN TREND RUNNER ALERT ---
             if result.get("clean_trend_runner", False):
-                result["alert_type"] = "TREND_RUNNER"
-                result["bias"] = "🚀 RUNNER LEAN"
-                result["entry"] = "🟢 Trend holding above VWAP"
                 result["status"] = "Clean trend runner — breakout/hold structure forming."
             early_momentum_alert = (
                 result["gain"] >= 15
