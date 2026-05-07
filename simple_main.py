@@ -395,7 +395,7 @@ def get_percent_gainers():
     return movers[:MAX_GAINERS]
 
 def get_yahoo_candles(ticker):
-
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     params = {
         "interval": "5m",
         "range": "1d"
@@ -629,9 +629,17 @@ def get_alert_title(result):
     if result.get("trend_builder_alert"):
         return "🚨 TREND BUILDER"
 
-    # 🚨 SECOND LEG (HIGH PRIORITY)
-    if result.get("alert_type") == "SECOND_LEG":
-        return "🚨 SECOND LEG COIL BREAKOUT"
+    # 🚨 VALID SECOND LEG
+    if result.get("valid_second_leg", False):
+
+        if (
+            result.get("price", 0) >= result.get("recent_high", 0) * 0.97
+            and result.get("recent_volume", 0) >= 150_000
+            and result.get("higher_lows", False)
+        ):
+            return "🟢 SECOND LEG BUILDING"
+
+        return "🟢 RUNNER WATCH"
 
     score = result.get("score", 0)
     recent_vol = result.get("recent_volume", 0)
@@ -1403,12 +1411,7 @@ def run_scanner():
             )
             
             result["a_plus_runner"] = a_plus_runner
-            # --- FINAL SECOND LEG VWAP CONFIRM ---
-            if result.get("second_leg") and above_vwap:
-                result["alert_type"] = "SECOND_LEG"
-                result["setup_tag"] = "🔥 SECOND LEG"
-           
-            
+          
             # --- CLEANUP (CRITICAL) ---
             if not result.get("second_leg", False):
                 result.pop("alert_type", None)
@@ -1750,15 +1753,14 @@ def run_scanner():
             elif float_shares > 50_000_000:
                 print(f"[FILTER] {ticker} skipped — float too high", flush=True)
                 continue
-
-            if result.get("gain", 0) < 25 and reif (
+            if (
                 result.get("gain", 0) < 25
                 and recent_vol < 250_000
                 and not result.get("strong_news", False)
             ):
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
-                
+                            
             # --- CLEAN TREND RUNNER ALERT ---
             if result.get("clean_trend_runner", False):
                 result["alert_type"] = "TREND_RUNNER"
