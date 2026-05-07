@@ -1996,21 +1996,20 @@ def run_scanner():
                 and not bad_structure
             ):
                 result["trap_runner"] = "🟢 RUNNER WATCH"
-            
-            
+                        
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
-
-            if result.get("clean_trend_runner", False):
-                result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
-        
-            elif price >= recent_high * 0.98:
-                result["entry_hint"] = "🚀 Near highs — wait for breakout/hold"
-        
-            elif above_vwap:
-                result["entry_hint"] = "🟢 VWAP hold — watch dip/coil"
-        
-            else:
-                result["entry_hint"] = "👀 Watch for VWAP reclaim"
+            
+                if result.get("clean_trend_runner", False):
+                    result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+            
+                elif price >= recent_high * 0.98:
+                    result["entry_hint"] = "🚀 Near highs — wait for breakout/hold"
+            
+                elif above_vwap:
+                    result["entry_hint"] = "🟢 VWAP hold — watch dip/coil"
+            
+                else:
+                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
             
             elif result.get("trap_runner") == "⚠️ TRAP RISK":
                 result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
@@ -2159,19 +2158,19 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — volume not confirmed", flush=True)
                 continue
-
-# 🚫 NO-NEWS FILTER
-if no_news and not result.get("valid_second_leg", False) and not (
-    above_vwap
-    and result.get("recent_volume", 0) >= 150_000
-    and float_shares <= 20_000_000
-):
-    print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
-    continue
-            result["setup_tag"] = alert_tag.strip()
             
-            result["title"] = get_alert_title(result)
-            result["emoji"] = "🚨"
+            # 🚫 NO-NEWS FILTER
+            if no_news and not result.get("valid_second_leg", False) and not (
+                above_vwap
+                and result.get("recent_volume", 0) >= 150_000
+                and float_shares <= 20_000_000
+            ):
+                print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
+                continue
+                        result["setup_tag"] = alert_tag.strip()
+                        
+                        result["title"] = get_alert_title(result)
+                        result["emoji"] = "🚨"
             
             # --- RUNNER STRUCTURE FILTER ---
            
