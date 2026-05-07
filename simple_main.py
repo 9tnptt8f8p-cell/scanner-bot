@@ -663,8 +663,7 @@ def build_alert(result):
     float_shares = result.get("float", 0)
     title = get_alert_title(result)
     status = get_alert_status(result)
-    setup = result.get("setup_tag", "")
-    
+   
     # ❌ prevent duplicate (same as title)
     if setup and setup in title:
         setup = ""
@@ -677,7 +676,7 @@ def build_alert(result):
         no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
     
     alert_text = (
-        f"{title} {setup}\n\n"
+        f"{title}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
@@ -688,8 +687,6 @@ def build_alert(result):
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
         f"Entry: {result.get('entry_hint', 'N/A')}\n"
-        f"Session: {result.get('session', 'N/A')}\n"
-        f"Daily: {result.get('daily_context', 'N/A')}\n\n"
         f"Reasons:\n{reasons}\n\n"
         f"Risk:\n{risks_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
@@ -1130,10 +1127,11 @@ def detect_consolidation(candles, lookback=6):
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
-
     alert_history = {}
     runner_prices = {}
     first_alert_price = {}
+    alert_scores = {}
+    sent_this_cycle = set()
     while True:
         sent_this_cycle = set()
         if not should_scan_now():
@@ -1367,28 +1365,6 @@ def run_scanner():
             # --- A+ RUNNER FILTER ---
             price = float(result.get("price", 0) or 0)
             recent_high = result.get("high", price)
-            
-            # --- DAILY CONTEXT ---
-            day_high = float(result.get("high", recent_high) or recent_high)
-
-            daily_clear_skies = price >= day_high * 0.985
-            daily_breakout_strength = price >= day_high
-            daily_far_from_high = price < day_high * 0.90
-
-            if daily_breakout_strength:
-                result["daily_context"] = "🚀 Fresh daily breakout"
-
-            elif daily_clear_skies:
-                result["daily_context"] = "🟢 Clear skies breakout"
-
-            elif daily_far_from_high:
-                result["daily_context"] = "⚠️ Fading from daily highs"
-                result.setdefault("risks", []).append("⚠️ Fading from daily highs")
-
-            else:
-                result["daily_context"] = "⚠️ Daily resistance nearby"
-                result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
-
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
             has_momentum = result.get("second_leg") or result.get("trend_builder_alert")
@@ -1987,20 +1963,26 @@ def run_scanner():
             else:
                 result["trap_runner"] = "🤔 UNCLEAR"
             
-            
-            if result.get("trap_runner") == "🚀 RUNNER LEAN":
-            
-                if result.get("clean_trend_runner", False):
-                    result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
-            
-                elif price >= recent_high * 0.98:
-                    result["entry_hint"] = "🚀 Breakout — watch for continuation"
-            
-                elif above_vwap:
-                    result["entry_hint"] = "🟢 VWAP hold — dip buy zone"
-            
-                else:
-                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
+            if (
+                above_vwap
+                and has_higher_lows
+                and not bad_structure
+            ):
+                result["trap_runner"] = "🟢 RUNNER WATCH"
+                
+            if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
+
+            if result.get("clean_trend_runner", False):
+                result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+        
+            elif price >= recent_high * 0.98:
+                result["entry_hint"] = "🚀 Near highs — wait for breakout/hold"
+        
+            elif above_vwap:
+                result["entry_hint"] = "🟢 VWAP hold — watch dip/coil"
+        
+            else:
+                result["entry_hint"] = "👀 Watch for VWAP reclaim"
             
             elif result.get("trap_runner") == "⚠️ TRAP RISK":
                 result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
@@ -2042,7 +2024,51 @@ def run_scanner():
             if bad_chart and not result.get("second_leg", False) and not vwap_reclaim_setup:
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
-        
+                
+            # --- WEAK MIDDAY CHOP FILTER ---
+            weak_midday_chop = (
+                session == "MIDDAY"
+                and not above_vwap
+                and not has_higher_lows
+            )
+            # --- MOMENTUM DECAY FILTER ---
+            momentum_decay = (
+                result.get("second_leg", False)
+                and not above_vwap
+                and recent_vol < 100_000
+            )
+            
+            if momentum_decay:
+                print(f"[FILTER] {ticker} momentum decay", flush=True)
+                continue
+                
+            if weak_midday_chop and not result.get("second_leg", False):
+                print(f"[FILTER] {ticker} weak midday chop", flush=True)
+                continue
+                
+            # --- SECOND LEG QUALITY FILTER ---
+            weak_second_leg = (
+                result.get("second_leg", False)
+                and not above_vwap
+                and not has_higher_lows
+                and recent_vol < 150_000
+            )
+            
+            if weak_second_leg:
+                print(f"[FILTER] {ticker} weak second-leg quality", flush=True)
+                continue
+                
+            # --- BREAKOUT HOLD QUALITY FILTER ---
+            failed_breakout_hold = (
+                breakout_hold_setup
+                and price < recent_high * 0.97
+                and not above_vwap
+            )
+            
+            if failed_breakout_hold:
+                print(f"[FILTER] {ticker} failed breakout hold", flush=True)
+                continue
+                
             first_alert = last_alert_price == 0
             realert_ok = new_high_realert
 
@@ -2089,17 +2115,12 @@ def run_scanner():
             ):
                 continue
 
-            daily_context = result.get("daily_context", "")
-
             if no_news and not result.get("second_leg", False) and not (
                 above_vwap
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
             ):
                 continue
-
-            if daily_context and daily_context not in result.get("reasons", []):
-                result.setdefault("reasons", []).append(daily_context)
 
             result["setup_tag"] = alert_tag.strip()
             
@@ -2176,19 +2197,46 @@ def run_scanner():
             result["setup_tag"] = alert_tag.strip()
             result["title"] = get_alert_title(result)
             result["emoji"] = "🚨"
+            last_price = runner_prices.get(ticker, 0)
+            last_score = alert_scores.get(ticker, 0)
             
+            meaningful_change = (
+                last_price == 0
+                or current_price > last_price * 1.03
+                or result.get("score", 0) > last_score
+                or result.get("trap_runner") == "🟢 RUNNER WATCH"
+            )
+            
+            if ticker in runner_prices and not meaningful_change:
+                print(f"[SKIP] {ticker} no meaningful alert change", flush=True)
+                continue
+                
+            # --- REPEAT ALERT FILTER ---
+            last_price = runner_prices.get(ticker, 0)
+            last_score = alert_scores.get(ticker, 0)
+            
+            meaningful_change = (
+                last_price == 0
+                or current_price > last_price * 1.03
+                or result.get("score", 0) > last_score
+                or result.get("trap_runner") == "🟢 RUNNER WATCH"
+                or breakout_hold_setup
+            )
+            
+            if ticker in runner_prices and not meaningful_change:
+                print(f"[SKIP] {ticker} repeat alert without meaningful change", flush=True)
+                continue
             sent = send_alert(build_alert(result))
             time.sleep(0.1)
-                        
+                                
             if sent:
                 alert_history[ticker] = now
                 runner_prices[ticker] = current_price
+                alert_scores[ticker] = result.get("score", 0)
                 sent_this_cycle.add(ticker)
-            
+                    
+                
                 print(f"[ALERT SENT] {ticker}", flush=True)
-            
-            else:
-                print(f"[ALERT FAILED] {ticker}", flush=True)
             
         time.sleep(SCAN_SLEEP)
 
