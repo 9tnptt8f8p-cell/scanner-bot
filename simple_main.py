@@ -1972,9 +1972,6 @@ def run_scanner():
                     if "Runner watch" not in result.get("reasons", []):
                         result.setdefault("reasons", []).append("Runner watch")
             
-                    print(f"🟢 RUNNER WATCH {ticker} {price}", flush=True)
-            
-     
             # 🚫 MOMENTUM DECAY FILTER
             if result.get("momentum_decay", False):
             
@@ -2344,11 +2341,16 @@ def run_scanner():
                 continue
             sent = send_alert(build_alert(result))
 
-            if result.get("valid_second_leg", False):
-                print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
-            
-            if breakout_burst_alert:
-                print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+            if sent:
+                if result.get("valid_second_leg", False):
+                    print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+
+                elif result.get("trap_runner") == "🟢 RUNNER WATCH":
+                    print(f"🟢 RUNNER WATCH {ticker} {price}", flush=True)
+
+                elif breakout_burst_alert:
+                    print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+
             time.sleep(0.1)
                                 
             if sent:
