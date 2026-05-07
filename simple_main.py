@@ -665,26 +665,30 @@ def get_alert_status(result):
     else:
         return "Early move detected — NOT confirmed yet."
 def build_alert(result):
-    clean_reasons = [r for r in result.get("reasons", []) if "market cap" not in r.lower()]
+    clean_reasons = [
+        r for r in result.get("reasons", [])
+        if "market cap" not in str(r).lower()
+        and "daily" not in str(r).lower()
+        and "fresh daily breakout" not in str(r).lower()
+    ]
+
     reasons = ", ".join(clean_reasons) or "None"
     risks_text = "\n".join(result.get("risks", [])) or "None"
 
-    gain = result["gain"]
     float_shares = result.get("float", 0)
-    title = get_alert_title(result)
+
+    # ONE TITLE ONLY
+    title = result.get("setup_tag") or result.get("title") or get_alert_title(result)
+
     status = get_alert_status(result)
-   
-    # ❌ prevent duplicate (same as title)
-    if setup and setup in title:
-        setup = ""
-    
+
     catalyst_type = result.get("catalyst_type", "none")
     news_quality = result.get("news_quality", "")
-    
+
     no_news_warning = ""
     if news_quality in ["NONE", "UNKNOWN"]:
         no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
-    
+
     alert_text = (
         f"{title}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10\n\n"
