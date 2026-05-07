@@ -2014,7 +2014,6 @@ def run_scanner():
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
             result["score"] = max(0, min(result["score"], 10))
             result["rank_score"] = rank_result(result)
-            result["trade_bias"] = build_trade_bias(result)
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
