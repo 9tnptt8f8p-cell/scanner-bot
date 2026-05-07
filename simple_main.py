@@ -1133,10 +1133,9 @@ def run_scanner():
             sec_note = ""
 
             ticker = mover["ticker"]
-            
             # --- WARRANT / RIGHTS / UNIT FILTER EARLY ---
-            BAD_SUFFIXES = ("W", "WS", "WT", "WQ", "WSA", "WSC")
-            
+            BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "WARRANT")
+
             if ticker.endswith(BAD_SUFFIXES):
                 print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
                 continue
