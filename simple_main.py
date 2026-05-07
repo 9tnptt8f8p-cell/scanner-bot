@@ -129,7 +129,7 @@ def get_chat_ids():
     # remove duplicates
     return list(dict.fromkeys(ids))
 
-
+# Legacy fallback only — active alerts use alerts.send_alert()
 def send_telegram(message):
     chat_ids = get_chat_ids()
 
@@ -673,8 +673,6 @@ def build_alert(result):
     )
 
     return alert_text
-
-    return alert_text
 def get_market_session():
     now = datetime.now(ET).time()
 
@@ -1180,7 +1178,7 @@ def run_scanner():
             sec_risk = False
             sec_note = "SEC check skipped — low score"
             
-            if result.get("score", 0) >= 7:
+            if result.get("score", 0) >= 6:
                 sec_risk, sec_note = check_sec_offering_risk(ticker)
             
             result["sec_note"] = sec_note
@@ -1313,7 +1311,12 @@ def run_scanner():
                 and structure_score >= 2
                 and above_vwap
                 and not bad_structure
-                and recent_vol >= 50000
+                and recent_vol >= 100000
+                and (
+                    result.get("breakout", False)
+                    or result.get("higher_lows", False)
+                    or result.get("strong_news", False)
+                )
             )
             
             if clean_trend_runner:
@@ -1345,10 +1348,6 @@ def run_scanner():
                 result["daily_context"] = "⚠️ Daily resistance nearby"
                 result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
 
-    if "⚠️ Daily resistance nearby" not in result.get("risks", []):
-        result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
-                    
-        result.setdefault("risks", []).append("⚠️ Daily resistance nearby")
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
             has_momentum = result.get("second_leg") or result.get("trend_builder_alert")
@@ -1387,9 +1386,6 @@ def run_scanner():
                 result["trend_builder_alert"] = False
             
             # --- DEAD CHOP / VWAP HUG FILTER ---
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
-            
             vwap_hug = False
             if vwap > 0 and price > 0:
                 vwap_hug = abs(price - vwap) / price < 0.003
@@ -1402,8 +1398,7 @@ def run_scanner():
                 result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
                 structure_score = result.get("structure_score", 0)
 
-                price = float(result.get("price", 0) or 0)
-                vwap = float(result.get("vwap", 0) or 0)
+              
                     
             has_vwap = vwap > 0
             above_vwap = price > vwap if has_vwap else True
@@ -1733,9 +1728,10 @@ def run_scanner():
                 print(f"[EARLY] {ticker} building momentum", flush=True)
             price = float(result.get("price", 0) or 0)
             vwap = float(result.get("vwap", 0) or 0)
-            
+            result["early_momentum_alert"] = early_momentum_alert
             has_vwap = vwap > 0
-            above_vwap = has_vwap and price > vwap
+            
+            above_vwap = price > vwap if has_vwap else True
             
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
@@ -1747,7 +1743,6 @@ def run_scanner():
 
             gain = float(result.get("gain", 0) or 0)
             recent_high = float(result.get("recent_high", result.get("high", price)) or price)
-            early_momentum_alert = result.get("early_momentum_alert", False)
             prev_vol = result.get("prev_volume", 0)
             
             valid_early_alert = (
@@ -1772,8 +1767,6 @@ def run_scanner():
             )
             
             not_extended = price <= recent_high * 1.03
-            
-            )
             
             valid_runner_alert = (
             gain >= ALERT_MIN_GAIN
@@ -2040,7 +2033,6 @@ def run_scanner():
             if not (first_alert or realert_ok or result.get("second_leg", False)):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
-
             if (
                 not volume_confirmed
                 and result.get("trap_runner") != "🚀 RUNNER LEAN"
@@ -2048,24 +2040,23 @@ def run_scanner():
             ):
                 continue
 
+            daily_context = result.get("daily_context", "")
+
             if no_news and not result.get("second_leg", False) and not (
                 above_vwap
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
             ):
                 continue
-                daily_context = result.get("daily_context", "")
 
-            if (
-                daily_context
-                and daily_context not in result.get("reasons", [])
-            ):
+            if daily_context and daily_context not in result.get("reasons", []):
                 result.setdefault("reasons", []).append(daily_context)
-                
+
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
             result["emoji"] = "🚨"
+            
             # --- RUNNER STRUCTURE FILTER ---
            
             structure_text = " ".join(
@@ -2097,13 +2088,15 @@ def run_scanner():
                 or "failed" in structure_text
                 or "rejection" in structure_text
             )
-            
             if bad_momentum_decay:
                 result["momentum_decay"] = True
                 result["score"] = max(0, result.get("score", 0) - 2)
-                result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
+
+                if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
+                    result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
             else:
                 result["momentum_decay"] = False
+
             has_higher_lows = result.get("higher_lows", False)
 
             bad_structure = any(x in structure_text for x in [
@@ -2115,8 +2108,12 @@ def run_scanner():
             
             good_structure = (
                 above_vwap
-                and has_higher_lows
                 and not bad_structure
+                and (
+                    has_higher_lows
+                    or result.get("strong_news", False)
+                    or result.get("breakout", False)
+                )
             )
             
             if (
