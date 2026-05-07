@@ -1340,10 +1340,18 @@ def run_scanner():
 
             result["good_structure"] = good_structure
             result["good_structure"] = good_structure
-
             recent_vol = result.get("recent_volume", 0)
             gain = float(result.get("gain", 0) or 0)
             
+            # --- VALID SECOND LEG FILTER ---
+            valid_second_leg = (
+                result.get("second_leg", False)
+                and above_vwap
+                and has_higher_lows
+                and recent_vol >= 100_000
+            )
+            
+            result["valid_second_leg"] = valid_second_leg
             # --- CLEAN TREND RUNNER CATCH ---
             clean_trend_runner = (
                 gain >= 20
@@ -1843,7 +1851,7 @@ def run_scanner():
             )
             
             trend_builder_alert = result.get("trend_builder_alert", False)
-            second_leg_alert = result.get("second_leg", False)
+            second_leg_alert = result.get("valid_second_leg", False)
             
             if second_leg_alert:
                 print(f"[SECOND LEG] {ticker} detected", flush=True)
@@ -1996,7 +2004,7 @@ def run_scanner():
             elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
                 
-            elif result.get("alert_type") == "SECOND_LEG":
+            elif result.get("valid_second_leg", False):
                 alert_tag = "🟢 COIL BREAKOUT"
                 
             elif breakout_burst_alert:
@@ -2042,22 +2050,20 @@ def run_scanner():
                 print(f"[FILTER] {ticker} momentum decay", flush=True)
                 continue
                 
-            if weak_midday_chop and not result.get("second_leg", False):
+            if weak_midday_chop and not result.get("valid_second_leg", False):
                 print(f"[FILTER] {ticker} weak midday chop", flush=True)
                 continue
-                
+            
             # --- SECOND LEG QUALITY FILTER ---
             weak_second_leg = (
                 result.get("second_leg", False)
-                and not above_vwap
-                and not has_higher_lows
-                and recent_vol < 150_000
+                and not result.get("valid_second_leg", False)
             )
             
             if weak_second_leg:
                 print(f"[FILTER] {ticker} weak second-leg quality", flush=True)
                 continue
-                
+            
             # --- BREAKOUT HOLD QUALITY FILTER ---
             failed_breakout_hold = (
                 breakout_hold_setup
@@ -2068,20 +2074,20 @@ def run_scanner():
             if failed_breakout_hold:
                 print(f"[FILTER] {ticker} failed breakout hold", flush=True)
                 continue
-                
+            
             first_alert = last_alert_price == 0
             realert_ok = new_high_realert
-
+            
             no_news = result.get("news_quality") in ["NONE", "UNKNOWN"]
             
             is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
-          
-            # 🚨 A+ FILTER — allow special setups through
+            
+            # 🚨 A+ FILTER — allow only special setups or strong scores through
             if (
                 not result.get("a_plus_runner", False)
                 and not result.get("clean_trend_runner", False)
                 and not result.get("momentum_decay", False)
-                and not second_leg_alert
+                and not result.get("valid_second_leg", False)
                 and not breakout_burst_alert
                 and not vwap_reclaim_setup
                 and not breakout_hold_setup
@@ -2090,38 +2096,48 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — not A+ runner", flush=True)
                 continue
+            
             # 🚫 UNCLEAR SETUP FILTER
             if (
                 result.get("trap_runner") == "🤔 UNCLEAR"
-                and not result.get("second_leg", False)
+                and not result.get("valid_second_leg", False)
                 and not result.get("strong_news", False)
                 and not result.get("clean_trend_runner", False)
             ):
                 print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
                 continue
-
+            
             # 🚫 TRAP FILTER
-            if result.get("trap_runner") == "⚠️ TRAP RISK" and not result.get("second_leg", False):
+            if (
+                result.get("trap_runner") == "⚠️ TRAP RISK"
+                and not result.get("valid_second_leg", False)
+            ):
                 print(f"[FILTER] {ticker} skipped — trap", flush=True)
                 continue
-
-            if not (first_alert or realert_ok or result.get("second_leg", False)):
+            
+            # 🚫 RE-ALERT FILTER
+            if not (first_alert or realert_ok or result.get("valid_second_leg", False)):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
+            
+            # 🚫 VOLUME CONFIRMATION FILTER
             if (
                 not volume_confirmed
                 and result.get("trap_runner") != "🚀 RUNNER LEAN"
-                and not result.get("second_leg", False)
+                and result.get("trap_runner") != "🟢 RUNNER WATCH"
+                and not result.get("valid_second_leg", False)
             ):
+                print(f"[FILTER] {ticker} skipped — volume not confirmed", flush=True)
                 continue
 
-            if no_news and not result.get("second_leg", False) and not (
-                above_vwap
-                and result.get("recent_volume", 0) >= 150_000
-                and float_shares <= 20_000_000
-            ):
-                continue
-
+# 🚫 NO-NEWS FILTER
+if no_news and not result.get("valid_second_leg", False) and not (
+    above_vwap
+    and result.get("recent_volume", 0) >= 150_000
+    and float_shares <= 20_000_000
+):
+    print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
+    continue
             result["setup_tag"] = alert_tag.strip()
             
             result["title"] = get_alert_title(result)
