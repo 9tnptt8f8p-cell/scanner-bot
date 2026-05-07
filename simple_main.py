@@ -1987,10 +1987,7 @@ def run_scanner():
             
                     print(f"🟢 RUNNER WATCH {ticker} {price}", flush=True)
             
-            # --- BREAKOUT BURST ---
-            if breakout_burst_alert:
-               
-                            
+     
             # 🚫 MOMENTUM DECAY FILTER
             if result.get("momentum_decay", False):
             
