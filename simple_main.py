@@ -1971,13 +1971,15 @@ def run_scanner():
             else:
                 result["trap_runner"] = "🤔 UNCLEAR"
             
+            
             if (
                 above_vwap
                 and has_higher_lows
                 and not bad_structure
             ):
-            result["trap_runner"] = "🟢 RUNNER WATCH"
-                
+                result["trap_runner"] = "🟢 RUNNER WATCH"
+            
+            
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
 
             if result.get("clean_trend_runner", False):
