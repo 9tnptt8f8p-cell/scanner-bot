@@ -247,7 +247,13 @@ def get_nasdaq_gainers():
 
             if not ticker:
                 continue
-
+            ticker = ticker.upper()
+            
+            BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
+            
+            if ticker.endswith(BAD_SUFFIXES) or (ticker.endswith("W") and len(ticker) > 4):
+                continue
+                
             if "." in ticker or "-" in ticker:
                 continue
 
@@ -358,10 +364,16 @@ def get_percent_gainers():
             print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
 
     nasdaq_movers = get_nasdaq_gainers()
+for m in nasdaq_movers:
+    ticker = m["ticker"].upper()
 
-    for m in nasdaq_movers:
-        all_movers[m["ticker"]] = m
+    BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
 
+    if ticker.endswith(BAD_SUFFIXES) or (ticker.endswith("W") and len(ticker) > 4):
+        continue
+
+    m["ticker"] = ticker
+    all_movers[ticker] = m
     movers = list(all_movers.values())
 
     movers.sort(key=lambda x: x["gain"], reverse=True)
@@ -881,6 +893,7 @@ def classify_news_quality(headline):
         "stocks moving in",
         "consumer discretionary stocks moving",
         "industrials stocks moving",
+        "gap-ups and gap-downs",
     ]
 
     STRONG_KEYWORDS = [
@@ -1031,8 +1044,7 @@ def scrape_pr_headline(ticker):
             
                 if not text or len(text) < 25:
                     continue
-            
-                if ticker.lower() not in text.lower():
+                if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
                     continue
             
                 quality = classify_news_quality(text)
@@ -1075,7 +1087,7 @@ def find_real_news_headline(ticker, current_headline=""):
                 if not text or len(text) < 25:
                     continue
                 
-                if ticker.lower() not in text.lower():
+                if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
                     continue
                 
                 if any(x in text.lower() for x in ["stocks moving", "top gainers", "market update"]):
@@ -1178,7 +1190,11 @@ def run_scanner():
             result["strong_news"] = initial_news_quality == "STRONG"
 
             market_cap, float_shares = get_finnhub_profile(ticker)
-
+            if market_cap == 0 and float_shares == 0:
+                print(f"[WARN] {ticker} profile missing — allowing but flagged", flush=True)
+                result.setdefault("risks", []).append("⚠️ Profile data missing")
+                continue
+                
             result["market_cap"] = market_cap
             result["float"] = float_shares
             if float_shares > 40_000_000 or market_cap > 800_000_000:
@@ -1735,7 +1751,11 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — float too high", flush=True)
                 continue
 
-            if result.get("gain", 0) < 25 and recent_vol < 200_000:
+            if result.get("gain", 0) < 25 and reif (
+                result.get("gain", 0) < 25
+                and recent_vol < 250_000
+                and not result.get("strong_news", False)
+            ):
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
                 
@@ -2044,9 +2064,13 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — not A+ runner", flush=True)
                 continue
-                
             # 🚫 UNCLEAR SETUP FILTER
-            if result.get("trap_runner") == "🤔 UNCLEAR" and not result.get("second_leg", False):
+            if (
+                result.get("trap_runner") == "🤔 UNCLEAR"
+                and not result.get("second_leg", False)
+                and not result.get("strong_news", False)
+                and not result.get("clean_trend_runner", False)
+            ):
                 print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
                 continue
 
