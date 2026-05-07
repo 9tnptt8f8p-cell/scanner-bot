@@ -10,7 +10,6 @@ from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 from risk_engine import build_risk
 from structure_engine import analyze_structure
-from msg_builder import build_alert
 from alerts import send_alert
 from rank_engine import rank_result
 load_dotenv()
@@ -186,6 +185,13 @@ PREMARKET_MIN_GAIN = 8
 PREMARKET_MIN_VOLUME = 50_000
 
 def get_finnhub_profile(ticker):
+    now = time.time()
+
+    if ticker in PROFILE_CACHE:
+        cached = PROFILE_CACHE[ticker]
+
+        if now - cached["time"] < CACHE_TTL_SECONDS:
+            return cached["data"]
     if not FINNHUB_API_KEY:
         return 0, 0
 
@@ -199,14 +205,20 @@ def get_finnhub_profile(ticker):
     try:
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
+        market_cap = float(data.get("marketCapitalization") or 0) * 1_000_000
+        float_shares = float(data.get("shareOutstanding") or 0) * 1_000_000
 
+        PROFILE_CACHE[ticker] = {
+            "time": now,
+            "data": (market_cap, float_shares)
+        }
+
+        return market_cap, float_shares
         market_cap_millions = float(data.get("marketCapitalization", 0) or 0)
         share_outstanding_millions = float(data.get("shareOutstanding", 0) or 0)
 
         market_cap = int(market_cap_millions * 1_000_000)
         float_shares = int(share_outstanding_millions * 1_000_000)
-
-        return market_cap, float_shares
 
     except Exception as e:
         print(f"[FINNHUB PROFILE ERROR] {ticker}: {e}", flush=True)
@@ -848,6 +860,13 @@ def is_trend_builder(result, candles):
         and no_bad_wick
     )
 def check_sec_offering_risk(ticker):
+    now = time.time()
+
+    if ticker in SEC_CACHE:
+        cached = SEC_CACHE[ticker]
+
+        if now - cached["time"] < CACHE_TTL_SECONDS:
+            return cached["data"]
     try:
         headers = {"User-Agent": "scanner-bot your-email@example.com"}
 
@@ -877,10 +896,15 @@ def check_sec_offering_risk(ticker):
         for form, date in zip(forms[:20], dates[:20]):
             if form in risky_forms:
                 hits.append(f"{form} filed {date}")
-
+        
         if hits:
-            return True, "; ".join(hits[:5])
-        return False, "No recent offering-type SEC forms found"
+            data = (True, "; ".join(hits[:5]))
+            SEC_CACHE[ticker] = {"time": now, "data": data}
+            return data
+        
+        data = (False, "No recent offering-type SEC forms found")
+        SEC_CACHE[ticker] = {"time": now, "data": data}
+        return data
 
     except Exception as e:
         return False, f"SEC check error: {e}"
@@ -1083,11 +1107,27 @@ def find_real_news_headline(ticker, current_headline=""):
     If junk/empty, tries Yahoo fallback.
     """
 
+    now = time.time()
+
+    if ticker in NEWS_CACHE:
+        cached = NEWS_CACHE[ticker]
+
+        if now - cached["time"] < CACHE_TTL_SECONDS:
+            return cached["data"]
+
     quality = classify_news_quality(current_headline)
 
     # ✅ Keep good headline
     if quality in ["STRONG", "WEAK"]:
-       return current_headline, quality
+
+        data = (current_headline, quality)
+
+        NEWS_CACHE[ticker] = {
+            "time": now,
+            "data": data
+        }
+
+        return data
 
     # 🔎 Try Yahoo scrape
     try:
@@ -1105,31 +1145,59 @@ def find_real_news_headline(ticker, current_headline=""):
 
                 if not text or len(text) < 25:
                     continue
-                
+
                 if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
                     continue
-                
-                if any(x in text.lower() for x in ["stocks moving", "top gainers", "market update"]):
+
+                if any(
+                    x in text.lower()
+                    for x in ["stocks moving", "top gainers", "market update"]
+                ):
                     continue
-                
+
                 scraped_quality = classify_news_quality(text)
 
                 if scraped_quality == "STRONG":
                     print(f"[NEWS SCRAPE] {ticker}: {text}", flush=True)
-                    return text, scraped_quality
+
+                    data = (text, scraped_quality)
+
+                    NEWS_CACHE[ticker] = {
+                        "time": now,
+                        "data": data
+                    }
+
+                    return data
+
     except Exception as e:
         print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
 
-    # 🔎 Try PR Newswire / GlobeNewswire fallback
+    # 🔎 Try PR fallback
     pr_headline = scrape_pr_headline(ticker)
 
     if pr_headline:
         pr_quality = classify_news_quality(pr_headline)
-        print(f"[PR SCRAPE] {ticker}: {pr_headline}", flush=True)
-        return pr_headline, pr_quality
 
-       # ❌ Nothing found anywhere
-    return current_headline, "NONE"
+        print(f"[PR SCRAPE] {ticker}: {pr_headline}", flush=True)
+
+        data = (pr_headline, pr_quality)
+
+        NEWS_CACHE[ticker] = {
+            "time": now,
+            "data": data
+        }
+
+        return data
+
+    # ❌ Nothing found
+    data = (current_headline, "NONE")
+
+    NEWS_CACHE[ticker] = {
+        "time": now,
+        "data": data
+    }
+
+    return data
     
  # --- CONSOLIDATION / COIL DETECTION ---
 def detect_consolidation(candles, lookback=6):
@@ -1145,7 +1213,13 @@ def detect_consolidation(candles, lookback=6):
     tight = range_pct <= 0.15
 
     return tight, lookback
-
+    
+    PROFILE_CACHE = {}
+    NEWS_CACHE = {}
+    SEC_CACHE = {}
+    CACHE_TTL_SECONDS = 60 * 30
+    
+    
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1228,24 +1302,6 @@ def run_scanner():
             
             if market_cap:
                 result["reasons"].append(f"Market cap: ${market_cap:,}")
-
-            sec_risk = False
-            sec_note = "SEC check skipped — low score"
-            
-            if result.get("score", 0) >= 6:
-                sec_risk, sec_note = check_sec_offering_risk(ticker)
-            
-            result["sec_note"] = sec_note
-            
-            if sec_risk:
-                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
-                    result["risks"].append(f"🚨 Active dilution filing: {sec_note}")
-                    result["score"] = max(0, result.get("score", 0) - 2)
-                else:
-                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
-
-            result["session"] = session
-            result["session_notes"] = session_notes
 
             candles = get_alpaca_candles(ticker)
 
@@ -1921,7 +1977,7 @@ def run_scanner():
                     if "Second leg building" not in result.get("reasons", []):
                         result.setdefault("reasons", []).append("Second leg building")
             
-                    print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+
             
                 else:
                     result["trade_bias"] = "🟢 RUNNER WATCH / continuation watch"
@@ -1933,7 +1989,7 @@ def run_scanner():
             
             # --- BREAKOUT BURST ---
             if breakout_burst_alert:
-                print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+               
                             
             # 🚫 MOMENTUM DECAY FILTER
             if result.get("momentum_decay", False):
@@ -1948,7 +2004,21 @@ def run_scanner():
                 if not strong_override:
                     print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
                     continue
-                    
+            sec_risk = False
+            sec_note = "SEC check skipped — low score"
+            
+            if result.get("score", 0) >= 6:
+                sec_risk, sec_note = check_sec_offering_risk(ticker)
+            
+            result["sec_note"] = sec_note
+            
+            if sec_risk:
+                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                    result["risks"].append(f"🚨 Active dilution filing: {sec_note}")
+                    result["score"] = max(0, result.get("score", 0) - 2)
+                else:
+                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
+
             # --- FINAL ALERT BLOCKERS ---
             if not should_alert:
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
@@ -2289,6 +2359,12 @@ def run_scanner():
                 print(f"[SKIP] {ticker} repeat alert without meaningful change", flush=True)
                 continue
             sent = send_alert(build_alert(result))
+
+            if result.get("valid_second_leg", False):
+                print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
+            
+            if breakout_burst_alert:
+                print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
             time.sleep(0.1)
                                 
             if sent:
