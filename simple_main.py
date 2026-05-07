@@ -359,9 +359,9 @@ def get_percent_gainers():
                     "gain": gain,
                     "volume": volume
                 }
-
-            except Exception as e:
-                print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
+    
+                except Exception as e:
+                    print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
 
     nasdaq_movers = get_nasdaq_gainers()
 
