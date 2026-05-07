@@ -1338,7 +1338,6 @@ def run_scanner():
                 volume_spike = recent_vol_3 > prev_vol_3 * 1.5 if prev_vol_3 > 0 else False
                 
                 result["coil_high"] = coil_high
-                result["coil_breakout"] = breakout
                 result["volume_spike"] = volume_spike
                 
                 gain = float(result.get("gain", 0) or 0)
@@ -1347,14 +1346,10 @@ def run_scanner():
                 second_leg = (
                     gain >= 40
                     and result.get("coil_tight", False)
-                    and result.get("coil_breakout", False)
                     and result.get("volume_spike", False)
                 )
                 
                 result["second_leg"] = second_leg
-
-                if second_leg and result.get("coil_breakout", False):
-                    result.setdefault("reasons", []).append("🚨 Second leg coil breakout")
                 
                 # --- BLOCK FAKE SECOND LEGS ---
                 if result.get("second_leg"):
@@ -1642,22 +1637,11 @@ def run_scanner():
             tight_range = range_pct <= 5
             clean_structure = "clean structure confirmation" in structure_text
 
-            coil_breakout = (
-                above_vwap
-                and near_high
-                and tight_range
-                and clean_structure
-                and not dead_bounce
-            )
-
-            if coil_breakout:
-                result["coil_breakout"] = True
-            
             # --- EXTENDED RUNNER / LATE CHASE DETECTOR ---
             extended_runner = (
                 gain >= 60
                 and above_vwap
-                and not result.get("coil_breakout", False)
+                
             )
 
             if extended_runner:
@@ -2019,10 +2003,7 @@ def run_scanner():
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             
             # --- COOLDOWN LOGIC ---
-            second_leg_bypass = (
-                result.get("alert_type") == "SECOND_LEG"
-                and result.get("coil_breakout", False)
-            )
+            second_leg_bypass = result.get("valid_second_leg", False)
             
             if not cooldown_done and not second_leg_bypass:
                 print(f"[SKIP] {ticker} cooldown active", flush=True)
@@ -2313,17 +2294,6 @@ def run_scanner():
             last_price = runner_prices.get(ticker, 0)
             last_score = alert_scores.get(ticker, 0)
             
-            meaningful_change = (
-                last_price == 0
-                or current_price > last_price * 1.03
-                or result.get("score", 0) > last_score
-                or result.get("trap_runner") == "🟢 RUNNER WATCH"
-            )
-            
-            if ticker in runner_prices and not meaningful_change:
-                print(f"[SKIP] {ticker} no meaningful alert change", flush=True)
-                continue
-                
             # --- REPEAT ALERT FILTER ---
             last_price = runner_prices.get(ticker, 0)
             last_score = alert_scores.get(ticker, 0)
@@ -2334,6 +2304,7 @@ def run_scanner():
                 or result.get("score", 0) > last_score
                 or result.get("trap_runner") == "🟢 RUNNER WATCH"
                 or breakout_hold_setup
+                or result.get("valid_second_leg", False)
             )
             
             if ticker in runner_prices and not meaningful_change:
@@ -2356,7 +2327,6 @@ def run_scanner():
             if sent:
                 alert_history[ticker] = now
                 runner_prices[ticker] = current_price
-                alert_scores[ticker] = result.get("score", 0)
                 sent_this_cycle.add(ticker)
                     
                 
