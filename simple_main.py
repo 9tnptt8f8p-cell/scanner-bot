@@ -352,7 +352,6 @@ def get_percent_gainers():
                     
                 if price > MAX_PRICE:
                     continue
-
                 # keep best data if duplicate
                 all_movers[ticker] = {
                     "ticker": ticker,
@@ -360,31 +359,42 @@ def get_percent_gainers():
                     "gain": gain,
                     "volume": volume
                 }
-        except Exception as e:
-            print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
+
+            except Exception as e:
+                print(f"[YAHOO {screener.upper()} ERROR] {e}", flush=True)
 
     nasdaq_movers = get_nasdaq_gainers()
-for m in nasdaq_movers:
-    ticker = m["ticker"].upper()
 
-    BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
+    for m in nasdaq_movers:
+        ticker = m["ticker"].upper()
 
-    if ticker.endswith(BAD_SUFFIXES) or (ticker.endswith("W") and len(ticker) > 4):
-        continue
+        BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
 
-    m["ticker"] = ticker
-    all_movers[ticker] = m
+        if ticker.endswith(BAD_SUFFIXES) or (
+            ticker.endswith("W") and len(ticker) > 4
+        ):
+            continue
+
+        m["ticker"] = ticker
+        all_movers[ticker] = m
+
     movers = list(all_movers.values())
-
     movers.sort(key=lambda x: x["gain"], reverse=True)
 
-    print(f"[YAHOO EXPANDED] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:", flush=True)
-    print("[YAHOO EXPANDED] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
+    print(
+        f"[YAHOO EXPANDED] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%:",
+        flush=True
+    )
+
+    print(
+        "[YAHOO EXPANDED] "
+        + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]),
+        flush=True
+    )
 
     return movers[:MAX_GAINERS]
 
 def get_yahoo_candles(ticker):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
     params = {
         "interval": "5m",
