@@ -1133,9 +1133,9 @@ def run_scanner():
             ticker = mover["ticker"]
             
             # --- WARRANT / RIGHTS / UNIT FILTER EARLY ---
-            bad_suffixes = ("W", "WS", "WT", "WQ", "R", "U")
+            BAD_SUFFIXES = ("W", "WS", "WT", "WQ", "WSA", "WSC")
             
-            if ticker.endswith(bad_suffixes):
+            if ticker.endswith(BAD_SUFFIXES):
                 print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
                 continue
                 
