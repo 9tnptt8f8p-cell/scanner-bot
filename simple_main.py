@@ -1355,8 +1355,7 @@ def run_scanner():
                 if result.get("second_leg"):
                     if not result.get("coil_tight") or not result.get("volume_spike"):
                         result["second_leg"] = False
-                        result.pop("alert_type", None)
-                        
+                              
                 day_open = float(candles[0]["open"])
                 last_close = float(candles[-1]["close"])
                     
@@ -1461,9 +1460,6 @@ def run_scanner():
             
             result["a_plus_runner"] = a_plus_runner
           
-            # --- CLEANUP (CRITICAL) ---
-            if not result.get("second_leg", False):
-                result.pop("alert_type", None)
             # --- TREND BUILDER QUALITY FILTER ---
             trend_builder_ok = (
                 result.get("trend_builder")
@@ -1475,6 +1471,7 @@ def run_scanner():
             
             if trend_builder_ok:
                 result["trend_builder_alert"] = True
+                result["setup_tag"] = "📈 CLEAN TREND RUNNER"
             else:
                 result["trend_builder_alert"] = False
             
@@ -1934,8 +1931,6 @@ def run_scanner():
             
             # --- VALID SECOND LEG LOGIC ---
             if result.get("valid_second_leg", False):
-                result["emoji"] = "🚀"
-            
                 tight_second_leg_title = (
                     price >= recent_high * 0.97
                     and recent_vol >= 150_000
@@ -1943,15 +1938,9 @@ def run_scanner():
                 )
             
                 if tight_second_leg_title:
-                    result["trade_bias"] = "🚀 SECOND LEG / continuation attempt"
-            
+                 
                     if "Second leg building" not in result.get("reasons", []):
                         result.setdefault("reasons", []).append("Second leg building")
-            
-
-            
-                else:
-                    result["trade_bias"] = "🟢 RUNNER WATCH / continuation watch"
             
                     if "Runner watch" not in result.get("reasons", []):
                         result.setdefault("reasons", []).append("Runner watch")
@@ -2049,7 +2038,8 @@ def run_scanner():
                         
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
             
-                if result.get("clean_trend_runner", False):
+            if result.get("clean_trend_runner", False):
+                alert_tag = "📈 CLEAN TREND RUNNER"
                     result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
             
                 elif price >= recent_high * 0.98:
@@ -2066,10 +2056,7 @@ def run_scanner():
             
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
-                
-            if result.get("clean_trend_runner", False):
-                alert_tag = "📈 CLEAN TREND RUNNER"
-                
+                 
             elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
                 
@@ -2219,8 +2206,7 @@ def run_scanner():
 
             result["setup_tag"] = alert_tag.strip()
             result["title"] = get_alert_title(result)
-            result["emoji"] = "🚨"
-
+        
             # --- RUNNER STRUCTURE FILTER ---
            
             structure_text = " ".join(
