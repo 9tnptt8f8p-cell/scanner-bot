@@ -392,12 +392,18 @@ def get_yahoo_candles(ticker):
 
         candles = []
 
+        opens = quote.get("open", [])
+        highs = quote.get("high", [])
+        lows = quote.get("low", [])
+        closes = quote.get("close", [])
+        volumes = quote.get("volume", [])
+
         for o, h, l, c, v in zip(
-            quote["open"],
-            quote["high"],
-            quote["low"],
-            quote["close"],
-            quote["volume"]
+            opens,
+            highs,
+            lows,
+            closes,
+            volumes
         ):
             if None in (o, h, l, c, v):
                 continue
@@ -411,7 +417,6 @@ def get_yahoo_candles(ticker):
             })
 
         return candles
-
     except Exception as e:
         print(f"[CANDLE ERROR] {ticker}: {e}", flush=True)
         return []
@@ -1137,10 +1142,14 @@ def run_scanner():
             sec_note = ""
 
             ticker = mover["ticker"]
+            
             # --- WARRANT / RIGHTS / UNIT FILTER EARLY ---
-            BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "WARRANT")
+            BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
 
             if ticker.endswith(BAD_SUFFIXES):
+                print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
+                continue
+            if ticker.endswith("W") and len(ticker) > 4:
                 print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
                 continue
                 
