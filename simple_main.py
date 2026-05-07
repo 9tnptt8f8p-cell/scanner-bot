@@ -1968,7 +1968,7 @@ def run_scanner():
                 and has_higher_lows
                 and not bad_structure
             ):
-                result["trap_runner"] = "🟢 RUNNER WATCH"
+            result["trap_runner"] = "🟢 RUNNER WATCH"
                 
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
 
