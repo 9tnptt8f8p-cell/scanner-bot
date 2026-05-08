@@ -691,10 +691,43 @@ def build_alert(result):
         and "daily" not in str(r).lower()
         and "fresh daily breakout" not in str(r).lower()
     ]
+        # --- CLEAN REASONS ---
+        clean_reasons = []
+        
+        seen = set()
+        
+        for r in result.get("reasons", []):
+            if not r:
+                continue
+        
+            r = str(r).strip()
+        
+            if r in seen:
+                continue
+        
+            seen.add(r)
+            clean_reasons.append(r)
+        
+        reasons_text = "\n".join(clean_reasons)
 
-    reasons = ", ".join(clean_reasons) or "None"
-    risks_text = "\n".join(result.get("risks", [])) or "None"
-
+        # --- CLEAN RISKS ---
+        clean_risks = []
+        
+        seen = set()
+        
+        for r in result.get("risks", []):
+            if not r:
+                continue
+        
+            r = str(r).strip()
+        
+            if r in seen:
+                continue
+        
+            seen.add(r)
+            clean_risks.append(r)
+        
+        risk_text = "\n".join(clean_risks) if clean_risks else "None"
     float_shares = result.get("float", 0)
 
     # ONE TITLE ONLY
