@@ -1198,8 +1198,13 @@ def find_real_news_headline(ticker, current_headline=""):
     }
 
     return data
-    
- # --- CONSOLIDATION / COIL DETECTION ---
+PROFILE_CACHE = {}
+NEWS_CACHE = {}
+SEC_CACHE = {}
+CACHE_TTL_SECONDS = 60 * 30
+
+
+# --- CONSOLIDATION / COIL DETECTION ---
 def detect_consolidation(candles, lookback=6):
     if not candles or len(candles) < lookback:
         return False, 0
@@ -1213,12 +1218,6 @@ def detect_consolidation(candles, lookback=6):
     tight = range_pct <= 0.15
 
     return tight, lookback
-    
-    PROFILE_CACHE = {}
-    NEWS_CACHE = {}
-    SEC_CACHE = {}
-    CACHE_TTL_SECONDS = 60 * 30
-    
     
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
