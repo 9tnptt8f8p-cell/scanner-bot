@@ -911,92 +911,107 @@ def check_sec_offering_risk(ticker):
 
 
 port = int(os.getenv("PORT", 10000))
-def classify_news_quality(headline):
-    h = (headline or "").lower()
+def describe_news_quality(headline, news_quality=None):
+    text = (headline or "").lower()
 
-    BAD_NEWS_KEYWORDS = [
-        "top gainers",
+    roundup_phrases = [
         "stocks moving",
-        "stocks are moving",
-        "these stocks are moving",
-        "moving in today's session",
+        "moving before the opening bell",
+        "premarket movers",
         "market movers",
-        "premarket session",
-        "here are",
-        "why these stocks",
         "why shares are trading",
-        "why is it moving",
-        "market update",
-        "roundup",
-        "shares are trading higher",
-        "driving market activity",
-        "attracting the most attention",
-        "gapping stocks",
+        "here are",
+        "gainers and losers",
         "most active stocks",
-        "stocks moving in",
-        "consumer discretionary stocks moving",
-        "industrials stocks moving",
-        "gap-ups and gap-downs",
-    ]
-
-    STRONG_KEYWORDS = [
-        "fda","approval","approved","clearance","cleared","510(k)",
-        "clinical trial","phase 1","phase 2","phase 3",
-        "positive data","topline","endpoint","orphan drug",
-        "fast track","breakthrough therapy",
-        "contract","agreement","partnership","collaboration","deal","order",
-        "purchase order","supply agreement","distribution agreement",
-        "license agreement","strategic alliance",
-        "acquisition","merger","buyout","takeover",
-        "definitive agreement","letter of intent",
-        "spin-off","spinoff",
-        "earnings","revenue","guidance","raises guidance",
-        "profitability","record revenue",
-        "bitcoin","ethereum","crypto","blockchain",
-        "artificial intelligence","ai-powered","nvidia",
-        "topline results",
-        "primary endpoint",
-        "met primary endpoint",
-        "statistically significant",
-        "pivotal trial",
-        "phase 2b",
-        "phase 3 trial",
-        "new drug application",
-        "nda",
-        "bla",
-        "510k",
-        "de novo",
-        "fast track designation",
-        "orphan drug designation",
-        "breakthrough device",
-        "fda clearance",
-        "commercial launch",
-    
+        "stock moving"
     ]
     
-    WEAK_KEYWORDS = [
-        "conference","webcast","presentation","to present",
-        "participate","appoints","announces appointment",
-        "corporate update","shareholder letter",
+def describe_news_quality(headline, news_quality=None):
+    text = (headline or "").lower()
+
+    roundup_phrases = [
+        "stocks moving",
+        "moving before the opening bell",
+        "premarket movers",
+        "market movers",
+        "why shares are trading",
+        "here are",
+        "gainers and losers",
+        "most active stocks",
+        "stock moving"
     ]
 
-    # ❌ Junk aggregator FIRST
-    if any(k in h for k in BAD_NEWS_KEYWORDS):
-        return "JUNK"
+    if not headline or headline.lower() in ["none", "no fresh catalyst found"]:
+        return "❌ NO CLEAR NEWS"
+
+    if any(p in text for p in roundup_phrases):
+        return "⚠️ WEAK NEWS / MOVER ROUNDUP"
+
+    if news_quality == "STRONG":
+        return "⚡ STRONG NEWS"
+
+    if news_quality == "WEAK":
+        return "🟡 WEAK NEWS"
+
+    return "📰 NEWS FOUND"
+
+def describe_volume_quality(candles):
+    try:
+        if not candles or len(candles) < 12:
+            return "🟡 Volume data insufficient"
+
+        recent_candles = candles[-3:]
+        prior_candles = candles[-12:-3]
+
+        recent_avg = sum(c.get("volume", 0) for c in recent_candles) / len(recent_candles)
+        prior_avg = sum(c.get("volume", 0) for c in prior_candles) / len(prior_candles)
+
+        if prior_avg <= 0:
+            return "🟡 Volume unclear"
+
+        volume_ratio = recent_avg / prior_avg
+
+        if volume_ratio >= 2.0:
+            return "🔥 Volume expanding — momentum increasing"
+
+        if volume_ratio <= 0.7:
+            return "⚠️ Volume fading — momentum weakening"
+
+        return "🟡 Volume stable"
+
+    except Exception:
+        return "🟡 Volume analysis unavailable"
+def describe_momentum_state(result):
+    reasons = " ".join(result.get("reasons", [])).lower()
+    risks = " ".join(result.get("risks", [])).lower()
+
+    bad_signs = (
+        "below vwap" in reasons
+        or "below vwap" in risks
+        or "upper wick" in reasons
+        or "upper wick" in risks
+        or "trap" in reasons
+        or "trap" in risks
+        or result.get("momentum_fading", False)
+    )
+
+    good_signs = (
+        "price above vwap" in reasons
+        or "higher lows" in reasons
+        or result.get("volume_confirmed", False)
+    )
+
+    if bad_signs and not good_signs:
+        return "⚠️ Momentum fading / trap risk"
+
+    if bad_signs and good_signs:
+        return "🟡 Mixed momentum — wait for confirmation"
+
+    if good_signs:
+        return "🔥 Momentum still active"
+
+    return "🟡 Momentum unclear"
     
-    # ✅ Strong second
-    if any(k in h for k in STRONG_KEYWORDS):
-        return "STRONG"
-    
-    # ⚠️ Weak third
-    if any(k in h for k in WEAK_KEYWORDS):
-        return "WEAK"
-
-    if h:
-        return "UNKNOWN"
-
-    return "NONE"
-
 def extract_warrant_price(text):
     t = (text or "").lower()
 
@@ -1357,6 +1372,18 @@ def run_scanner():
                               
                 day_open = float(candles[0]["open"])
                 last_close = float(candles[-1]["close"])
+                result["volume_status"] = describe_volume_quality(candles)
+                
+                if result["volume_status"] not in result.setdefault("reasons", []):
+                    result["reasons"].append(result["volume_status"])
+                                
+                volume_status = result.get("volume_status", "")
+
+                if "expanding" in volume_status.lower():
+                    result["volume_confirmed"] = True
+                
+                if "fading" in volume_status.lower():
+                    result["momentum_fading"] = True
                     
             # --- STRUCTURE DATA ---
             structure = analyze_structure(ticker, candles)
@@ -1672,7 +1699,12 @@ def run_scanner():
             result["catalyst_text"] = headline
             result["headline"] = headline
             result["news_quality"] = news_quality
-            result["strong_news"] = news_quality == "STRONG"
+            
+            result["news_label"] = describe_news_quality(headline, news_quality)
+            result["catalyst_type"] = result["news_label"]
+            
+            result["news_label"] = describe_news_quality(headline, news_quality)
+            result["catalyst_type"] = result["news_label"]
             
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
@@ -1763,9 +1795,22 @@ def run_scanner():
                 clean_risks.append(r)
 
             result["risks"] = clean_risks
+            # --- DILUTION DESCRIPTION LABEL ---
+            combined_risk_text = " ".join(clean_risks + [filing_text or ""])
             
+            dilution_label = describe_dilution_risk(combined_risk_text)
+            
+            if dilution_label and dilution_label not in clean_risks:
+                clean_risks.insert(0, dilution_label)
+            
+            result["risks"] = clean_risks
             # ✅ FINALIZE + DEDUPE (only once)
             result["risks"] = list(dict.fromkeys(clean_risks))
+            
+            result["momentum_state"] = describe_momentum_state(result)
+            
+            if result["momentum_state"] not in result.setdefault("reasons", []):
+                result["reasons"].append(result["momentum_state"])
             # ===== TRASH FILTERS =====
 
             if price < 0.5 or price > 500:
