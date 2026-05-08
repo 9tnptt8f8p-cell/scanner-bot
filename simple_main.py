@@ -684,50 +684,56 @@ def get_alert_status(result):
         return "Early momentum forming — watch only, needs confirmation."
     else:
         return "Early move detected — NOT confirmed yet."
+        
 def build_alert(result):
-    clean_reasons = [
-        r for r in result.get("reasons", [])
-        if "market cap" not in str(r).lower()
-        and "daily" not in str(r).lower()
-        and "fresh daily breakout" not in str(r).lower()
-    ]
-        # --- CLEAN REASONS ---
-        clean_reasons = []
-        
-        seen = set()
-        
-        for r in result.get("reasons", []):
-            if not r:
-                continue
-        
-            r = str(r).strip()
-        
-            if r in seen:
-                continue
-        
-            seen.add(r)
-            clean_reasons.append(r)
-        
-        reasons_text = "\n".join(clean_reasons)
 
-        # --- CLEAN RISKS ---
-        clean_risks = []
-        
-        seen = set()
-        
-        for r in result.get("risks", []):
-            if not r:
-                continue
-        
-            r = str(r).strip()
-        
-            if r in seen:
-                continue
-        
-            seen.add(r)
-            clean_risks.append(r)
-        
-        risk_text = "\n".join(clean_risks) if clean_risks else "None"
+    # --- CLEAN REASONS ---
+    clean_reasons = []
+
+    seen = set()
+
+    for r in result.get("reasons", []):
+        if not r:
+            continue
+
+        r = str(r).strip()
+
+        if "market cap" in r.lower():
+            continue
+
+        if "daily" in r.lower():
+            continue
+
+        if "fresh daily breakout" in r.lower():
+            continue
+
+        if r in seen:
+            continue
+
+        seen.add(r)
+        clean_reasons.append(r)
+
+    reasons_text = "\n".join(clean_reasons)
+
+    # --- CLEAN RISKS ---
+    clean_risks = []
+
+    seen = set()
+
+    for r in result.get("risks", []):
+        if not r:
+            continue
+
+        r = str(r).strip()
+
+        if r in seen:
+            continue
+
+        seen.add(r)
+        clean_risks.append(r)
+
+    risk_text = "\n".join(clean_risks) if clean_risks else "None"
+
     float_shares = result.get("float", 0)
 
     # ONE TITLE ONLY
