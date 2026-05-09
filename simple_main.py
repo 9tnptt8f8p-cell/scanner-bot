@@ -13,11 +13,50 @@ from structure_engine import analyze_structure
 from alerts import send_alert
 from rank_engine import rank_result
 load_dotenv()
-
 def build_trade_bias(result):
     risks = " ".join(result.get("risks", [])).lower()
     news_quality = result.get("news_quality", "")
     structure = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
+
+    price = float(result.get("price", 0) or 0)
+    vwap = float(result.get("vwap", 0) or 0)
+    gain = float(result.get("gain", 0) or 0)
+    recent_volume = int(result.get("recent_volume", result.get("volume", 0)) or 0)
+
+    above_vwap = False
+    if vwap and price:
+        vwap_distance = ((price - vwap) / vwap) * 100
+        above_vwap = price >= vwap
+        result["above_vwap"] = above_vwap
+        result["vwap_distance"] = round(vwap_distance, 2)
+    else:
+        vwap_distance = 0
+
+    has_higher_lows = (
+        result.get("has_higher_lows", False)
+        or "higher lows" in structure
+    )
+
+    breakout_confirmed = (
+        result.get("breakout_confirmed", False)
+        or "breakout" in structure
+        or "strong candle close" in structure
+    )
+
+    true_second_leg = (
+        above_vwap
+        and has_higher_lows
+        and breakout_confirmed
+        and recent_volume >= 150000
+    )
+
+    result["true_second_leg"] = true_second_leg
+
+    # --- MOMENTUM DECAY ---
+    if gain > 20 and vwap and price and price < vwap:
+        result["momentum_decay"] = True
+    else:
+        result["momentum_decay"] = False
 
     if "offering" in risks or "dilution" in risks or "warrant" in risks:
         return "⚠️ High risk — dilution/financing overhang"
@@ -25,32 +64,27 @@ def build_trade_bias(result):
     if news_quality == "NEGATIVE":
         return "❌ Negative catalyst — avoid unless extreme scalp only"
 
-    if news_quality == "WEAK":
-        return "⚠️ Weak catalyst — could fade fast"
-
-    price = float(result.get("price", 0) or 0)
-    vwap = float(result.get("vwap", 0) or 0)
-
     if vwap and price:
-        vwap_distance = ((price - vwap) / vwap) * 100
-        
-    # --- VWAP DISTANCE SCORE IMPACT ---
-    if vwap and price:
-    
-        vwap_distance = ((price - vwap) / vwap) * 100
-    
         if vwap_distance <= -12:
-       
             return "🚨 Way below VWAP — failed momentum / avoid"
 
         elif vwap_distance < 0:
             return "👀 Slightly below VWAP — reclaim watch"
 
+    if result.get("momentum_decay", False):
+        return "⚠️ MOMENTUM FADED — wait for reclaim"
+
     if "upper wick" in structure or "trap" in structure:
         return "⚠️ Trap risk — wait for cleaner setup"
 
+    if true_second_leg:
+        return "🚀 RUNNER WATCH — VWAP hold + second-leg setup"
+
     if news_quality == "STRONG":
         return "✅ Strong catalyst — watch for continuation"
+
+    if news_quality == "WEAK":
+        return "⚠️ Weak catalyst — could fade fast"
 
     return "🤔 Mixed/unclear — wait for confirmation"
     
@@ -490,6 +524,7 @@ def get_alpaca_candles(ticker):
     except Exception as e:
         print(f"[ALPACA ERROR] {ticker}: {e}", flush=True)
         return []
+        
 def get_news_catalyst(ticker):
     if not FINNHUB_API_KEY:
         return "unknown", "Missing Finnhub key"
@@ -533,6 +568,7 @@ def get_news_catalyst(ticker):
     except Exception as e:
         print(f"[NEWS ERROR] {ticker}: {e}", flush=True)
         return "unknown", "News check failed"
+        
 def get_finnhub_quote(ticker):
     if not FINNHUB_API_KEY:
         return None
@@ -626,7 +662,13 @@ def score_mover(mover, catalyst_type, catalyst_text):
     }
 def get_alert_title(result):
     risks_text = " ".join(result.get("risks", [])).lower()
+    structure_text = " ".join(result.get("reasons", [])).lower()
 
+    score = result.get("score", 0)
+    recent_vol = result.get("recent_volume", 0)
+    gain = result.get("gain", 0)
+
+    # --- HARD TRAP FILTER ---
     if any(x in risks_text for x in [
         "below vwap",
         "weak candle",
@@ -636,28 +678,33 @@ def get_alert_title(result):
         "vwap rejection"
     ]):
         return "⚠️ TRAP / AVOID"
-        
-    # 🚨 Trend Builder override (FIRST PRIORITY)
-    if result.get("trend_builder_alert"):
+
+    # --- MOMENTUM DECAY ---
+    if result.get("momentum_decay", False):
+        return "⚠️ MOMENTUM FADED"
+
+    # --- TREND BUILDER (TOP PRIORITY) ---
+    if result.get("trend_builder_alert", False):
         return "🚨 TREND BUILDER"
 
-    # 🚨 VALID SECOND LEG
-    if result.get("valid_second_leg", False):
+    # --- TRUE SECOND LEG ---
+    if result.get("true_second_leg", False):
 
+        # tighter elite condition
         if (
             result.get("price", 0) >= result.get("recent_high", 0) * 0.97
-            and result.get("recent_volume", 0) >= 150_000
-            and result.get("higher_lows", False)
+            and recent_vol >= 150000
+            and (
+                result.get("has_higher_lows", False)
+                or "higher lows" in structure_text
+            )
         ):
-            return "🟢 SECOND LEG BUILDING"
+            return "🚨 SECOND LEG COIL BREAKOUT"
 
         return "🟢 RUNNER WATCH"
 
-    score = result.get("score", 0)
-    recent_vol = result.get("recent_volume", 0)
-
-    # 🔥 TOP PRIORITY = SCORE (not gain)
-    if score >= 9 and recent_vol >= 200_000:
+    # --- SCORE-BASED TITLES ---
+    if score >= 9 and recent_vol >= 200000:
         return "🔥 MOMENTUM RUNNER"
 
     if score == 8:
@@ -674,37 +721,55 @@ def get_alert_title(result):
 def get_alert_status(result):
     score = result.get("score", 0)
 
+    # --- MOMENTUM DECAY ---
+    if result.get("momentum_decay", False):
+        return "Momentum faded — lost trend strength, reclaim needed."
+
+    # --- TRUE SECOND LEG ---
+    if result.get("true_second_leg", False):
+        return "Confirmed continuation setup — VWAP hold + higher lows."
+
+    # --- TREND BUILDER ---
+    if result.get("trend_builder_alert", False):
+        return "Strong trend structure — continuation possible."
+
+    # --- SCORE STATUS ---
     if score >= 9:
         return "Confirmed momentum — strong runner conditions."
+
     elif score == 8:
         return "Building momentum — wait for clean entry confirmation."
+
     elif score == 7:
         return "Potential runner forming — needs more confirmation."
+
     elif score == 6:
         return "Early momentum forming — watch only, needs confirmation."
-    else:
-        return "Early move detected — NOT confirmed yet."
+
+    return "Early move detected — NOT confirmed yet."
         
 def build_alert(result):
 
     # --- CLEAN REASONS ---
     clean_reasons = []
-
     seen = set()
+
+    news_quality = result.get("news_quality", "")
 
     for r in result.get("reasons", []):
         if not r:
             continue
 
         r = str(r).strip()
+        low = r.lower()
 
-        if "market cap" in r.lower():
+        if "market cap" in low:
             continue
-
-        if "daily" in r.lower():
+        if "daily" in low:
             continue
-
-        if "fresh daily breakout" in r.lower():
+        if "fresh daily breakout" in low:
+            continue
+        if "fresh news" in low and news_quality in ["NONE", "UNKNOWN", "JUNK"]:
             continue
 
         if r in seen:
@@ -713,11 +778,10 @@ def build_alert(result):
         seen.add(r)
         clean_reasons.append(r)
 
-    reasons_text = "\n".join(clean_reasons)
+    reasons_text = "\n".join(clean_reasons) if clean_reasons else "None"
 
     # --- CLEAN RISKS ---
     clean_risks = []
-
     seen = set()
 
     for r in result.get("risks", []):
@@ -725,6 +789,9 @@ def build_alert(result):
             continue
 
         r = str(r).strip()
+
+        if r.lower() in ["none", "n/a", ""]:
+            continue
 
         if r in seen:
             continue
@@ -734,18 +801,18 @@ def build_alert(result):
 
     risk_text = "\n".join(clean_risks) if clean_risks else "None"
 
-    float_shares = result.get("float", 0)
+    float_shares = result.get("float", 0) or 0
 
     # ONE TITLE ONLY
-    title = result.get("setup_tag") or result.get("title") or get_alert_title(result)
+    title = result.get("title") or get_alert_title(result)
 
     status = get_alert_status(result)
 
+    catalyst_text = result.get("catalyst_text", "") or ""
     catalyst_type = result.get("catalyst_type", "none")
-    news_quality = result.get("news_quality", "")
 
     no_news_warning = ""
-    if news_quality in ["NONE", "UNKNOWN"]:
+    if news_quality in ["NONE", "UNKNOWN", "JUNK"]:
         no_news_warning = "⚠️ No confirmed catalyst — technical move only\n"
 
     alert_text = (
@@ -754,14 +821,14 @@ def build_alert(result):
         f"Price: ${result['price']:.4f}\n"
         f"Gain: {result['gain']:.1f}%\n"
         f"Float: {float_shares/1_000_000:.1f}M\n\n"
-        f"Catalyst: {result.get('catalyst_type', 'none')}\n"
-        f"{result.get('catalyst_text', '')}\n\n"
+        f"Catalyst: {catalyst_type}\n"
+        f"{catalyst_text}\n\n"
         f"{no_news_warning}"
         f"Status:\n{status}\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
-        f"Entry: {result.get('entry_hint', 'N/A')}\n"
-        f"Reasons:\n{reasons}\n\n"
-        f"Risk:\n{risks_text}\n\n"
+        f"Entry: {result.get('entry_hint', 'N/A')}\n\n"
+        f"Reasons:\n{reasons_text}\n\n"
+        f"Risk:\n{risk_text}\n\n"
         f"📊 MARKET REGIME: {result.get('market_regime', 'UNKNOWN')}\n"
     )
 
@@ -1969,12 +2036,11 @@ def run_scanner():
                 and pullback
                 and recent_vol >= 150_000
             )
-            
             trend_builder_alert = result.get("trend_builder_alert", False)
-            second_leg_alert = result.get("valid_second_leg", False)
+            second_leg_alert = result.get("true_second_leg", False)
             
             if second_leg_alert:
-                print(f"[SECOND LEG] {ticker} detected", flush=True)
+                print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
             
             if gain < 20 and not (
                 early_momentum_alert
@@ -2006,8 +2072,8 @@ def run_scanner():
             ):
                 should_alert = True
             
-            # --- VALID SECOND LEG LOGIC ---
-            if result.get("valid_second_leg", False):
+            # --- TRUE SECOND LEG LOGIC ---
+            if second_leg_alert:
                 tight_second_leg_title = (
                     price >= recent_high * 0.97
                     and recent_vol >= 150_000
@@ -2015,7 +2081,6 @@ def run_scanner():
                 )
             
                 if tight_second_leg_title:
-                 
                     if "Second leg building" not in result.get("reasons", []):
                         result.setdefault("reasons", []).append("Second leg building")
             
@@ -2035,6 +2100,7 @@ def run_scanner():
                 if not strong_override:
                     print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
                     continue
+            
             sec_risk = False
             sec_note = "SEC check skipped — low score"
             
@@ -2049,7 +2115,7 @@ def run_scanner():
                     result["score"] = max(0, result.get("score", 0) - 2)
                 else:
                     result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
-
+            
             # --- FINAL ALERT BLOCKERS ---
             if not should_alert:
                 print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
@@ -2064,12 +2130,13 @@ def run_scanner():
             if not above_vwap and not second_leg_alert:
                 print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
                 continue
+            
             current_price = float(result.get("price", 0))
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             
             # --- COOLDOWN LOGIC ---
-            second_leg_bypass = result.get("valid_second_leg", False)
+            second_leg_bypass = second_leg_alert
             
             if not cooldown_done and not second_leg_bypass:
                 print(f"[SKIP] {ticker} cooldown active", flush=True)
@@ -2089,15 +2156,22 @@ def run_scanner():
             
             last_alert_price = runner_prices.get(ticker, 0)
             new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
+            
             result["score"] = max(0, min(result["score"], 10))
+            
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
             # ===== RUNNER / ENTRY ENGINE =====
-
-            if "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
+            if result.get("momentum_decay", False):
+                result["trap_runner"] = "⚠️ MOMENTUM FADED"
+            
+            elif "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
                 result["trap_runner"] = "⚠️ TRAP RISK"
+            
+            elif second_leg_alert:
+                result["trap_runner"] = "🟢 RUNNER WATCH"
             
             elif above_vwap and result.get("recent_volume", 0) >= 150_000:
                 result["trap_runner"] = "🚀 RUNNER LEAN"
@@ -2113,11 +2187,13 @@ def run_scanner():
                 result["trap_runner"] = "🟢 RUNNER WATCH"
             
             # ===== ENTRY HINTS =====
-            
             if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
             
                 if result.get("clean_trend_runner", False):
                     result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
+            
+                elif second_leg_alert:
+                    result["entry_hint"] = "🟢 Second leg — watch hold over VWAP / recent high"
             
                 elif price >= recent_high * 0.98:
                     result["entry_hint"] = "🚀 Near highs — wait for breakout/hold"
@@ -2131,19 +2207,20 @@ def run_scanner():
             elif result.get("trap_runner") == "⚠️ TRAP RISK":
                 result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
             
+            elif result.get("trap_runner") == "⚠️ MOMENTUM FADED":
+                result["entry_hint"] = "⚠️ Momentum faded — wait for reclaim"
+            
             else:
                 result["entry_hint"] = "🤔 Wait for setup confirmation"
             
             # ===== ALERT TAG ENGINE =====
-            
             if result.get("clean_trend_runner", False):
                 alert_tag = "📈 CLEAN TREND RUNNER"
             
             elif trend_builder_alert:
                 alert_tag = "🚨 TREND BUILDER"
             
-            elif result.get("valid_second_leg", False):
-            
+            elif second_leg_alert:
                 tight_second_leg_title = (
                     price >= recent_high * 0.97
                     and recent_vol >= 150_000
@@ -2151,7 +2228,7 @@ def run_scanner():
                 )
             
                 if tight_second_leg_title:
-                    alert_tag = "🟢 SECOND LEG BUILDING"
+                    alert_tag = "🚨 SECOND LEG COIL BREAKOUT"
                 else:
                     alert_tag = "🟢 RUNNER WATCH"
             
@@ -2169,43 +2246,33 @@ def run_scanner():
             
             else:
                 alert_tag = ""
-                     
+            
             bad_chart = (
                 "clear below vwap" in structure_text
                 or "big upper wick" in structure_text
                 or "possible trap" in structure_text
                 or "bad structure" in structure_text
             )
-        
-            if bad_chart and not result.get("second_leg", False) and not vwap_reclaim_setup:
+            
+            if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
-                
+            
             # --- WEAK MIDDAY CHOP FILTER ---
             weak_midday_chop = (
                 session == "MIDDAY"
                 and not above_vwap
                 and not has_higher_lows
             )
-            # --- MOMENTUM DECAY FILTER ---
-            momentum_decay = (
-                result.get("second_leg", False)
-                and not above_vwap
-                and recent_vol < 100_000
-            )
             
-            if momentum_decay:
-                print(f"[FILTER] {ticker} momentum decay", flush=True)
-                continue
-                
-            if weak_midday_chop and not result.get("valid_second_leg", False):
+            if weak_midday_chop and not second_leg_alert:
                 print(f"[FILTER] {ticker} weak midday chop", flush=True)
                 continue
             
             # --- SECOND LEG QUALITY FILTER ---
             weak_second_leg = (
                 result.get("second_leg", False)
-                and not result.get("valid_second_leg", False)
+                and not second_leg_alert
             )
             
             if weak_second_leg:
@@ -2226,16 +2293,13 @@ def run_scanner():
             first_alert = last_alert_price == 0
             realert_ok = new_high_realert
             
-            no_news = result.get("news_quality") in ["NONE", "UNKNOWN"]
-            
-            is_trap = result.get("trap_runner") == "⚠️ TRAP RISK"
+            no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
             
             # 🚨 A+ FILTER — allow only special setups or strong scores through
             if (
                 not result.get("a_plus_runner", False)
                 and not result.get("clean_trend_runner", False)
-                and not result.get("momentum_decay", False)
-                and not result.get("valid_second_leg", False)
+                and not second_leg_alert
                 and not breakout_burst_alert
                 and not vwap_reclaim_setup
                 and not breakout_hold_setup
@@ -2248,7 +2312,7 @@ def run_scanner():
             # 🚫 UNCLEAR SETUP FILTER
             if (
                 result.get("trap_runner") == "🤔 UNCLEAR"
-                and not result.get("valid_second_leg", False)
+                and not second_leg_alert
                 and not result.get("strong_news", False)
                 and not result.get("clean_trend_runner", False)
             ):
@@ -2258,34 +2322,34 @@ def run_scanner():
             # 🚫 TRAP FILTER
             if (
                 result.get("trap_runner") == "⚠️ TRAP RISK"
-                and not result.get("valid_second_leg", False)
+                and not second_leg_alert
             ):
                 print(f"[FILTER] {ticker} skipped — trap", flush=True)
                 continue
             
             # 🚫 RE-ALERT FILTER
-            if not (first_alert or realert_ok or result.get("valid_second_leg", False)):
+            if not (first_alert or realert_ok or second_leg_alert):
                 print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
                 continue
             
             # 🚫 VOLUME CONFIRMATION FILTER
             if (
                 not volume_confirmed
-                and result.get("trap_runner") != "🚀 RUNNER LEAN"
-                and result.get("trap_runner") != "🟢 RUNNER WATCH"
-                and not result.get("valid_second_leg", False)
+                and result.get("trap_runner") not in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]
+                and not second_leg_alert
             ):
                 print(f"[FILTER] {ticker} skipped — volume not confirmed", flush=True)
                 continue
+            
             # 🚫 NO-NEWS FILTER
-            if no_news and not result.get("valid_second_leg", False) and not (
+            if no_news and not second_leg_alert and not (
                 above_vwap
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
             ):
                 print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
                 continue
-
+            
             result["setup_tag"] = alert_tag.strip()
             result["title"] = get_alert_title(result)
         
