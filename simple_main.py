@@ -1549,24 +1549,25 @@ def run_scanner():
                 )
             )
 
-            result["good_structure"] = good_structure
-            
+                   result["good_structure"] = good_structure
+
             recent_vol = result.get("recent_volume", 0)
             gain = float(result.get("gain", 0) or 0)
+
             has_higher_lows = (
-                result.get("has_higher_lows", False)
+                result.get("higher_lows", False)
                 or result.get("has_higher_lows", False)
             )
 
-result["has_higher_lows"] = has_higher_lows
-            
+            result["has_higher_lows"] = has_higher_lows
+
             breakout_confirmed = (
                 result.get("breakout", False)
                 or result.get("breakout_confirmed", False)
             )
-            
+
             result["breakout_confirmed"] = breakout_confirmed
-            
+
             true_second_leg = (
                 result.get("second_leg", False)
                 and above_vwap
@@ -1575,15 +1576,8 @@ result["has_higher_lows"] = has_higher_lows
                 and recent_vol >= 150_000
             )
 
-result["true_second_leg"] = true_second_leg
-result["valid_second_leg"] = true_second_leg  # legacy safety alias
-            
             result["true_second_leg"] = true_second_leg
-            result["true_second_leg"] = true_second_leg  # legacy safety alias
-            has_higher_lows = (
-                result.get("higher_lows", False)
-                or result.get("has_higher_lows", False)
-            )
+            result["valid_second_leg"] = true_second_leg  # legacy safety alias
             
             result["has_higher_lows"] = has_higher_lows
             
