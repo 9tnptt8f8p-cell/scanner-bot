@@ -2411,34 +2411,46 @@ def run_scanner():
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
             
-            # --- MOMENTUM DECAY / BAD ALERT SUPPRESSOR ---
+                    # --- MOMENTUM DECAY ENGINE ---
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
-            
+
             volume_fading = (
                 prev_vol > 0
                 and recent_vol < prev_vol * 0.60
             )
-            
+
             lost_vwap = (
                 has_vwap
                 and price < vwap
             )
-            
+
+            failed_structure = any(x in structure_text for x in [
+                "lower highs",
+                "failed",
+                "rejection",
+                "upper wick",
+                "trap"
+            ])
+
             bad_momentum_decay = (
                 volume_fading
                 or lost_vwap
-                or "lower highs" in structure_text
-                or "failed" in structure_text
-                or "rejection" in structure_text
+                or failed_structure
             )
-            
+
             if bad_momentum_decay:
-                result["momentum_decay"] = True
-    result["score"] = max(0, result.get("score", 0) - 2)
-    
-            if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
-                result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
+
+                # don't decay strong second legs
+                if not result.get("true_second_leg", False):
+
+                    result["momentum_decay"] = True
+                    result["score"] = max(0, result.get("score", 0) - 2)
+
+                    if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
+                        result.setdefault("risks", []).append(
+                            "⚠️ Momentum decay / weak continuation"
+                        )
 
             has_higher_lows = result.get("has_higher_lows", False)
 
