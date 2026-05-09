@@ -633,9 +633,19 @@ def score_mover(mover, catalyst_type, catalyst_text):
     elif volume >= 500_000:
         score += 1
         reasons.append("500k+ volume")
-    if catalyst_type not in ["none", "unknown"]:
+ if catalyst_type not in ["none", "unknown"]:
+    news_quality = classify_news_quality(catalyst_text)
+
+    if news_quality == "STRONG":
         score += 2
-        reasons.append("fresh news")
+        reasons.append("confirmed catalyst")
+
+    elif news_quality == "WEAK":
+        score += 1
+        reasons.append("weak catalyst")
+
+    elif news_quality == "JUNK":
+        risks.append("⚠️ Mover roundup / aggregator headline")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
@@ -1017,50 +1027,101 @@ def check_sec_offering_risk(ticker):
         return False, f"SEC check error: {e}"
 
 
-port = int(os.getenv("PORT", 10000))
-def describe_news_quality(headline, news_quality=None):
-    text = (headline or "").lower()
-
-    roundup_phrases = [
-        "stocks moving",
-        "moving before the opening bell",
-        "premarket movers",
-        "market movers",
-        "why shares are trading",
-        "here are",
-        "gainers and losers",
-        "most active stocks",
-        "stock moving"
-    ]
-    
-def describe_news_quality(headline, news_quality=None):
-    text = (headline or "").lower()
-
-    roundup_phrases = [
-        "stocks moving",
-        "moving before the opening bell",
-        "premarket movers",
-        "market movers",
-        "why shares are trading",
-        "here are",
-        "gainers and losers",
-        "most active stocks",
-        "stock moving"
-    ]
-
-    if not headline or headline.lower() in ["none", "no fresh catalyst found"]:
-        return "❌ NO CLEAR NEWS"
-
-    if any(p in text for p in roundup_phrases):
-        return "⚠️ WEAK NEWS / MOVER ROUNDUP"
-
-    if news_quality == "STRONG":
-        return "⚡ STRONG NEWS"
-
-    if news_quality == "WEAK":
-        return "🟡 WEAK NEWS"
-
-    return "📰 NEWS FOUND"
+        # --- NEWS QUALITY DETECTION ---
+        
+        BAD_NEWS_KEYWORDS = [
+            "top gainers",
+            "stocks moving",
+            "stocks are moving",
+            "these stocks are moving",
+            "moving in today's session",
+            "market movers",
+            "premarket session",
+            "premarket movers",
+            "moving before the opening bell",
+            "here are",
+            "why these stocks",
+            "why shares are trading",
+            "why is it moving",
+            "market update",
+            "roundup",
+            "shares are trading higher",
+            "driving market activity",
+            "attracting the most attention",
+            "gapping stocks",
+            "most active stocks",
+            "gap-ups and gap-downs",
+        ]
+        
+        STRONG_KEYWORDS = [
+            "fda", "approval", "approved", "clearance", "cleared", "510(k)",
+            "clinical trial", "phase 1", "phase 2", "phase 3",
+            "positive data", "topline", "endpoint", "orphan drug",
+            "fast track", "breakthrough therapy",
+        
+            "contract", "agreement", "partnership", "collaboration",
+            "deal", "order", "purchase order",
+            "supply agreement", "distribution agreement",
+            "license agreement", "strategic alliance",
+            "definitive agreement", "letter of intent",
+        
+            "mou", "memorandum of understanding",
+            "financing", "advance financing",
+            "facility", "battery", "solid-state battery",
+            "infrastructure", "validation initiative",
+        
+            "acquisition", "merger", "buyout", "takeover",
+        
+            "earnings", "revenue", "guidance",
+            "raises guidance", "profitability", "record revenue",
+        
+            "bitcoin", "ethereum", "crypto", "blockchain",
+            "artificial intelligence", "ai-powered", "nvidia",
+        
+            "primary endpoint", "met primary endpoint",
+            "statistically significant", "pivotal trial",
+            "new drug application", "nda", "bla",
+            "510k", "de novo",
+            "commercial launch",
+        ]
+        
+        def classify_news_quality(headline):
+            if not headline:
+                return "NONE"
+        
+            text = str(headline).lower().strip()
+        
+            if text in ["none", "no fresh catalyst found", "news check failed"]:
+                return "NONE"
+        
+            if any(word in text for word in BAD_NEWS_KEYWORDS):
+                return "JUNK"
+        
+            if any(word in text for word in STRONG_KEYWORDS):
+                return "STRONG"
+        
+            return "WEAK"
+        
+        
+        def describe_news_quality(headline, news_quality=None):
+            text = (headline or "").lower()
+        
+            if not headline or text in ["none", "no fresh catalyst found"]:
+                return "❌ NO CLEAR NEWS"
+        
+            if news_quality == "JUNK":
+                return "⚠️ WEAK NEWS / MOVER ROUNDUP"
+        
+            if news_quality == "NONE":
+                return "❌ NO CLEAR NEWS"
+        
+            if news_quality == "STRONG":
+                return "⚡ STRONG NEWS"
+        
+            if news_quality == "WEAK":
+                return "🟡 WEAK NEWS"
+        
+            return "📰 NEWS FOUND"
 
 def describe_volume_quality(candles):
     try:
@@ -1140,7 +1201,45 @@ def extract_warrant_price(text):
                 return None
 
     return None
+    
+def describe_dilution_risk(risk_text):
+    text = (risk_text or "").lower()
 
+    strong_words = [
+        "registered direct",
+        "private placement",
+        "securities purchase agreement",
+        "atm offering",
+        "at-the-market",
+        "equity distribution agreement",
+        "sales agreement",
+        "warrant",
+        "convertible",
+        "equity line",
+        "resale",
+        "selling stockholder",
+    ]
+
+    medium_words = [
+        "s-3",
+        "f-3",
+        "shelf",
+        "prospectus",
+        "424b5",
+        "424b3",
+    ]
+
+    if any(w in text for w in strong_words):
+        return "🚨 CONFIRMED DILUTION RISK: offering/warrants/financing language found → possible sell pressure on spikes"
+
+    if any(w in text for w in medium_words):
+        return "⚠️ DILUTION RISK BUILDING: shelf/prospectus filing found → company may be able to raise capital"
+
+    if "8-k" in text or "6-k" in text:
+        return "🟡 SEC FILINGS PRESENT: recent filings found, but no clear dilution terms confirmed"
+
+    return ""
+    
 def detect_offering_risk(text, price=0):
     if not text:
         return []
@@ -1839,7 +1938,7 @@ def run_scanner():
             result["news_quality"] = news_quality
             result["news_label"] = describe_news_quality(headline, news_quality)
             result["catalyst_type"] = result["news_label"]
-            
+            result["strong_news"] = news_quality == "STRONG"
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
                 result["score"] = max(0, result.get("score", 0) - 1)
