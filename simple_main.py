@@ -624,21 +624,18 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 2
         reasons.append("27%+ spike")
 
-      if volume >= 10_000_000:
+    if volume >= 10_000_000:
         score += 3
         reasons.append("10M+ volume")
-
     elif volume >= 2_000_000:
         score += 2
         reasons.append("2M+ volume")
-
     elif volume >= 500_000:
         score += 1
         reasons.append("500k+ volume")
 
     # --- NEWS QUALITY SCORE ---
     if catalyst_type not in ["none", "unknown"]:
-
         news_quality = classify_news_quality(catalyst_text)
 
         if news_quality == "STRONG":
