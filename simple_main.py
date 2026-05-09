@@ -624,28 +624,33 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 2
         reasons.append("27%+ spike")
 
-    if volume >= 10_000_000:
+      if volume >= 10_000_000:
         score += 3
         reasons.append("10M+ volume")
+
     elif volume >= 2_000_000:
         score += 2
         reasons.append("2M+ volume")
+
     elif volume >= 500_000:
         score += 1
         reasons.append("500k+ volume")
- if catalyst_type not in ["none", "unknown"]:
-    news_quality = classify_news_quality(catalyst_text)
 
-    if news_quality == "STRONG":
-        score += 2
-        reasons.append("confirmed catalyst")
+    # --- NEWS QUALITY SCORE ---
+    if catalyst_type not in ["none", "unknown"]:
 
-    elif news_quality == "WEAK":
-        score += 1
-        reasons.append("weak catalyst")
+        news_quality = classify_news_quality(catalyst_text)
 
-    elif news_quality == "JUNK":
-        risks.append("⚠️ Mover roundup / aggregator headline")
+        if news_quality == "STRONG":
+            score += 2
+            reasons.append("confirmed catalyst")
+
+        elif news_quality == "WEAK":
+            score += 1
+            reasons.append("weak catalyst")
+
+        elif news_quality == "JUNK":
+            risks.append("⚠️ Mover roundup / aggregator headline")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
