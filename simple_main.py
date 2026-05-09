@@ -1771,7 +1771,7 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
             risks_text = " ".join(result.get("risks", [])).lower()
             last_price = runner_prices.get(ticker, 0)
 
-            second_leg = (
+            price_realert_breakout = (
                 last_price > 0
                 and current_price > last_price * 1.02
             )
@@ -2201,7 +2201,15 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
             if result.get("momentum_decay", False):
                 result["trap_runner"] = "⚠️ MOMENTUM FADED"
             
-            elif "clear below vwap" in structure_text or "upper wick" in structure_text or "trap" in structure_text:
+            elif any(x in structure_text for x in [
+                "clear below vwap",
+                "below vwap",
+                "upper wick",
+                "big upper wick",
+                "trap",
+                "rejection",
+                "lower highs"
+            ]):
                 result["trap_runner"] = "⚠️ TRAP RISK"
             
             elif second_leg_alert:
@@ -2217,6 +2225,7 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
                 above_vwap
                 and has_higher_lows
                 and not bad_structure
+                and not result.get("momentum_decay", False)
             ):
                 result["trap_runner"] = "🟢 RUNNER WATCH"
             
@@ -2255,6 +2264,7 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
                 alert_tag = "🚨 TREND BUILDER"
             
             elif second_leg_alert:
+            
                 tight_second_leg_title = (
                     price >= recent_high * 0.97
                     and recent_vol >= 150_000
@@ -2281,12 +2291,14 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
             else:
                 alert_tag = ""
             
-            bad_chart = (
-                "clear below vwap" in structure_text
-                or "big upper wick" in structure_text
-                or "possible trap" in structure_text
-                or "bad structure" in structure_text
-            )
+            bad_chart = any(x in structure_text for x in [
+                "clear below vwap",
+                "big upper wick",
+                "possible trap",
+                "bad structure",
+                "lower highs",
+                "rejection"
+            ])
             
             if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
@@ -2297,6 +2309,7 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
                 session == "MIDDAY"
                 and not above_vwap
                 and not has_higher_lows
+                and recent_vol < 150_000
             )
             
             if weak_midday_chop and not second_leg_alert:
@@ -2384,11 +2397,17 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
                 continue
             
             # 🚫 NO-NEWS FILTER
-            if no_news and not second_leg_alert and not (
+            if no_news and not (
+            second_leg_alert
+            or result.get("clean_trend_runner", False)
+            or result.get("trend_builder_alert", False)
+            or (
                 above_vwap
+                and has_higher_lows
                 and result.get("recent_volume", 0) >= 150_000
                 and float_shares <= 20_000_000
-            ):
+            )
+        ):
                 print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
                 continue
         
@@ -2481,6 +2500,7 @@ result["valid_second_leg"] = true_second_leg  # legacy safety alias
             if ticker in runner_prices and not meaningful_change:
                 print(f"[SKIP] {ticker} repeat alert without meaningful change", flush=True)
                 continue
+            result["trap_runner"] = build_trade_bias(result)
             sent = send_alert(build_alert(result))
 
             if sent:
