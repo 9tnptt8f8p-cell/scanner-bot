@@ -118,8 +118,8 @@ def should_scan_now():
     if now.date().isoformat() in MARKET_HOLIDAYS_2026:
         return False
 
-    # Scan only 6:00 AM ET to 4:10 PM ET
-    if not (dtime(6, 0) <= now.time() < dtime(16, 10)):
+    # Scan only 7:30 AM ET to 4:10 PM ET
+    if not (dtime(7, 30) <= now.time() < dtime(16, 10)):
         return False
 
     return True
