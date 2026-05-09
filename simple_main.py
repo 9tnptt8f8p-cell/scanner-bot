@@ -1399,7 +1399,11 @@ def run_scanner():
                 catalyst_type=catalyst_type,
                 catalyst_text=catalyst_text
             )
-
+            result["true_second_leg"] = False
+            result["valid_second_leg"] = False
+            result["momentum_decay"] = False
+            result["trend_builder_alert"] = False
+            
             initial_news_quality = classify_news_quality(catalyst_text)
             result["news_quality"] = initial_news_quality
             result["strong_news"] = initial_news_quality == "STRONG"
@@ -1499,8 +1503,11 @@ def run_scanner():
             result["above_vwap"] = structure.get("above_vwap", False)
             result["vwap"] = structure.get("vwap")
             result["breakout"] = structure.get("breakout", False)
+            result["breakout_confirmed"] = structure.get("breakout", False)
             result["breakout_level"] = structure.get("breakout_level")
+            
             result["higher_lows"] = structure.get("higher_lows", False)
+            result["has_higher_lows"] = structure.get("higher_lows", False)
             result["trend_builder"] = structure.get("trend_builder", False)
             
             structure_reasons = structure.get("reasons", [])
@@ -1536,7 +1543,7 @@ def run_scanner():
                 above_vwap
                 and not bad_structure
                 and (
-                    result.get("higher_lows", False)
+                    result.get("has_higher_lows", False)
                     or result.get("strong_news", False)
                     or result.get("breakout", False)
                 )
@@ -1546,20 +1553,40 @@ def run_scanner():
             
             recent_vol = result.get("recent_volume", 0)
             gain = float(result.get("gain", 0) or 0)
-            has_higher_lows = result.get("higher_lows", False)
+            has_higher_lows = (
+                result.get("has_higher_lows", False)
+                or result.get("has_higher_lows", False)
+            )
+
+result["has_higher_lows"] = has_higher_lows
             
-            # --- TRUE SECOND LEG FILTER ---
+            breakout_confirmed = (
+                result.get("breakout", False)
+                or result.get("breakout_confirmed", False)
+            )
+            
+            result["breakout_confirmed"] = breakout_confirmed
+            
             true_second_leg = (
                 result.get("second_leg", False)
                 and above_vwap
                 and has_higher_lows
-                and result.get("breakout", False)
+                and breakout_confirmed
                 and recent_vol >= 150_000
             )
+
+result["true_second_leg"] = true_second_leg
+result["valid_second_leg"] = true_second_leg  # legacy safety alias
             
             result["true_second_leg"] = true_second_leg
             result["true_second_leg"] = true_second_leg  # legacy safety alias
-            # --- CLEAN TREND RUNNER CATCH ---
+            has_higher_lows = (
+                result.get("higher_lows", False)
+                or result.get("has_higher_lows", False)
+            )
+            
+            result["has_higher_lows"] = has_higher_lows
+            
             clean_trend_runner = (
                 gain >= 20
                 and structure_score >= 2
@@ -1568,7 +1595,7 @@ def run_scanner():
                 and recent_vol >= 100000
                 and (
                     result.get("breakout", False)
-                    or result.get("higher_lows", False)
+                    or has_higher_lows
                     or result.get("strong_news", False)
                 )
             )
@@ -1582,7 +1609,11 @@ def run_scanner():
             recent_high = result.get("high", price)
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
-            has_momentum = result.get("second_leg") or result.get("trend_builder_alert")
+            has_momentum = (
+                result.get("true_second_leg", False)
+                or result.get("trend_builder_alert", False)
+                or result.get("clean_trend_runner", False)
+            )
             
             a_plus_runner = (
                 good_structure
@@ -1590,6 +1621,7 @@ def run_scanner():
                     strong_volume
                     or near_high
                     or has_momentum
+                    or has_higher_lows
                 )
             )
             
@@ -1745,8 +1777,13 @@ def run_scanner():
             )
 
             dead_bounce = (
-                "below vwap" in risks_text
-                and not second_leg
+                (
+                    "below vwap" in risks_text
+                    or "rejection" in risks_text
+                    or "lower highs" in risks_text
+                    or "upper wick" in risks_text
+                )
+                and not result.get("true_second_leg", False)
             )
 
             if dead_bounce:
@@ -2360,9 +2397,11 @@ def run_scanner():
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
+            
             # --- MOMENTUM DECAY / BAD ALERT SUPPRESSOR ---
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
+            
             volume_fading = (
                 prev_vol > 0
                 and recent_vol < prev_vol * 0.60
@@ -2380,16 +2419,15 @@ def run_scanner():
                 or "failed" in structure_text
                 or "rejection" in structure_text
             )
+            
             if bad_momentum_decay:
                 result["momentum_decay"] = True
-                result["score"] = max(0, result.get("score", 0) - 2)
+    result["score"] = max(0, result.get("score", 0) - 2)
 
-                if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
-            else:
-                result["momentum_decay"] = False
+    if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
+        result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
 
-            has_higher_lows = result.get("higher_lows", False)
+            has_higher_lows = result.get("has_higher_lows", False)
 
             bad_structure = any(x in structure_text for x in [
                 "below vwap",
