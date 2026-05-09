@@ -12,6 +12,7 @@ from risk_engine import build_risk
 from structure_engine import analyze_structure
 from alerts import send_alert
 from rank_engine import rank_result
+
 load_dotenv()
 def build_trade_bias(result):
     risks = " ".join(result.get("risks", [])).lower()
@@ -943,14 +944,14 @@ def is_trend_builder(result, candles):
 
     price = float(result.get("price", 0) or 0)
     vwap = float(result.get("vwap", 0) or 0)
-
+    
     has_vwap = vwap > 0
     above_vwap = is_above_vwap(price, vwap)
-
+    
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
     higher_lows = higher_lows_forming(candles, count=4)
-    no_bad_wick = not is_big_upper_wick(candles[-1])
+    no_bad_wick = bool(candles) and not is_big_upper_wick(candles[-1])
 
     ema_stack = ema9 > ema20
     if ema50:
@@ -1547,15 +1548,17 @@ def run_scanner():
             gain = float(result.get("gain", 0) or 0)
             has_higher_lows = result.get("higher_lows", False)
             
-            # --- VALID SECOND LEG FILTER ---
-            valid_second_leg = (
+            # --- TRUE SECOND LEG FILTER ---
+            true_second_leg = (
                 result.get("second_leg", False)
                 and above_vwap
                 and has_higher_lows
-                and recent_vol >= 100_000
+                and result.get("breakout", False)
+                and recent_vol >= 150_000
             )
             
-            result["valid_second_leg"] = valid_second_leg
+            result["true_second_leg"] = true_second_leg
+            result["true_second_leg"] = true_second_leg  # legacy safety alias
             # --- CLEAN TREND RUNNER CATCH ---
             clean_trend_runner = (
                 gain >= 20
@@ -1622,13 +1625,11 @@ def run_scanner():
 
               
                     
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
-
-            
+            # --- STRUCTURE CONFIRMATION ---
             good_structure = (
                 structure_score >= 2
                 and above_vwap
+                and not bad_structure
             )
             
             result["good_structure"] = good_structure
@@ -1805,10 +1806,6 @@ def run_scanner():
             result["catalyst_text"] = headline
             result["headline"] = headline
             result["news_quality"] = news_quality
-            
-            result["news_label"] = describe_news_quality(headline, news_quality)
-            result["catalyst_type"] = result["news_label"]
-            
             result["news_label"] = describe_news_quality(headline, news_quality)
             result["catalyst_type"] = result["news_label"]
             
@@ -2297,9 +2294,17 @@ def run_scanner():
             
             # 🚨 A+ FILTER — allow only special setups or strong scores through
             if (
+                result.get("momentum_decay", False)
+                and not result.get("true_second_leg", False)
+                and not vwap_reclaim_setup
+            ):
+                print(f"[FILTER] {ticker} skipped — momentum decay", flush=True)
+                continue
+            
+            if (
                 not result.get("a_plus_runner", False)
                 and not result.get("clean_trend_runner", False)
-                and not second_leg_alert
+                and not result.get("true_second_leg", False)
                 and not breakout_burst_alert
                 and not vwap_reclaim_setup
                 and not breakout_hold_setup
@@ -2349,9 +2354,6 @@ def run_scanner():
             ):
                 print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
                 continue
-            
-            result["setup_tag"] = alert_tag.strip()
-            result["title"] = get_alert_title(result)
         
             # --- RUNNER STRUCTURE FILTER ---
            
@@ -2435,7 +2437,7 @@ def run_scanner():
                 or result.get("score", 0) > last_score
                 or result.get("trap_runner") == "🟢 RUNNER WATCH"
                 or breakout_hold_setup
-                or result.get("valid_second_leg", False)
+                or result.get("true_second_leg", False)
             )
             
             if ticker in runner_prices and not meaningful_change:
@@ -2444,7 +2446,7 @@ def run_scanner():
             sent = send_alert(build_alert(result))
 
             if sent:
-                if result.get("valid_second_leg", False):
+                if result.get("true_second_leg", False):
                     print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
 
                 elif result.get("trap_runner") == "🟢 RUNNER WATCH":
