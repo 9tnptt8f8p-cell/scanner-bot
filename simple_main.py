@@ -2436,9 +2436,9 @@ def run_scanner():
             if bad_momentum_decay:
                 result["momentum_decay"] = True
     result["score"] = max(0, result.get("score", 0) - 2)
-
-    if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
-        result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
+    
+            if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
+                result.setdefault("risks", []).append("⚠️ Momentum decay / weak continuation")
 
             has_higher_lows = result.get("has_higher_lows", False)
 
@@ -2448,7 +2448,7 @@ def run_scanner():
                 "possible trap",
                 "lower highs"
             ])
-            
+
             good_structure = (
                 above_vwap
                 and not bad_structure
