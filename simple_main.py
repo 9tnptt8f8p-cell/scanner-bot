@@ -1485,7 +1485,7 @@ def has_volume_confirmation(result, min_recent=75_000):
     
 def has_strong_news(result):
     return (
-        result.get("strong_news", False)
+        has_strong_news(result)
         or result.get("news_quality") == "STRONG"
     )
     
@@ -1495,6 +1495,19 @@ def has_momentum_structure(result):
         or result.get("trend_builder_alert", False)
         or result.get("clean_trend_runner", False)
     )
+def adjust_score(result, amount, reason=None, risk=None):
+    result["score"] = max(0, min(10, result.get("score", 0) + amount))
+
+    if reason:
+        if reason not in result.setdefault("reasons", []):
+            result["reasons"].append(reason)
+
+    if risk:
+        if risk not in result.setdefault("risks", []):
+            result["risks"].append(risk)
+
+    return result
+    
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1746,8 +1759,7 @@ def run_scanner():
             
             if clean_trend_runner:
                 result["clean_trend_runner"] = True
-                result["score"] = min(10, result.get("score", 0) + 2)
-                result.setdefault("reasons", []).append("📈 Clean trend runner structure")
+                result = adjust_score(result, 2, reason="📈 Clean trend runner structure")
             # --- A+ RUNNER FILTER ---
             price = result.get("price_float", float(result.get("price", 0) or 0))
             recent_high = result.get("high", price)
@@ -1988,43 +2000,51 @@ def run_scanner():
             result["strong_news"] = news_quality == "STRONG"
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
-                result["score"] = max(0, result.get("score", 0) - 1)
-                result.setdefault("risks", []).append("⚠️ Junk/aggregator headline")
+            result = adjust_score(
+                result,
+                -1,
+                risk="⚠️ Junk/aggregator headline"
+            )
 
             elif news_quality == "NONE":
                 result["catalyst_type"] = "❌ NO NEWS"
-                result["score"] = max(0, result.get("score", 0) - 1)
-
+                result = adjust_score(result, -1)
+            
                 if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
                     result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
-            
+
                 structure_text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
-            
+
                 # Only boost if structure isn't bad
-                if not any(x in structure_text for x in ["below vwap", "bad structure", "trap"]):
-                    result["score"] = min(10, result.get("score", 0) + 1)
-            
+                if not detect_bad_structure(structure_text):
+                    result = adjust_score(result, 1)
+
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
-                result["score"] = max(0, result.get("score", 0) - 1)
-            
-                if "⚠️ Weak/unclear news" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("⚠️ Weak/unclear news")
+
+                result = adjust_score(
+                    result,
+                    -1,
+                    risk="⚠️ Weak/unclear news"
+                )
 
             else:  # UNKNOWN fallback
                 result["catalyst_type"] = "❓ UNKNOWN NEWS"
-                result["score"] = max(0, result.get("score", 0) - 1)
 
-                if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
-                    result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
+                result = adjust_score(
+                    result,
+                    -1,
+                    risk="⚠️ No confirmed catalyst / technical momentum only"
+                )
                 # --- VWAP DISTANCE SCORE IMPACT ---
                 if vwap and price:
                     vwap_distance = ((price - vwap) / vwap) * 100
                 
                     if vwap_distance <= -12:
-                        result["score"] = max(0, result.get("score", 0) - 3)
+                       result = adjust_score(result, -3)
     
                         if "🚨 Way below VWAP (-12%+) / failed momentum" not in result.get("risks", []):
                             result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
@@ -2107,7 +2127,7 @@ def run_scanner():
             if (
                 result.get("gain", 0) < 25
                 and recent_vol < 250_000
-                and not result.get("strong_news", False)
+                and not has_strong_news(result)
             ):
                 print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
                 continue
@@ -2174,11 +2194,12 @@ def run_scanner():
             # ===== SECOND LEG + BREAKOUT BURST =====
             volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
             
-            if volume_spike:
-                result["score"] = min(10, result.get("score", 0) + 1)
-            
-                if "Volume surge" not in result.get("reasons", []):
-                    result.setdefault("reasons", []).append("Volume surge")
+        if volume_spike:
+            result = adjust_score(
+                result,
+                1,
+                reason="Volume surge"
+            )
             
             pullback = price < recent_high * 0.95
             
@@ -2236,7 +2257,7 @@ def run_scanner():
             
             # --- STRONG NEWS OVERRIDE ---
             if (
-                result.get("strong_news", False)
+                has_strong_news(result)
                 and gain >= 25
                 and above_vwap
                 and not result.get("bad_structure", False)
@@ -2280,12 +2301,15 @@ def run_scanner():
             
             result["sec_note"] = sec_note
             
-            if sec_risk:
-                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
-                    result["risks"].append(f"🚨 Active dilution filing: {sec_note}")
-                    result["score"] = max(0, result.get("score", 0) - 2)
-                else:
-                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
+        if sec_risk:
+            if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                result = adjust_score(
+                    result,
+                    -2,
+                    risk=f"🚨 Active dilution filing: {sec_note}"
+                )
+            else:
+                result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
             
             # --- FINAL ALERT BLOCKERS ---
             if not should_alert:
@@ -2337,16 +2361,7 @@ def run_scanner():
             # ===== RUNNER / ENTRY ENGINE =====
             if result.get("momentum_decay", False):
                 result["trap_runner"] = "⚠️ MOMENTUM FADED"
-            
-            elif any(x in structure_text for x in [
-                "clear below vwap",
-                "below vwap",
-                "upper wick",
-                "big upper wick",
-                "trap",
-                "rejection",
-                "lower highs"
-            ]):
+            elif detect_bad_structure(structure_text):
                 result["trap_runner"] = "⚠️ TRAP RISK"
             
             elif second_leg_alert:
@@ -2428,15 +2443,9 @@ def run_scanner():
             else:
                 alert_tag = ""
             
-            bad_chart = any(x in structure_text for x in [
-                "clear below vwap",
-                "big upper wick",
-                "possible trap",
-                "bad structure",
-                "lower highs",
-                "rejection"
-            ])
-            
+         
+            bad_chart = detect_bad_structure(structure_text)
+
             if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
                 print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
                 continue
@@ -2505,7 +2514,7 @@ def run_scanner():
             if (
                 result.get("trap_runner") == "🤔 UNCLEAR"
                 and not second_leg_alert
-                and not result.get("strong_news", False)
+                and not has_strong_news(result)
                 and not result.get("clean_trend_runner", False)
             ):
                 print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
@@ -2567,43 +2576,30 @@ def run_scanner():
                 has_vwap
                 and price < vwap
             )
-
-            failed_structure = any(x in structure_text for x in [
-                "lower highs",
-                "failed",
-                "rejection",
-                "upper wick",
-                "trap"
-            ])
+            failed_structure = detect_bad_structure(structure_text)
 
             bad_momentum_decay = (
                 volume_fading
                 or lost_vwap
                 or failed_structure
             )
-
             if bad_momentum_decay:
-
+            
                 # don't decay strong second legs
                 if not result.get("true_second_leg", False):
-
+            
                     result["momentum_decay"] = True
-                    result["score"] = max(0, result.get("score", 0) - 2)
-
-                    if "⚠️ Momentum decay / weak continuation" not in result.get("risks", []):
-                        result.setdefault("risks", []).append(
-                            "⚠️ Momentum decay / weak continuation"
-                        )
-
+            
+                    result = adjust_score(
+                        result,
+                        -2,
+                        risk="⚠️ Momentum decay / weak continuation"
+                    )
+            
             has_higher_lows = result.get("has_higher_lows", False)
-
-            bad_structure = any(x in structure_text for x in [
-                "below vwap",
-                "big upper wick",
-                "possible trap",
-                "lower highs"
-            ])
-
+            
+            bad_structure = detect_bad_structure(structure_text)
+            
             good_structure = (
                 above_vwap
                 and not bad_structure
@@ -2613,19 +2609,17 @@ def run_scanner():
                     or result.get("breakout", False)
                 )
             )
-            
             if (
                 not good_structure
                 and not result.get("second_leg", False)
-                and not result.get("strong_news", False)
+                and not has_strong_news(result)
             ):
                 print(f"[FILTER] {ticker} failed runner structure", flush=True)
                 continue
                 
             # --- VWAP HOLD CONFIRMATION ---
             if above_vwap and has_higher_lows:
-                result["score"] = min(10, result.get("score", 0) + 2)
-                result.setdefault("reasons", []).append("VWAP HOLD + HL CONFIRMED")
+                result = adjust_score(result, 2, reason="📈 Clean trend runner structure")
                 print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
             
             result["setup_tag"] = alert_tag.strip()
