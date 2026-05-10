@@ -954,12 +954,14 @@ def is_trend_builder(result, candles):
     if ema9 is None or ema20 is None:
         return False
 
-    price = float(result.get("price", 0) or 0)
-    vwap = float(result.get("vwap", 0) or 0)
+    price = result.get("price_float", float(result.get("price", 0) or 0))
+    vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
     
-    has_vwap = vwap > 0
-    above_vwap = is_above_vwap(price, vwap)
-    
+    has_vwap = result.get("has_vwap", False)
+    above_vwap = result.get(
+        "above_vwap",
+        is_above_vwap(price, vwap)
+    )
     volume_steady = result.get("recent_volume", 0) >= 75_000
     holding_gains = result.get("candle_session_gain", 0) >= 2
     higher_lows = higher_lows_forming(candles, count=4)
@@ -1029,101 +1031,101 @@ def check_sec_offering_risk(ticker):
         return False, f"SEC check error: {e}"
 
 
-        # --- NEWS QUALITY DETECTION ---
-        
-        BAD_NEWS_KEYWORDS = [
-            "top gainers",
-            "stocks moving",
-            "stocks are moving",
-            "these stocks are moving",
-            "moving in today's session",
-            "market movers",
-            "premarket session",
-            "premarket movers",
-            "moving before the opening bell",
-            "here are",
-            "why these stocks",
-            "why shares are trading",
-            "why is it moving",
-            "market update",
-            "roundup",
-            "shares are trading higher",
-            "driving market activity",
-            "attracting the most attention",
-            "gapping stocks",
-            "most active stocks",
-            "gap-ups and gap-downs",
-        ]
-        
-        STRONG_KEYWORDS = [
-            "fda", "approval", "approved", "clearance", "cleared", "510(k)",
-            "clinical trial", "phase 1", "phase 2", "phase 3",
-            "positive data", "topline", "endpoint", "orphan drug",
-            "fast track", "breakthrough therapy",
-        
-            "contract", "agreement", "partnership", "collaboration",
-            "deal", "order", "purchase order",
-            "supply agreement", "distribution agreement",
-            "license agreement", "strategic alliance",
-            "definitive agreement", "letter of intent",
-        
-            "mou", "memorandum of understanding",
-            "financing", "advance financing",
-            "facility", "battery", "solid-state battery",
-            "infrastructure", "validation initiative",
-        
-            "acquisition", "merger", "buyout", "takeover",
-        
-            "earnings", "revenue", "guidance",
-            "raises guidance", "profitability", "record revenue",
-        
-            "bitcoin", "ethereum", "crypto", "blockchain",
-            "artificial intelligence", "ai-powered", "nvidia",
-        
-            "primary endpoint", "met primary endpoint",
-            "statistically significant", "pivotal trial",
-            "new drug application", "nda", "bla",
-            "510k", "de novo",
-            "commercial launch",
-        ]
-        
-        def classify_news_quality(headline):
-            if not headline:
-                return "NONE"
-        
-            text = str(headline).lower().strip()
-        
-            if text in ["none", "no fresh catalyst found", "news check failed"]:
-                return "NONE"
-        
-            if any(word in text for word in BAD_NEWS_KEYWORDS):
-                return "JUNK"
-        
-            if any(word in text for word in STRONG_KEYWORDS):
-                return "STRONG"
-        
-            return "WEAK"
-        
-        
-        def describe_news_quality(headline, news_quality=None):
-            text = (headline or "").lower()
-        
-            if not headline or text in ["none", "no fresh catalyst found"]:
-                return "❌ NO CLEAR NEWS"
-        
-            if news_quality == "JUNK":
-                return "⚠️ WEAK NEWS / MOVER ROUNDUP"
-        
-            if news_quality == "NONE":
-                return "❌ NO CLEAR NEWS"
-        
-            if news_quality == "STRONG":
-                return "⚡ STRONG NEWS"
-        
-            if news_quality == "WEAK":
-                return "🟡 WEAK NEWS"
-        
-            return "📰 NEWS FOUND"
+# --- NEWS QUALITY DETECTION ---
+    
+BAD_NEWS_KEYWORDS = [
+    "top gainers",
+    "stocks moving",
+    "stocks are moving",
+    "these stocks are moving",
+    "moving in today's session",
+    "market movers",
+    "premarket session",
+    "premarket movers",
+    "moving before the opening bell",
+    "here are",
+    "why these stocks",
+    "why shares are trading",
+    "why is it moving",
+    "market update",
+    "roundup",
+    "shares are trading higher",
+    "driving market activity",
+    "attracting the most attention",
+    "gapping stocks",
+    "most active stocks",
+    "gap-ups and gap-downs",
+]
+
+STRONG_KEYWORDS = [
+    "fda", "approval", "approved", "clearance", "cleared", "510(k)",
+    "clinical trial", "phase 1", "phase 2", "phase 3",
+    "positive data", "topline", "endpoint", "orphan drug",
+    "fast track", "breakthrough therapy",
+
+    "contract", "agreement", "partnership", "collaboration",
+    "deal", "order", "purchase order",
+    "supply agreement", "distribution agreement",
+    "license agreement", "strategic alliance",
+    "definitive agreement", "letter of intent",
+
+    "mou", "memorandum of understanding",
+    "financing", "advance financing",
+    "facility", "battery", "solid-state battery",
+    "infrastructure", "validation initiative",
+
+    "acquisition", "merger", "buyout", "takeover",
+
+    "earnings", "revenue", "guidance",
+    "raises guidance", "profitability", "record revenue",
+
+    "bitcoin", "ethereum", "crypto", "blockchain",
+    "artificial intelligence", "ai-powered", "nvidia",
+
+    "primary endpoint", "met primary endpoint",
+    "statistically significant", "pivotal trial",
+    "new drug application", "nda", "bla",
+    "510k", "de novo",
+    "commercial launch",
+]
+
+def classify_news_quality(headline):
+    if not headline:
+        return "NONE"
+
+    text = str(headline).lower().strip()
+
+    if text in ["none", "no fresh catalyst found", "news check failed"]:
+        return "NONE"
+
+    if any(word in text for word in BAD_NEWS_KEYWORDS):
+        return "JUNK"
+
+    if any(word in text for word in STRONG_KEYWORDS):
+        return "STRONG"
+
+    return "WEAK"
+
+
+def describe_news_quality(headline, news_quality=None):
+    text = (headline or "").lower()
+
+    if not headline or text in ["none", "no fresh catalyst found"]:
+        return "❌ NO CLEAR NEWS"
+
+    if news_quality == "JUNK":
+        return "⚠️ WEAK NEWS / MOVER ROUNDUP"
+
+    if news_quality == "NONE":
+        return "❌ NO CLEAR NEWS"
+
+    if news_quality == "STRONG":
+        return "⚡ STRONG NEWS"
+
+    if news_quality == "WEAK":
+        return "🟡 WEAK NEWS"
+
+    return "📰 NEWS FOUND"
 
 def describe_volume_quality(candles):
     try:
@@ -1441,6 +1443,27 @@ def detect_consolidation(candles, lookback=6):
     tight = range_pct <= 0.15
 
     return tight, lookback
+def update_vwap_state(result):
+    price = float(result.get("price", 0) or 0)
+    vwap = float(result.get("vwap", 0) or 0)
+
+    has_vwap = vwap > 0
+    above_vwap = price > vwap if has_vwap else True
+
+    result["price_float"] = price
+    result["vwap_float"] = vwap
+    result["has_vwap"] = has_vwap
+    result["above_vwap"] = above_vwap
+
+    if has_vwap and price:
+        result["vwap_distance"] = round(
+            ((price - vwap) / vwap) * 100,
+            2
+        )
+    else:
+        result["vwap_distance"] = 0
+
+    return result
     
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
@@ -1603,6 +1626,9 @@ def run_scanner():
             result["structure_score"] = structure.get("structure_score", 0)
             result["above_vwap"] = structure.get("above_vwap", False)
             result["vwap"] = structure.get("vwap")
+            
+            result = update_vwap_state(result)
+            
             result["breakout"] = structure.get("breakout", False)
             result["breakout_confirmed"] = structure.get("breakout", False)
             result["breakout_level"] = structure.get("breakout_level")
@@ -1635,11 +1661,12 @@ def run_scanner():
             
             structure_score = result.get("structure_score", 0)
             
-            price = float(result.get("price", 0) or 0)
-            vwap = float(result.get("vwap", 0) or 0)
+            price = result.get("price_float", float(result.get("price", 0) or 0))
+            vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
             
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+            has_vwap = result.get("has_vwap", False)
+            above_vwap = result.get("above_vwap", True)
+            
             good_structure = (
                 above_vwap
                 and not bad_structure
@@ -1700,7 +1727,7 @@ def run_scanner():
                 result["score"] = min(10, result.get("score", 0) + 2)
                 result.setdefault("reasons", []).append("📈 Clean trend runner structure")
             # --- A+ RUNNER FILTER ---
-            price = float(result.get("price", 0) or 0)
+            price = result.get("price_float", float(result.get("price", 0) or 0))
             recent_high = result.get("high", price)
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
@@ -1827,22 +1854,22 @@ def run_scanner():
 
             ticker = result["ticker"]
 
-            price = float(result.get("price", 0) or 0)
+            price = result.get("price_float", float(result.get("price", 0) or 0))
             current_price = price
-            vwap = float(result.get("vwap", 0) or 0)
+            vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
             gain = float(result.get("gain", 0) or 0)
-
+            
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
-
+            
             float_shares = result.get("float", 0)
             market_cap = result.get("market_cap", 0)
 
             candles = result.get("candles", [])
 
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+            has_vwap = result.get("has_vwap", False)
+            above_vwap = result.get("above_vwap", True)
 
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
@@ -2081,8 +2108,8 @@ def run_scanner():
             
             result["early_momentum_alert"] = early_momentum_alert
             
-            has_vwap = vwap > 0
-            above_vwap = price > vwap if has_vwap else True
+            has_vwap = result.get("has_vwap", False)
+            above_vwap = result.get("above_vwap", True)
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             
