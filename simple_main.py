@@ -2000,40 +2000,42 @@ def run_scanner():
             result["strong_news"] = news_quality == "STRONG"
             if news_quality == "JUNK":
                 result["catalyst_type"] = "🚫 JUNK NEWS"
-            result = adjust_score(
-                result,
-                -1,
-                risk="⚠️ Junk/aggregator headline"
-            )
-
+            
+                result = adjust_score(
+                    result,
+                    -1,
+                    risk="⚠️ Junk/aggregator headline"
+                )
+            
             elif news_quality == "NONE":
                 result["catalyst_type"] = "❌ NO NEWS"
-                result = adjust_score(result, -1)
             
-                if "No confirmed catalyst / technical momentum only" not in " ".join(result.get("risks", [])):
-                    result.setdefault("risks", []).append("⚠️ No confirmed catalyst / technical momentum only")
-
+                result = adjust_score(
+                    result,
+                    -1,
+                    risk="⚠️ No confirmed catalyst / technical momentum only"
+                )
+            
             elif news_quality == "STRONG":
                 result["catalyst_type"] = "⚡ STRONG NEWS"
-
+            
                 structure_text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
-
-                # Only boost if structure isn't bad
+            
                 if not detect_bad_structure(structure_text):
                     result = adjust_score(result, 1)
-
+            
             elif news_quality == "WEAK":
                 result["catalyst_type"] = "⚠️ WEAK NEWS"
-
+            
                 result = adjust_score(
                     result,
                     -1,
                     risk="⚠️ Weak/unclear news"
                 )
-
+            
             else:  # UNKNOWN fallback
                 result["catalyst_type"] = "❓ UNKNOWN NEWS"
-
+            
                 result = adjust_score(
                     result,
                     -1,
