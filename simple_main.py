@@ -2041,19 +2041,20 @@ def run_scanner():
                     -1,
                     risk="⚠️ No confirmed catalyst / technical momentum only"
                 )
-                # --- VWAP DISTANCE SCORE IMPACT ---
-                if vwap and price:
-                    vwap_distance = ((price - vwap) / vwap) * 100
-                
-                    if vwap_distance <= -12:
-                       result = adjust_score(result, -3)
-    
-                        if "🚨 Way below VWAP (-12%+) / failed momentum" not in result.get("risks", []):
-                            result.setdefault("risks", []).append("🚨 Way below VWAP (-12%+) / failed momentum")
-    
-                    elif vwap_distance < 0:
-                        if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
-                            result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
+            # --- VWAP DISTANCE SCORE IMPACT ---
+            if vwap and price:
+                vwap_distance = ((price - vwap) / vwap) * 100
+            
+                if vwap_distance <= -12:
+                    result = adjust_score(
+                        result,
+                        -3,
+                        risk="🚨 Way below VWAP (-12%+) / failed momentum"
+                    )
+            
+                elif vwap_distance < 0:
+                    if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
+                        result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
                         
             # --- SEC FILING CLEANUP (FIXED) ---
             risk_list = build_risk(filing_text, filing_date)
