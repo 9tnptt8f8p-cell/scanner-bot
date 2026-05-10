@@ -19,8 +19,8 @@ def build_trade_bias(result):
     news_quality = result.get("news_quality", "")
     structure = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
 
-    price = float(result.get("price", 0) or 0)
-    vwap = float(result.get("vwap", 0) or 0)
+    price = result.get("price_float", float(result.get("price", 0) or 0))
+    vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
     gain = float(result.get("gain", 0) or 0)
     recent_volume = int(result.get("recent_volume", result.get("volume", 0)) or 0)
 
@@ -682,14 +682,7 @@ def get_alert_title(result):
     gain = result.get("gain", 0)
 
     # --- HARD TRAP FILTER ---
-    if any(x in risks_text for x in [
-        "below vwap",
-        "weak candle",
-        "dead chop",
-        "bad structure",
-        "avoid chasing",
-        "vwap rejection"
-    ]):
+    if detect_bad_structure(risks_text):
         return "⚠️ TRAP / AVOID"
 
     # --- MOMENTUM DECAY ---
@@ -1464,7 +1457,44 @@ def update_vwap_state(result):
         result["vwap_distance"] = 0
 
     return result
+def detect_bad_structure(structure_text):
+    bad_keywords = [
+        "below vwap",
+        "upper wick",
+        "trap",
+        "failed",
+        "lower highs",
+        "rejection",
+        "dead chop",
+        "weak candle",
+        "vwap rejection",
+        
+        "bad structure",
+        "avoid chasing",
+    ]
+
+    return any(k in structure_text for k in bad_keywords)
+def has_volume_confirmation(result, min_recent=75_000):
+    recent_vol = result.get("recent_volume", 0)
+    prev_vol = result.get("prev_volume", 0)
+
+    return (
+        recent_vol >= min_recent
+        and recent_vol >= prev_vol
+    )
     
+def has_strong_news(result):
+    return (
+        result.get("strong_news", False)
+        or result.get("news_quality") == "STRONG"
+    )
+    
+def has_momentum_structure(result):
+    return (
+        result.get("true_second_leg", False)
+        or result.get("trend_builder_alert", False)
+        or result.get("clean_trend_runner", False)
+    )
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
@@ -1647,15 +1677,7 @@ def run_scanner():
             result["risks"].extend(structure_risks)
             
             structure_text = " ".join(structure_reasons + structure_risks).lower()
-
-            bad_structure = (
-                "below vwap" in structure_text
-                or "upper wick" in structure_text
-                or "trap" in structure_text
-                or "failed" in structure_text
-                or "lower highs" in structure_text
-                or "rejection" in structure_text
-            )
+            bad_structure = detect_bad_structure(structure_text)
             
             result["bad_structure"] = bad_structure
             
@@ -1672,7 +1694,7 @@ def run_scanner():
                 and not bad_structure
                 and (
                     result.get("has_higher_lows", False)
-                    or result.get("strong_news", False)
+                    or has_strong_news(result)
                     or result.get("breakout", False)
                 )
             )
@@ -1718,7 +1740,7 @@ def run_scanner():
                 and (
                     result.get("breakout", False)
                     or has_higher_lows
-                    or result.get("strong_news", False)
+                    or has_strong_news(result)
                 )
             )
             
@@ -1731,11 +1753,7 @@ def run_scanner():
             recent_high = result.get("high", price)
             strong_volume = recent_vol >= 150_000
             near_high = price >= recent_high * 0.97
-            has_momentum = (
-                result.get("true_second_leg", False)
-                or result.get("trend_builder_alert", False)
-                or result.get("clean_trend_runner", False)
-            )
+            has_momentum = has_momentum_structure(result)
             
             a_plus_runner = (
                 good_structure
@@ -2113,10 +2131,7 @@ def run_scanner():
             recent_vol = result.get("recent_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
             
-            volume_confirmed = (
-                recent_vol >= result.get("prev_volume", 0)
-                and recent_vol >= 75_000
-            )
+            volume_confirmed = has_volume_confirmation(result)
 
             gain = float(result.get("gain", 0) or 0)
             recent_high = float(result.get("recent_high", result.get("high", price)) or price)
@@ -2151,7 +2166,7 @@ def run_scanner():
             and (
                 breakout_confirmed
                 or volume_expanding
-                or result.get("strong_news", False)
+                or has_strong_news(result)
             )
             and not_extended
         )
@@ -2594,7 +2609,7 @@ def run_scanner():
                 and not bad_structure
                 and (
                     has_higher_lows
-                    or result.get("strong_news", False)
+                    or has_strong_news(result)
                     or result.get("breakout", False)
                 )
             )
