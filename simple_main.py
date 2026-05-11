@@ -1055,6 +1055,9 @@ BAD_NEWS_KEYWORDS = [
     "stocks to watch today",
     "insights into",
     "get insights into",
+    "shares are trading higher",
+    "stocks moving premarket",
+    "here are 20 stocks moving",
     ]
 
 STRONG_KEYWORDS = [
@@ -1906,15 +1909,14 @@ def run_scanner():
             )
             
             result["good_structure"] = good_structure
-            
-           
+
             if result.get("trend_builder_alert"):
                 result["score"] = min(result.get("score", 0) + 1, 10)
-            
+
                 if "Trend builder setup / possible second leg" not in result["reasons"]:
                     result["reasons"].append("Trend builder setup / possible second leg")
-            
-                    elif result.get("good_structure", False):
+
+            elif result.get("good_structure", False):
                 result["score"] = min(10, result["score"] + 2)
 
                 if "✅ Clean structure confirmation" not in result["reasons"]:
