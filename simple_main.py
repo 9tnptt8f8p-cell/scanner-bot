@@ -1283,7 +1283,16 @@ def detect_offering_risk(text, price=0):
             risks.append("⚠️ Warrants detected — exercise price unknown")
 
     return risks
+    
 def scrape_pr_headline(ticker):
+    now = time.time()
+    cache_key = ticker.upper()
+
+    if cache_key in PR_CACHE:
+        cached_time, cached_result = PR_CACHE[cache_key]
+        if now - cached_time < PR_CACHE_TTL_SECONDS:
+            return cached_result
+
     sources = [
         f"https://www.prnewswire.com/search/news/?keyword={ticker}",
         f"https://www.globenewswire.com/search/keyword/{ticker}",
@@ -1293,7 +1302,7 @@ def scrape_pr_headline(ticker):
 
     for url in sources:
         try:
-            r = requests.get(url, headers=headers, timeout=8)
+            r = requests.get(url, headers=headers, timeout=3)
 
             if r.status_code != 200:
                 continue
@@ -1302,21 +1311,24 @@ def scrape_pr_headline(ticker):
 
             for tag in soup.find_all(["a", "h1", "h2", "h3"]):
                 text = tag.get_text(" ", strip=True)
-            
+
                 if not text or len(text) < 25:
                     continue
+
                 if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
                     continue
-            
+
                 quality = classify_news_quality(text)
-            
+
                 if quality == "STRONG":
                     print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
+                    PR_CACHE[cache_key] = (now, text)
                     return text
 
         except Exception as e:
             print(f"[PR SCRAPE ERROR] {ticker}: {e}", flush=True)
 
+    PR_CACHE[cache_key] = (now, "")
     return ""
 
 def find_real_news_headline(ticker, current_headline=""):
@@ -1352,7 +1364,7 @@ def find_real_news_headline(ticker, current_headline=""):
         url = f"https://finance.yahoo.com/quote/{ticker}/news/"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        r = requests.get(url, headers=headers, timeout=8)
+        r = requests.get(url, headers=headers, timeout=)
 
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
@@ -1420,7 +1432,8 @@ PROFILE_CACHE = {}
 NEWS_CACHE = {}
 SEC_CACHE = {}
 CACHE_TTL_SECONDS = 60 * 30
-
+PR_CACHE = {}
+PR_CACHE_TTL_SECONDS = 60 * 30
 
 # --- CONSOLIDATION / COIL DETECTION ---
 def detect_consolidation(candles, lookback=6):
