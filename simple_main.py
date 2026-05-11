@@ -249,10 +249,7 @@ def get_finnhub_profile(ticker):
             "time": now,
             "data": (market_cap, float_shares)
         }
-
         return market_cap, float_shares
-        market_cap_millions = float(data.get("marketCapitalization", 0) or 0)
-        share_outstanding_millions = float(data.get("shareOutstanding", 0) or 0)
 
         market_cap = int(market_cap_millions * 1_000_000)
         float_shares = int(share_outstanding_millions * 1_000_000)
@@ -1656,8 +1653,7 @@ def run_scanner():
             if market_cap == 0 and float_shares == 0:
                 print(f"[WARN] {ticker} profile missing — allowing but flagged", flush=True)
                 result.setdefault("risks", []).append("⚠️ Profile data missing")
-                continue
-                
+                            
             result["market_cap"] = market_cap
             result["float"] = float_shares
             if float_shares > 40_000_000 or market_cap > 800_000_000:
