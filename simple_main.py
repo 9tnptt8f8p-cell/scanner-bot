@@ -2817,12 +2817,14 @@ def run_scanner():
                 
             result["trap_runner"] = build_trade_bias(result)
             
+          
             print(f"[SEND TEST] {ticker} entering alert send", flush=True)
             
-            sent = send_alert(build_alert(result))
+            alert_msg = build_alert(result)
+            sent = send_alert(alert_msg)
             
             print(f"[SEND RESULT] {ticker} sent={sent}", flush=True)
-
+                        
             if sent:
                 if result.get("true_second_leg", False):
                     print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
@@ -2842,7 +2844,6 @@ def run_scanner():
                 print(f"[ALERT SENT] {ticker}", flush=True)
             
         time.sleep(SCAN_SLEEP)
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
@@ -2864,6 +2865,7 @@ if __name__ == "__main__":
     time.sleep(2)
 
     print("[BOOT] starting scanner", flush=True)
+
     run_scanner()
 
 
