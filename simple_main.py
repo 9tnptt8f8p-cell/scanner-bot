@@ -2454,7 +2454,13 @@ def run_scanner():
             continue
         
         # 🚫 SCORE FILTER
-        if result.get("score", 0) < 6 and not second_leg_alert:
+        elite_override = (
+            elite_score_alert
+            or result.get("clean_trend_runner", False)
+            or has_strong_news(result)
+        )
+        
+        if result.get("score", 0) < 6 and not second_leg_alert and not elite_override:
             print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
             continue
         
