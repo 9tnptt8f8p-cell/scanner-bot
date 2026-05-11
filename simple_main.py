@@ -1576,7 +1576,16 @@ def run_scanner():
         movers = get_percent_gainers()
         results = []
 
+        seen_tickers = set()
+
         for mover in movers:
+            ticker = mover.get("ticker", "").upper()
+
+            if ticker in seen_tickers:
+                continue
+
+            seen_tickers.add(ticker)
+
             bad_structure = False
             good_structure = False
             sec_risk = False
