@@ -21,7 +21,9 @@ def build_trade_bias(result):
 
     price = result.get("price_float", float(result.get("price", 0) or 0))
     vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
-    gain = float(result.get("gain", 0) or 0)
+    gain = float(
+        result.get("gain_percent", result.get("gain", 0)) or 0
+    )
     recent_volume = int(result.get("recent_volume", result.get("volume", 0)) or 0)
 
     above_vwap = False
@@ -1579,9 +1581,20 @@ def run_scanner():
             if finnhub_quote:
                 mover["price"] = finnhub_quote["price"]
                 mover["gain"] = finnhub_quote["gain"]
-                print(f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
+                mover["gain_percent"] = finnhub_quote["gain"]
+
+                print(
+                    f"[LIVE GAIN] {ticker} synced to {mover['gain']:.1f}%",
+                    flush=True
+                )
+
+                print(
+                    f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%",
+                    flush=True
+                )
             else:
                 print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
+
             if mover.get("volume", 0) == 0:
                 mover["volume"] = 500_000
 
@@ -1658,7 +1671,9 @@ def run_scanner():
                 result["coil_high"] = coil_high
                 result["volume_spike"] = volume_spike
                 
-                gain = float(result.get("gain", 0) or 0)
+                gain = float(
+                    result.get("gain_percent", result.get("gain", 0)) or 0
+                )
             
                 # --- SECOND LEG COIL SETUP ---
                 second_leg = (
@@ -1741,8 +1756,9 @@ def run_scanner():
             result["good_structure"] = good_structure
 
             recent_vol = result.get("recent_volume", 0)
-            gain = float(result.get("gain", 0) or 0)
-
+            gain = float(
+                result.get("gain_percent", result.get("gain", 0)) or 0
+            )
             has_higher_lows = (
                 result.get("higher_lows", False)
                 or result.get("has_higher_lows", False)
@@ -1913,8 +1929,10 @@ def run_scanner():
             price = result.get("price_float", float(result.get("price", 0) or 0))
             current_price = price
             vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
-            gain = float(result.get("gain", 0) or 0)
-            
+            gain = float(
+                result.get("gain_percent", result.get("gain", 0)) or 0
+            )
+                        
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
@@ -2182,7 +2200,9 @@ def run_scanner():
             
             volume_confirmed = has_volume_confirmation(result)
 
-            gain = float(result.get("gain", 0) or 0)
+            gain = float(
+                result.get("gain_percent", result.get("gain", 0)) or 0
+            )
             recent_high = float(result.get("recent_high", result.get("high", price)) or price)
             prev_vol = result.get("prev_volume", 0)
             
