@@ -1300,8 +1300,11 @@ def scrape_pr_headline(ticker):
         if now - cached_time < PR_CACHE_TTL_SECONDS:
             return cached_result
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    sources = [
+        f"https://www.prnewswire.com/search/news/?keyword={ticker}",
+    ]
 
+    headers = {"User-Agent": "Mozilla/5.0"}
     for url in sources:
         try:
             r = requests.get(url, headers=headers, timeout=3)
