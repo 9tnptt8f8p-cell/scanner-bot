@@ -1582,7 +1582,10 @@ def run_scanner():
                 mover["price"] = finnhub_quote["price"]
                 mover["gain"] = finnhub_quote["gain"]
                 mover["gain_percent"] = finnhub_quote["gain"]
-
+            # 🚫 Remove dead/flat movers after live Finnhub sync
+            if mover["gain"] < 5:
+                print(f"[FILTER] {ticker} skipped — live gain too weak {mover['gain']:.1f}%", flush=True)
+                continue
                 print(
                     f"[LIVE GAIN] {ticker} synced to {mover['gain']:.1f}%",
                     flush=True
