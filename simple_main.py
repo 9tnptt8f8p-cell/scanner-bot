@@ -2665,30 +2665,6 @@ def run_scanner():
                 print(f"[FILTER] {ticker} skipped — momentum decay", flush=True)
                 continue
             
-            if (
-                not result.get("a_plus_runner", False)
-                and not result.get("clean_trend_runner", False)
-                and not result.get("true_second_leg", False)
-                and not breakout_burst_alert
-                and not vwap_reclaim_setup
-                and not breakout_hold_setup
-                and not dip_buy_setup
-                and result.get("score", 0) < 7
-            ):
-                print(f"[FILTER] {ticker} skipped — not A+ runner", flush=True)
-                continue
-            
-            # 🚫 UNCLEAR SETUP FILTER
-            if (
-                result.get("trap_runner") == "🤔 UNCLEAR"
-                and not elite_score_alert
-                and not second_leg_alert
-                and not has_strong_news(result)
-                and not result.get("clean_trend_runner", False)
-            ):
-                print(f"[FILTER] {ticker} skipped — unclear setup", flush=True)
-                continue
-            
             # 🚫 TRAP FILTER
             if (
                 result.get("trap_runner") == "⚠️ TRAP RISK"
