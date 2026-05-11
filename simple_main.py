@@ -1934,7 +1934,22 @@ def run_scanner():
                 continue
 
             results.append(result)
-            time.sleep(0.05)
+            time.sleep(0.005)
+
+        # ✅ Remove duplicate tickers before ranking
+        seen = set()
+        deduped = []
+
+        for r in results:
+            t = r.get("ticker")
+
+            if not t or t in seen:
+                continue
+
+            seen.add(t)
+            deduped.append(r)
+
+        results = deduped
 
         results.sort(key=lambda x: x["score"], reverse=True)
 
