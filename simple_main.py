@@ -2373,7 +2373,7 @@ def run_scanner():
                 or vwap_reclaim_setup
             ):
                 continue
-            
+         
             should_alert = (
                 elite_score_alert
                 or valid_early_alert
@@ -2387,7 +2387,13 @@ def run_scanner():
                 or dip_buy_setup
                 or result.get("clean_trend_runner", False)
             )
-            
+            # ✅ Final elite fallback
+            if (
+                score >= 8
+                and gain >= 20
+                and above_vwap
+            ):
+                should_alert = True
             if elite_score_alert:
                 result["a_plus_runner"] = True
                 result["clean_trend_runner"] = True
