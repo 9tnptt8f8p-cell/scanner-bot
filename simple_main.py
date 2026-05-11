@@ -1364,7 +1364,7 @@ def find_real_news_headline(ticker, current_headline=""):
         url = f"https://finance.yahoo.com/quote/{ticker}/news/"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-       r = requests.get(url, headers=headers, timeout=3)
+        r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             links = soup.find_all("a")
