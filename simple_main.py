@@ -1962,9 +1962,6 @@ def run_scanner():
             
         print("[SCAN] Cycle complete", flush=True)
         print("[HEARTBEAT] alive", flush=True)
-        
-        print("[SCAN] Sleeping before next cycle", flush=True)
-        time.sleep(SCAN_SLEEP)
                 
         if results:
             top_line = " | ".join(
