@@ -2462,24 +2462,25 @@ def run_scanner():
         if not above_vwap and not second_leg_alert:
             print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
             continue
-        
-        current_price = float(result.get("price", 0))
-        last_alert = alert_history.get(ticker, 0)
+            
+            current_price = float(result.get("price", 0))
+            last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+
             # --- COOLDOWN LOGIC ---
             second_leg_bypass = second_leg_alert
-            
+
             if not cooldown_done and not second_leg_bypass:
                 print(f"[SKIP] {ticker} cooldown active", flush=True)
                 continue
-            
+
             if second_leg_bypass and not cooldown_done:
                 last_price = runner_prices.get(ticker, 0)
-            
+
                 if last_price > 0 and current_price <= last_price * 1.05:
                     print(f"[SKIP] {ticker} second leg not enough new high", flush=True)
                     continue
-            
+
                 print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
             
             if ticker not in first_alert_price and result.get("score", 0) >= 7:
