@@ -1582,22 +1582,28 @@ def run_scanner():
                 mover["price"] = finnhub_quote["price"]
                 mover["gain"] = finnhub_quote["gain"]
                 mover["gain_percent"] = finnhub_quote["gain"]
-            # 🚫 Remove dead/flat movers after live Finnhub sync
-            if mover["gain"] < 5:
-                print(f"[FILTER] {ticker} skipped — live gain too weak {mover['gain']:.1f}%", flush=True)
-                continue
+
                 print(
                     f"[LIVE GAIN] {ticker} synced to {mover['gain']:.1f}%",
                     flush=True
                 )
 
+                # 🚫 Kill dead/flat movers immediately after live sync
+                if mover["gain"] < 5:
+                    print(
+                        f"[FILTER] {ticker} skipped — live gain too weak {mover['gain']:.1f}%",
+                        flush=True
+                    )
+                    continue
+
                 print(
                     f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%",
                     flush=True
                 )
+
             else:
                 print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
-
+                
             if mover.get("volume", 0) == 0:
                 mover["volume"] = 500_000
 
