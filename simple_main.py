@@ -1303,11 +1303,6 @@ def scrape_pr_headline(ticker):
         if now - cached_time < PR_CACHE_TTL_SECONDS:
             return cached_result
 
-    sources = [
-        f"https://www.prnewswire.com/search/news/?keyword={ticker}",
-        f"https://www.globenewswire.com/search/keyword/{ticker}",
-    ]
-
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in sources:
@@ -1353,6 +1348,25 @@ def find_real_news_headline(ticker, current_headline=""):
 
         if now - cached["time"] < CACHE_TTL_SECONDS:
             return cached["data"]
+
+    # 🚫 Hard reject aggregator junk before anything else
+    headline_lower = str(current_headline or "").lower()
+
+    junk_phrases = [
+        "top gainers and losers",
+        "pre-market session",
+        "premarket session",
+        "market session",
+        "gainers and losers",
+        "stocks to watch today",
+        "insights into",
+        "get insights into",
+    ]
+
+    if any(x in headline_lower for x in junk_phrases):
+        current_headline = ""
+
+    quality = classify_news_quality(current_headline)
 
     quality = classify_news_quality(current_headline)
 
