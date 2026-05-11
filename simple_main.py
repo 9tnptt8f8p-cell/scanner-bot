@@ -1323,7 +1323,6 @@ def scrape_pr_headline(ticker):
                 quality = classify_news_quality(text)
 
                 if quality == "STRONG":
-                    print(f"[PR SCRAPE] {ticker}: {text}", flush=True)
                     PR_CACHE[cache_key] = (now, text)
                     return text
 
