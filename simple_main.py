@@ -1984,10 +1984,13 @@ def run_scanner():
             price = result.get("price_float", float(result.get("price", 0) or 0))
             current_price = price
             vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
+            
             gain = float(
                 result.get("gain_percent", result.get("gain", 0)) or 0
             )
-                        
+            
+            score = result.get("score", 0)
+            
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
             total_vol = result.get("total_candle_volume", 0)
