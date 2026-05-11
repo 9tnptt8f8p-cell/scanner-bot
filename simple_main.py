@@ -1914,16 +1914,16 @@ def run_scanner():
                 if "Trend builder setup / possible second leg" not in result["reasons"]:
                     result["reasons"].append("Trend builder setup / possible second leg")
             
-            elif result.get("good_structure", False):
+                    elif result.get("good_structure", False):
                 result["score"] = min(10, result["score"] + 2)
-            
+
                 if "✅ Clean structure confirmation" not in result["reasons"]:
                     result.setdefault("reasons", []).append("✅ Clean structure confirmation")
-            
+
             elif structure_score > 0 and not bad_structure:
                 result["score"] = min(10, result["score"] + structure_score)
-                                
-                result["score"] = max(0, min(result["score"], 10))
+
+            result["score"] = max(0, min(result["score"], 10))
 
             # 🚫 Final price filter before rankings
             price = float(result.get("price", 0) or 0)
