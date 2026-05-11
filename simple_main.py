@@ -1978,12 +1978,11 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
             
-        print(f"[SCAN SIZE] Processing {len(results)} tickers", flush=True)
-        
         results = results[:MAX_GAINERS]
-        
-        for rank, result in enumerate(results, start=1):
 
+        print(f"[SCAN SIZE] Processing {len(results)} tickers", flush=True)
+
+        for rank, result in enumerate(results, start=1):
             ticker = result["ticker"]
 
             price = result.get("price_float", float(result.get("price", 0) or 0))
