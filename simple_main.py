@@ -2465,7 +2465,7 @@ def run_scanner():
         
         current_price = float(result.get("price", 0))
         last_alert = alert_history.get(ticker, 0)
-        cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
+            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             # --- COOLDOWN LOGIC ---
             second_leg_bypass = second_leg_alert
             
