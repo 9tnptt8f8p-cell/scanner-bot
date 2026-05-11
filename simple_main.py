@@ -2268,24 +2268,24 @@ def run_scanner():
             recent_high = float(result.get("recent_high", result.get("high", price)) or price)
             prev_vol = result.get("prev_volume", 0)
             
-        valid_early_alert = (
-            (
-                gain >= 25
-                and result.get("score", 0) >= 6
-                and recent_vol >= 100_000
+            valid_early_alert = (
+                (
+                    gain >= 25
+                    and result.get("score", 0) >= 6
+                    and recent_vol >= 100_000
+                )
+                or
+                (
+                    gain >= 15
+                    and result.get("score", 0) >= 8
+                    and recent_vol >= 75_000
+                )
+            ) and (
+                price >= 0.50
+                and float_shares > 0
+                and market_cap > 0
+                and above_vwap
             )
-            or
-            (
-                gain >= 15
-                and result.get("score", 0) >= 8
-                and recent_vol >= 75_000
-            )
-        ) and (
-            price >= 0.50
-            and float_shares > 0
-            and market_cap > 0
-            and above_vwap
-        )
             
             # --- RUNNER CONFIRMATION FILTER ---
             breakout_confirmed = (
@@ -2301,90 +2301,93 @@ def run_scanner():
             not_extended = price <= recent_high * 1.03
             
             valid_runner_alert = (
-            gain >= ALERT_MIN_GAIN
-            and above_vwap
-            and (
-                breakout_confirmed
-                or volume_expanding
-                or has_strong_news(result)
+                gain >= ALERT_MIN_GAIN
+                and above_vwap
+                and (
+                    breakout_confirmed
+                    or volume_expanding
+                    or has_strong_news(result)
+                )
+                and not_extended
             )
-            and not_extended
-        )
-        # ===== SECOND LEG + BREAKOUT BURST =====
-        volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
-        
-        if volume_spike:
-            result = adjust_score(
-                result,
-                1,
-                reason="Volume surge"
+            
+            # ===== SECOND LEG + BREAKOUT BURST =====
+            volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
+            
+            if volume_spike:
+                result = adjust_score(
+                    result,
+                    1,
+                    reason="Volume surge"
+                )
+            
+            pullback = price < recent_high * 0.95
+            
+            breakout_burst_alert = (
+                gain >= 25
+                and price > recent_high
+                and volume_spike
             )
-        
-        pullback = price < recent_high * 0.95
-        
-        breakout_burst_alert = (
-            gain >= 25
-            and price > recent_high
-            and volume_spike
-        )
-        
-        # ===== ENTRY SETUP ALERTS =====
-        vwap_reclaim_setup = (
-            gain >= 15
-            and above_vwap
-            and recent_vol >= 75_000
-        )
-        
-        breakout_hold_setup = (
-            gain >= 20
-            and price >= recent_high * 0.98
-            and recent_vol >= 150_000
-        )
-        
-        dip_buy_setup = (
-            gain >= 20
-            and above_vwap
-            and pullback
-            and recent_vol >= 100_000
-        )
-        
-        trend_builder_alert = result.get("trend_builder_alert", False)
-        second_leg_alert = result.get("true_second_leg", False)
-        
-        elite_score_alert = (
-            score >= 8
-            and gain >= 15
-            and recent_vol >= 75_000
-            and price >= 0.50
-            and float_shares > 0
-            and market_cap > 0
-            and above_vwap
-        )
-        
-        if second_leg_alert:
-            print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
-        
-        if gain < 15 and not (
-            elite_score_alert
-            or early_momentum_alert
-            or trend_builder_alert
-            or second_leg_alert
-            or vwap_reclaim_setup
-        ):
-            continue
-           should_alert = (
-            elite_score_alert
-            or valid_early_alert
-            or valid_runner_alert
-            or early_momentum_alert
-            or trend_builder_alert
-            or second_leg_alert
-            or breakout_burst_alert
-            or vwap_reclaim_setup
-            or breakout_hold_setup
-            or dip_buy_setup
-            or result.get("clean_trend_runner", False)
-        )
+            
+            # ===== ENTRY SETUP ALERTS =====
+            vwap_reclaim_setup = (
+                gain >= 15
+                and above_vwap
+                and recent_vol >= 75_000
+            )
+            
+            breakout_hold_setup = (
+                gain >= 20
+                and price >= recent_high * 0.98
+                and recent_vol >= 150_000
+            )
+            
+            dip_buy_setup = (
+                gain >= 20
+                and above_vwap
+                and pullback
+                and recent_vol >= 100_000
+            )
+            
+            trend_builder_alert = result.get("trend_builder_alert", False)
+            second_leg_alert = result.get("true_second_leg", False)
+            
+            elite_score_alert = (
+                score >= 8
+                and gain >= 15
+                and recent_vol >= 75_000
+                and price >= 0.50
+                and float_shares > 0
+                and market_cap > 0
+                and above_vwap
+            )
+            
+            if second_leg_alert:
+                print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
+            
+            if gain < 15 and not (
+                elite_score_alert
+                or early_momentum_alert
+                or trend_builder_alert
+                or second_leg_alert
+                or vwap_reclaim_setup
+            ):
+                continue
+            
+            should_alert = (
+                elite_score_alert
+                or valid_early_alert
+                or valid_runner_alert
+                or early_momentum_alert
+                or trend_builder_alert
+                or second_leg_alert
+                or breakout_burst_alert
+                or vwap_reclaim_setup
+                or breakout_hold_setup
+                or dip_buy_setup
+                or result.get("clean_trend_runner", False)
+            )
+            
             if elite_score_alert:
                 result["a_plus_runner"] = True
                 result["clean_trend_runner"] = True
