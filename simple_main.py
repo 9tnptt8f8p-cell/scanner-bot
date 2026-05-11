@@ -1482,11 +1482,25 @@ def has_volume_confirmation(result, min_recent=75_000):
         recent_vol >= min_recent
         and recent_vol >= prev_vol
     )
-    
 def has_strong_news(result):
+    headline = str(result.get("headline", "") or "").lower()
+    catalyst = str(result.get("catalyst", "") or "").lower()
+    catalyst_type = str(result.get("catalyst_type", "") or "").lower()
+    news_quality = str(result.get("news_quality", "") or "").upper()
+
+    strong_words = [
+        "fda", "approval", "cleared", "clearance", "phase",
+        "positive data", "topline", "contract", "agreement",
+        "partnership", "purchase order", "merger", "acquisition",
+        "earnings", "guidance", "patent", "mou", "financing"
+    ]
+
+    text = f"{headline} {catalyst} {catalyst_type}"
+
     return (
-        has_strong_news(result)
-        or result.get("news_quality") == "STRONG"
+        news_quality == "STRONG"
+        or catalyst_type in ["strong", "contract", "fda", "earnings", "biotech", "merger"]
+        or any(word in text for word in strong_words)
     )
     
 def has_momentum_structure(result):
