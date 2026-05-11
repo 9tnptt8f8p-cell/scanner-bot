@@ -143,7 +143,7 @@ ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN = 600
 MAX_ALERTS_PER_CYCLE = 3
 
-MAX_GAINERS = 50
+MAX_GAINERS = 25
 ALERT_MIN_GAIN = 27
 MIN_VOLUME = 50_000
 MAX_PRICE = 100
@@ -437,8 +437,8 @@ def get_percent_gainers():
         + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]),
         flush=True
     )
-
-    return movers[:MAX_GAINERS]
+ 
+    return movers[:25]
 
 def get_yahoo_candles(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -1977,6 +1977,11 @@ def run_scanner():
             print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
             time.sleep(SCAN_SLEEP)
             continue
+            
+        print(f"[SCAN SIZE] Processing {len(results)} tickers", flush=True)
+        
+        results = results[:MAX_GAINERS]
+        
         for rank, result in enumerate(results, start=1):
 
             ticker = result["ticker"]
