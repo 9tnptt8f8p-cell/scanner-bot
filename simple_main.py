@@ -2003,10 +2003,14 @@ def run_scanner():
             structure_text = " ".join(
                 result.get("reasons", []) + result.get("risks", [])
             ).lower()
-
+            
+            # ✅ Weak early filter — but let elite ranked movers through
             if gain < 20 and recent_vol < 150_000:
-                print(f"[FILTER] {ticker} skipped — weak early", flush=True)
-                continue
+                if score >= 8 and gain >= 15:
+                    print(f"[OVERRIDE] {ticker} weak early allowed — elite score {score}/10", flush=True)
+                else:
+                    print(f"[FILTER] {ticker} skipped — weak early", flush=True)
+                    continue
 
             if float_shares > 40_000_000 or market_cap > 800_000_000:
                 print(f"[FILTER] {ticker} skipped early — too big", flush=True)
@@ -2261,15 +2265,24 @@ def run_scanner():
             recent_high = float(result.get("recent_high", result.get("high", price)) or price)
             prev_vol = result.get("prev_volume", 0)
             
-            valid_early_alert = (
+        valid_early_alert = (
+            (
                 gain >= 25
                 and result.get("score", 0) >= 6
                 and recent_vol >= 100_000
-                and price >= 0.50
-                and float_shares > 0
-                and market_cap > 0
-                and above_vwap
             )
+            or
+            (
+                gain >= 15
+                and result.get("score", 0) >= 8
+                and recent_vol >= 75_000
+            )
+        ) and (
+            price >= 0.50
+            and float_shares > 0
+            and market_cap > 0
+            and above_vwap
+        )
             
             # --- RUNNER CONFIRMATION FILTER ---
             breakout_confirmed = (
@@ -2294,117 +2307,131 @@ def run_scanner():
             )
             and not_extended
         )
-            
-            # ===== SECOND LEG + BREAKOUT BURST =====
-            volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
-            
+        # ===== SECOND LEG + BREAKOUT BURST =====
+        volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
+        
         if volume_spike:
             result = adjust_score(
                 result,
                 1,
                 reason="Volume surge"
             )
-            
-            pullback = price < recent_high * 0.95
-            
-            breakout_burst_alert = (
-                gain >= 25
-                and price > recent_high
-                and volume_spike
-            )
-            
-            # ===== ENTRY SETUP ALERTS =====
-            vwap_reclaim_setup = (
-                gain >= 15
-                and above_vwap
+        
+        pullback = price < recent_high * 0.95
+        
+        breakout_burst_alert = (
+            gain >= 25
+            and price > recent_high
+            and volume_spike
+        )
+        
+        # ===== ENTRY SETUP ALERTS =====
+        vwap_reclaim_setup = (
+            gain >= 15
+            and above_vwap
+            and recent_vol >= 75_000
+        )
+        
+        breakout_hold_setup = (
+            gain >= 20
+            and price >= recent_high * 0.98
+            and recent_vol >= 150_000
+        )
+        
+        dip_buy_setup = (
+            gain >= 20
+            and above_vwap
+            and pullback
+            and recent_vol >= 100_000
+        )
+        
+        trend_builder_alert = result.get("trend_builder_alert", False)
+        second_leg_alert = result.get("true_second_leg", False)
+        
+        elite_score_alert = (
+            score >= 8
+            and gain >= 15
+            and recent_vol >= 75_000
+            and price >= 0.50
+            and float_shares > 0
+            and market_cap > 0
+            and above_vwap
+        )
+        
+        if second_leg_alert:
+            print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
+        
+        if gain < 15 and not (
+            elite_score_alert
+            or early_momentum_alert
+            or trend_builder_alert
+            or second_leg_alert
+            or vwap_reclaim_setup
+        ):
+            continue
+           should_alert = (
+            elite_score_alert
+            or valid_early_alert
+            or valid_runner_alert
+            or early_momentum_alert
+            or trend_builder_alert
+            or second_leg_alert
+            or breakout_burst_alert
+            or vwap_reclaim_setup
+            or breakout_hold_setup
+            or dip_buy_setup
+            or result.get("clean_trend_runner", False)
+        )
+            if elite_score_alert:
+                result["a_plus_runner"] = True
+                result["clean_trend_runner"] = True
+                result.setdefault("reasons", []).append("Elite score momentum setup")
+        # --- STRONG NEWS OVERRIDE ---
+        if (
+            has_strong_news(result)
+            and gain >= 25
+            and above_vwap
+            and not result.get("bad_structure", False)
+        ):
+            should_alert = True
+        
+        # --- TRUE SECOND LEG LOGIC ---
+        if second_leg_alert:
+            tight_second_leg_title = (
+                price >= recent_high * 0.97
                 and recent_vol >= 150_000
+                and has_higher_lows
             )
-            
-            breakout_hold_setup = (
-                gain >= 20
-                and price >= recent_high * 0.98
-                and recent_vol >= 200_000
-            )
-            
-            dip_buy_setup = (
-                gain >= 20
-                and above_vwap
-                and pullback
-                and recent_vol >= 150_000
-            )
-            trend_builder_alert = result.get("trend_builder_alert", False)
-            second_leg_alert = result.get("true_second_leg", False)
-            
-            if second_leg_alert:
-                print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
-            
-            if gain < 20 and not (
-                early_momentum_alert
-                or trend_builder_alert
-                or second_leg_alert
-                or vwap_reclaim_setup
-            ):
-                continue
-            
-            should_alert = (
-                valid_early_alert
-                or valid_runner_alert
-                or early_momentum_alert
-                or trend_builder_alert
-                or second_leg_alert
+        
+            if tight_second_leg_title:
+                if "Second leg building" not in result.get("reasons", []):
+                    result.setdefault("reasons", []).append("Second leg building")
+        
+                if "Runner watch" not in result.get("reasons", []):
+                    result.setdefault("reasons", []).append("Runner watch")
+        
+        # 🚫 MOMENTUM DECAY FILTER
+        if result.get("momentum_decay", False):
+        
+            strong_override = (
+                result.get("clean_trend_runner", False)
                 or breakout_burst_alert
+                or second_leg_alert
                 or vwap_reclaim_setup
-                or breakout_hold_setup
-                or dip_buy_setup
-                or result.get("clean_trend_runner", False)
             )
-            
-            # --- STRONG NEWS OVERRIDE ---
-            if (
-                has_strong_news(result)
-                and gain >= 25
-                and above_vwap
-                and not result.get("bad_structure", False)
-            ):
-                should_alert = True
-            
-            # --- TRUE SECOND LEG LOGIC ---
-            if second_leg_alert:
-                tight_second_leg_title = (
-                    price >= recent_high * 0.97
-                    and recent_vol >= 150_000
-                    and has_higher_lows
-                )
-            
-                if tight_second_leg_title:
-                    if "Second leg building" not in result.get("reasons", []):
-                        result.setdefault("reasons", []).append("Second leg building")
-            
-                    if "Runner watch" not in result.get("reasons", []):
-                        result.setdefault("reasons", []).append("Runner watch")
-            
-            # 🚫 MOMENTUM DECAY FILTER
-            if result.get("momentum_decay", False):
-            
-                strong_override = (
-                    result.get("clean_trend_runner", False)
-                    or breakout_burst_alert
-                    or second_leg_alert
-                    or vwap_reclaim_setup
-                )
-            
-                if not strong_override:
-                    print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
-                    continue
-            
-            sec_risk = False
-            sec_note = "SEC check skipped — low score"
-            
-            if result.get("score", 0) >= 6:
-                sec_risk, sec_note = check_sec_offering_risk(ticker)
-            
-            result["sec_note"] = sec_note
-            
+        
+            if not strong_override:
+                print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
+                continue
+        
+        sec_risk = False
+        sec_note = "SEC check skipped — low score"
+        
+        if result.get("score", 0) >= 6:
+            sec_risk, sec_note = check_sec_offering_risk(ticker)
+        
+        result["sec_note"] = sec_note
+        
         if sec_risk:
             if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
                 result = adjust_score(
@@ -2414,26 +2441,25 @@ def run_scanner():
                 )
             else:
                 result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
-            
-            # --- FINAL ALERT BLOCKERS ---
-            if not should_alert:
-                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
-                continue
-            
-            # 🚫 SCORE FILTER
-            if result.get("score", 0) < 6 and not second_leg_alert:
-                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
-                continue
-            
-            # 🚫 BASIC STRUCTURE FILTER
-            if not above_vwap and not second_leg_alert:
-                print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
-                continue
-            
-            current_price = float(result.get("price", 0))
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-            
+        
+        # --- FINAL ALERT BLOCKERS ---
+        if not should_alert:
+            print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
+            continue
+        
+        # 🚫 SCORE FILTER
+        if result.get("score", 0) < 6 and not second_leg_alert:
+            print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
+            continue
+        
+        # 🚫 BASIC STRUCTURE FILTER
+        if not above_vwap and not second_leg_alert:
+            print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
+            continue
+        
+        current_price = float(result.get("price", 0))
+        last_alert = alert_history.get(ticker, 0)
+        cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
             # --- COOLDOWN LOGIC ---
             second_leg_bypass = second_leg_alert
             
@@ -2617,6 +2643,7 @@ def run_scanner():
             # 🚫 UNCLEAR SETUP FILTER
             if (
                 result.get("trap_runner") == "🤔 UNCLEAR"
+                and not elite_score_alert
                 and not second_leg_alert
                 and not has_strong_news(result)
                 and not result.get("clean_trend_runner", False)
@@ -2648,25 +2675,27 @@ def run_scanner():
             
             # 🚫 NO-NEWS FILTER
             if no_news and not (
-            second_leg_alert
-            or result.get("clean_trend_runner", False)
-            or result.get("trend_builder_alert", False)
-            or (
-                above_vwap
-                and has_higher_lows
-                and result.get("recent_volume", 0) >= 150_000
-                and float_shares <= 20_000_000
-            )
-        ):
+                elite_score_alert
+                or second_leg_alert
+                or result.get("clean_trend_runner", False)
+                or result.get("trend_builder_alert", False)
+                or (
+                    above_vwap
+                    and has_higher_lows
+                    and result.get("recent_volume", 0) >= 150_000
+                    and float_shares <= 20_000_000
+                )
+            ):
                 print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
                 continue
-        
-            # --- RUNNER STRUCTURE FILTER ---
-           
-            structure_text = " ".join(
-                result.get("reasons", []) + result.get("risks", [])
-            ).lower()
-            
+            if (
+                not elite_score_alert
+                and not good_structure
+                and not result.get("second_leg", False)
+                and not has_strong_news(result)
+            ):
+                print(f"[FILTER] {ticker} failed runner structure", flush=True)
+                continue
                     # --- MOMENTUM DECAY ENGINE ---
             recent_vol = result.get("recent_volume", 0)
             prev_vol = result.get("prev_volume", 0)
