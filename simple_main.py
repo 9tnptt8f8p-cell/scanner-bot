@@ -1050,7 +1050,15 @@ BAD_NEWS_KEYWORDS = [
     "gapping stocks",
     "most active stocks",
     "gap-ups and gap-downs",
-]
+    "top gainers and losers",
+    "pre-market session",
+    "premarket session",
+    "market session",
+    "gainers and losers",
+    "stocks to watch today",
+    "insights into",
+    "get insights into",
+    ]
 
 STRONG_KEYWORDS = [
     "fda", "approval", "approved", "clearance", "cleared", "510(k)",
@@ -1592,7 +1600,17 @@ def run_scanner():
                         flush=True
                     )
                     continue
-
+                    
+                # 🚫 Kill bad price range before scoring/ranking/news
+                live_price = float(mover.get("price", 0) or 0)
+                
+                if live_price < 0.50 or live_price > 80:
+                    print(
+                        f"[FILTER] {ticker} skipped — price ${live_price:.2f} outside range",
+                        flush=True
+                    )
+                    continue
+                    
                 print(
                     f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%",
                     flush=True
