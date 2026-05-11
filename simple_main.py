@@ -2818,7 +2818,8 @@ def run_scanner():
                 runner_prices[ticker] = current_price
 
                 print(f"[ALERT SENT] {ticker}", flush=True)
-            
+
+        print("[SCAN] Sleeping before next cycle", flush=True)
         time.sleep(SCAN_SLEEP)
 
 if __name__ == "__main__":
