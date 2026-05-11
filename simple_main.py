@@ -1408,8 +1408,6 @@ def find_real_news_headline(ticker, current_headline=""):
     if pr_headline:
         pr_quality = classify_news_quality(pr_headline)
 
-        print(f"[PR SCRAPE] {ticker}: {pr_headline}", flush=True)
-
         data = (pr_headline, pr_quality)
 
         NEWS_CACHE[ticker] = {
