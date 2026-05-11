@@ -1292,6 +1292,7 @@ def detect_offering_risk(text, price=0):
     return risks
     
 def scrape_pr_headline(ticker):
+
     now = time.time()
     cache_key = ticker.upper()
 
@@ -1922,7 +1923,7 @@ def run_scanner():
             elif structure_score > 0 and not bad_structure:
                 result["score"] = min(10, result["score"] + structure_score)
                                 
-                   result["score"] = max(0, min(result["score"], 10))
+                result["score"] = max(0, min(result["score"], 10))
 
             # 🚫 Final price filter before rankings
             price = float(result.get("price", 0) or 0)
