@@ -2795,8 +2795,14 @@ def run_scanner():
             if ticker in runner_prices and not meaningful_change:
                 print(f"[SKIP] {ticker} repeat alert without meaningful change", flush=True)
                 continue
+                
             result["trap_runner"] = build_trade_bias(result)
+            
+            print(f"[SEND TEST] {ticker} entering alert send", flush=True)
+            
             sent = send_alert(build_alert(result))
+            
+            print(f"[SEND RESULT] {ticker} sent={sent}", flush=True)
 
             if sent:
                 if result.get("true_second_leg", False):
