@@ -2417,83 +2417,83 @@ def run_scanner():
                 result["a_plus_runner"] = True
                 result["clean_trend_runner"] = True
                 result.setdefault("reasons", []).append("Elite score momentum setup")
-        # --- STRONG NEWS OVERRIDE ---
-        if (
-            has_strong_news(result)
-            and gain >= 25
-            and above_vwap
-            and not result.get("bad_structure", False)
-        ):
-            should_alert = True
-        
-        # --- TRUE SECOND LEG LOGIC ---
-        if second_leg_alert:
-            tight_second_leg_title = (
-                price >= recent_high * 0.97
-                and recent_vol >= 150_000
-                and has_higher_lows
-            )
-        
-            if tight_second_leg_title:
-                if "Second leg building" not in result.get("reasons", []):
-                    result.setdefault("reasons", []).append("Second leg building")
-        
-                if "Runner watch" not in result.get("reasons", []):
-                    result.setdefault("reasons", []).append("Runner watch")
-        
-        # 🚫 MOMENTUM DECAY FILTER
-        if result.get("momentum_decay", False):
-        
-            strong_override = (
-                result.get("clean_trend_runner", False)
-                or breakout_burst_alert
-                or second_leg_alert
-                or vwap_reclaim_setup
-            )
-        
-            if not strong_override:
-                print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
-                continue
-        
-        sec_risk = False
-        sec_note = "SEC check skipped — low score"
-        
-        if result.get("score", 0) >= 6:
-            sec_risk, sec_note = check_sec_offering_risk(ticker)
-        
-        result["sec_note"] = sec_note
-        
-        if sec_risk:
-            if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
-                result = adjust_score(
-                    result,
-                    -2,
-                    risk=f"🚨 Active dilution filing: {sec_note}"
-                )
-            else:
-                result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
-        
-        # --- FINAL ALERT BLOCKERS ---
-        if not should_alert:
-            print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
-            continue
-        
-        # 🚫 SCORE FILTER
-        elite_override = (
-            elite_score_alert
-            or result.get("clean_trend_runner", False)
-            or has_strong_news(result)
-        )
-        
-        if result.get("score", 0) < 6 and not second_leg_alert and not elite_override:
-            print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
-            continue
-        
-        # 🚫 BASIC STRUCTURE FILTER
-        if not above_vwap and not second_leg_alert:
-            print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
-            continue
+            # --- STRONG NEWS OVERRIDE ---
+            if (
+                has_strong_news(result)
+                and gain >= 25
+                and above_vwap
+                and not result.get("bad_structure", False)
+            ):
+                should_alert = True
             
+            # --- TRUE SECOND LEG LOGIC ---
+            if second_leg_alert:
+                tight_second_leg_title = (
+                    price >= recent_high * 0.97
+                    and recent_vol >= 150_000
+                    and has_higher_lows
+                )
+            
+                if tight_second_leg_title:
+                    if "Second leg building" not in result.get("reasons", []):
+                        result.setdefault("reasons", []).append("Second leg building")
+            
+                    if "Runner watch" not in result.get("reasons", []):
+                        result.setdefault("reasons", []).append("Runner watch")
+            
+            # 🚫 MOMENTUM DECAY FILTER
+            if result.get("momentum_decay", False):
+            
+                strong_override = (
+                    result.get("clean_trend_runner", False)
+                    or breakout_burst_alert
+                    or second_leg_alert
+                    or vwap_reclaim_setup
+                )
+            
+                if not strong_override:
+                    print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
+                    continue
+            
+            sec_risk = False
+            sec_note = "SEC check skipped — low score"
+            
+            if result.get("score", 0) >= 6:
+                sec_risk, sec_note = check_sec_offering_risk(ticker)
+            
+            result["sec_note"] = sec_note
+            
+            if sec_risk:
+                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                    result = adjust_score(
+                        result,
+                        -2,
+                        risk=f"🚨 Active dilution filing: {sec_note}"
+                    )
+                else:
+                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
+            
+            # --- FINAL ALERT BLOCKERS ---
+            if not should_alert:
+                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
+                continue
+            
+            # 🚫 SCORE FILTER
+            elite_override = (
+                elite_score_alert
+                or result.get("clean_trend_runner", False)
+                or has_strong_news(result)
+            )
+            
+            if result.get("score", 0) < 6 and not second_leg_alert and not elite_override:
+                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
+                continue
+            
+            # 🚫 BASIC STRUCTURE FILTER
+            if not above_vwap and not second_leg_alert:
+                print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
+                continue
+                
             current_price = float(result.get("price", 0))
             last_alert = alert_history.get(ticker, 0)
             cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
