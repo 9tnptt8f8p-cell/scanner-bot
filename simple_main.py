@@ -1391,7 +1391,7 @@ def find_real_news_headline(ticker, current_headline=""):
         url = f"https://finance.yahoo.com/quote/{ticker}/news/"
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        r = requests.get(url, headers=headers, timeout=3)
+        r = requests.get(url, headers=headers, timeout=1)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             links = soup.find_all("a")
@@ -1428,19 +1428,17 @@ def find_real_news_headline(ticker, current_headline=""):
     except Exception as e:
         print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
         
-    # 🔎 Try PR fallback only for alert-worthy names
-    should_pr_scrape = (
-        ticker
-        and current_headline
-        and classify_news_quality(current_headline) in ["NONE", "JUNK"]
-    )
-    
-    if not should_pr_scrape:
-        data = (current_headline, "NONE")
-        NEWS_CACHE[ticker] = {"time": now, "data": data}
-        return data
-    
-    pr_headline = scrape_pr_headline(ticker)
+       # 🔎 Try PR fallback only for higher-quality candidates
+    should_pr_scrape = False
+
+    # TEMP simple version: only scrape PR if no usable headline
+    if quality in ["NONE", "JUNK"]:
+        should_pr_scrape = True
+
+    if should_pr_scrape:
+        pr_headline = scrape_pr_headline(ticker)
+    else:
+        pr_headline = ""
 
     if pr_headline:
         pr_quality = classify_news_quality(pr_headline)
