@@ -1311,7 +1311,7 @@ def scrape_pr_headline(ticker):
     headers = {"User-Agent": "Mozilla/5.0"}
     for url in sources:
         try:
-            r = requests.get(url, headers=headers, timeout=3)
+            r = requests.get(url, headers=headers, timeout=1)
 
             if r.status_code != 200:
                 continue
@@ -1427,8 +1427,19 @@ def find_real_news_headline(ticker, current_headline=""):
 
     except Exception as e:
         print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
-
-    # 🔎 Try PR fallback
+        
+    # 🔎 Try PR fallback only for alert-worthy names
+    should_pr_scrape = (
+        ticker
+        and current_headline
+        and classify_news_quality(current_headline) in ["NONE", "JUNK"]
+    )
+    
+    if not should_pr_scrape:
+        data = (current_headline, "NONE")
+        NEWS_CACHE[ticker] = {"time": now, "data": data}
+        return data
+    
     pr_headline = scrape_pr_headline(ticker)
 
     if pr_headline:
