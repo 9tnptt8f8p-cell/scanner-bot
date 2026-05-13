@@ -1235,44 +1235,52 @@ def apply_clean_scoring(result):
 
 def classify_alert_tier(result, rank):
     """
-    v7 balanced behavior layer:
+    v9 behavior layer:
     RUNNER = trade-quality structure.
     MAJOR MOVER = huge mover awareness even if not a perfect entry.
     WATCH = developing / pullback / VWAP reclaim watch.
-    AVOID = truly broken, illiquid, or deep below VWAP.
+    AVOID = only truly broken, deep below VWAP, or too weak.
+
+    Important: CHOP/MIXED/HOT regime is awareness only. It should never globally
+    disable alerts, because strong momentum names can appear even in mixed tape.
     """
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
     above_vwap = bool(result.get("above_vwap", True))
-    near_high = bool(result.get("near_high"))
     high_rank = rank <= 15
     no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
-    vwap_distance = safe_float(result.get("vwap_distance"))
     momentum_decay = bool(result.get("momentum_decay"))
+    deep_vwap_loss = bool(result.get("deep_vwap_loss"))
 
-    active_volume = recent_vol >= 75_000 or day_vol >= 750_000
+    active_volume = recent_vol >= 50_000 or day_vol >= 500_000
     strong_active_mover = gain >= 25 and active_volume
-    monster_mover = high_rank and gain >= 50 and day_vol >= 750_000
+    monster_mover = high_rank and gain >= 50 and day_vol >= 500_000
+    big_ranked_mover = high_rank and gain >= 25 and day_vol >= 300_000
+    tradable_watch_mover = gain >= 15 and active_volume and score >= 3
 
-    # Only hard block truly broken charts. A normal pullback/decay candle becomes WATCH, not invisible.
+    # Hard avoid should only catch truly broken setups. Do NOT hard-block a major
+    # top gainer only because structure text contains one warning or decay=True.
     hard_bad_structure = bool(result.get("bad_structure")) and not (
         result.get("true_second_leg")
         or result.get("clean_trend_runner")
         or result.get("fresh_high_after_vwap_hold")
         or monster_mover
+        or (strong_active_mover and score >= 5)
+        or (big_ranked_mover and score >= 4)
     )
 
-    # Do not call every VWAP slip an avoid. Only deep VWAP loss is a hard avoid.
-    hard_lost_vwap = bool(result.get("deep_vwap_loss")) and not monster_mover
+    hard_lost_vwap = deep_vwap_loss and not (
+        monster_mover
+        or (strong_active_mover and score >= 5)
+        or (big_ranked_mover and score >= 4)
+    )
 
     if hard_bad_structure or hard_lost_vwap:
-        if monster_mover and score >= 5:
-            return "MAJOR MOVER"
         return "AVOID"
 
-    # Best trade-quality alerts.
+    # Trade-quality alerts.
     if result.get("true_second_leg"):
         return "RUNNER"
 
@@ -1282,45 +1290,51 @@ def classify_alert_tier(result, rank):
     if result.get("massive_no_news_runner") and score >= 7:
         return "RUNNER"
 
-    if score >= 8 and gain >= 20 and above_vwap and recent_vol >= 100_000:
+    if score >= 8 and gain >= 20 and above_vwap and active_volume:
         return "RUNNER"
 
-    # Major mover awareness: do not let top gainers disappear just because setup is not perfect.
-    if high_rank and gain >= 75 and score >= 4 and day_vol >= 500_000:
+    # Major mover awareness: top gainers should not disappear just because they
+    # are not clean entries yet. This is an awareness/watchlist alert, not a buy call.
+    if monster_mover and score >= 4:
         return "MAJOR MOVER"
 
-    if gain >= 50 and score >= 5 and day_vol >= 750_000:
+    if high_rank and gain >= 75 and score >= 3 and day_vol >= 300_000:
         return "MAJOR MOVER"
 
-    if score >= 8 and gain >= 30 and day_vol >= 500_000:
+    if gain >= 50 and score >= 4 and day_vol >= 500_000:
         return "MAJOR MOVER"
 
-    # Softer decay handling: faded strong movers become WATCH instead of full suppression.
-    if momentum_decay and strong_active_mover and not bool(result.get("deep_vwap_loss")):
+    if score >= 7 and gain >= 30 and day_vol >= 300_000:
+        return "MAJOR MOVER"
+
+    # Decay no longer hides strong names. It downgrades them to WATCH.
+    if momentum_decay and strong_active_mover:
         return "WATCH"
 
-    # Shallow VWAP pullback on a major gainer = visible WATCH, not invisible.
-    if bool(result.get("shallow_vwap_slip")) and high_rank and gain >= 25 and score >= 4 and active_volume:
+    if momentum_decay and above_vwap and gain >= 15 and score >= 3 and active_volume:
         return "WATCH"
 
-    # Watch tier: not an entry call, but important enough to see.
-    if high_rank and gain >= 25 and day_vol >= 300_000 and score >= 4:
+    # Watch tier: developing names / pullback names / reclaim-watch names.
+    if big_ranked_mover and score >= 4:
         return "WATCH"
 
-    if gain >= 25 and score >= 5 and active_volume:
+    if gain >= 25 and score >= 4 and active_volume:
         return "WATCH"
 
-    if gain >= 15 and above_vwap and active_volume and score >= 3:
+    if gain >= 20 and above_vwap and score >= 3 and active_volume:
         return "WATCH"
 
-    if score >= 7 and gain >= 20:
+    if tradable_watch_mover and above_vwap:
         return "WATCH"
 
-    if score >= 6 and gain >= 35 and day_vol >= 500_000 and not no_news:
+    if score >= 6 and gain >= 25:
         return "WATCH"
+
+    # Weak/no-news low-score names stay quiet.
+    if no_news and score < 4 and gain < 25:
+        return "AVOID"
 
     return "AVOID"
-
 
 def title_for_tier(result, tier):
     if tier == "AVOID":
@@ -1448,25 +1462,30 @@ def build_compact_alert(result):
 
 
 def detect_market_regime(results):
+    """
+    v9 regime detector based on actual live movers, not just internal score.
+    Regime is an awareness label only; it should not suppress alerts.
+    """
     if not results:
         return "UNKNOWN"
 
-    strong = 0
-    mid = 0
+    top = results[:20]
 
-    for r in results[:10]:
-        if r.get("score", 0) >= 8:
-            strong += 1
-        elif r.get("score", 0) >= 6:
-            mid += 1
+    big_runners = sum(1 for r in top if safe_float(r.get("gain")) >= 25)
+    active_runners = sum(
+        1 for r in top
+        if safe_float(r.get("gain")) >= 15
+        and (safe_int(r.get("volume")) >= 500_000 or safe_int(r.get("recent_volume")) >= 50_000)
+    )
+    quality_setups = sum(1 for r in top if safe_int(r.get("score")) >= 7)
 
-    if strong >= 3:
+    if big_runners >= 5 or (big_runners >= 3 and quality_setups >= 1):
         return "HOT"
 
-    if strong == 0 and mid <= 2:
-        return "CHOP"
+    if big_runners >= 2 or active_runners >= 4 or quality_setups >= 1:
+        return "MIXED"
 
-    return "MIXED"
+    return "CHOP"
 
 
 # ============================================================
