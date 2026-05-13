@@ -1962,11 +1962,11 @@ def run_scanner():
                 if result.get("score", 0) >= 6 or result.get("rank", 99) <= 10:
                     sec_risk, sec_note = check_sec_offering_risk(ticker)
                     result["sec_note"] = sec_note
-                    if sec_risk:
-                        if any(form in sec_note for form in ["S-1", "S-3", "F-1", "F-3", "424B"]):
-                            result = adjust_score(result, -2, risk=f"🚨 Active dilution filing: {sec_note}")
-                        else:
-                            result.setdefault("risks", []).append(f"⚠️ Filing detected: {sec_note}")
+                if sec_risk:
+                    if any(form in sec_note for form in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                        result.setdefault("risks", []).append(f"🚨 Active dilution filing: {sec_note}")
+                    else:
+                        result.setdefault("risks", []).append(f"⚠️ Filing detected: {sec_note}")
 
                 filing_text = result.get("sec_note", "") + " " + result.get("catalyst_text", "")
                 extra_risks = detect_offering_risk(filing_text, price=float(result.get("price", 0) or 0)) or []
