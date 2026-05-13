@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v14 — clean tiers + stricter cooldown + leader/entry engine"
+BOOT_MARKER = "elite scanner rebuild v15 — compact alerts + hard 6 floor + rare elite 10s"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -37,7 +37,7 @@ SCAN_SLEEP = 90
 # 1. Surface true market leaders.
 # 2. Still separate elite entry setups from awareness alerts.
 ALERT_MIN_GAIN = 25
-MIN_ALERT_SCORE = 5
+MIN_ALERT_SCORE = 6
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 LEADER_MIN_GAIN = 40
@@ -55,7 +55,7 @@ BLOCK_FADING_WATCH_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
 MIN_RE_ALERT_SECONDS = 300
-MAX_ALERTS_PER_CYCLE = 5
+MAX_ALERTS_PER_CYCLE = 4
 
 MAX_GAINERS = 70
 MIN_VOLUME = 50_000
@@ -1412,6 +1412,56 @@ def compute_leader_entry_scores(result):
     return result
 
 
+def enforce_score_quality_boundaries(result):
+    """
+    V15 score discipline:
+    - 10/10 must be rare and clean.
+    - Big gain alone cannot create a 10.
+    - Bad entry quality caps the final score.
+    """
+    score = safe_int(result.get("score"))
+    entry_score = safe_int(result.get("entry_score"))
+    above_vwap = bool(result.get("above_vwap", True))
+
+    elite_structure = bool(
+        above_vwap
+        and entry_score >= 8
+        and not result.get("momentum_decay")
+        and not result.get("bad_structure")
+        and not result.get("deep_vwap_loss")
+        and (
+            result.get("true_second_leg")
+            or result.get("fresh_leader_ignition")
+            or result.get("leader_reclaim")
+            or (
+                result.get("clean_trend_runner")
+                and result.get("near_high")
+                and result.get("volume_expanding")
+            )
+        )
+    )
+
+    # Make 10s matter. If it is not elite/clean, it cannot stay 10.
+    if score >= 10 and not elite_structure:
+        score = 9
+
+    # Entry quality caps score. Important movers can still alert as LEADER,
+    # but they should not look like elite entries.
+    if entry_score <= 4:
+        score = min(score, 7)
+    elif entry_score <= 5:
+        score = min(score, 8)
+
+    if result.get("momentum_decay") or result.get("bad_structure") or result.get("deep_vwap_loss"):
+        score = min(score, 8)
+
+    if not above_vwap:
+        score = min(score, 7)
+
+    result["score"] = max(0, min(score, 10))
+    return result
+
+
 def apply_clean_scoring(result):
     score = int(result.get("score", 0) or 0)
 
@@ -1419,22 +1469,22 @@ def apply_clean_scoring(result):
 
     if result.get("market_leader"):
         score += 1
-        add_unique(result.setdefault("reasons", []), "🔥 Market leader / heavy tape")
+        add_unique(result.setdefault("reasons", []), "Market leader / heavy tape")
 
     if result.get("fresh_leader_ignition"):
         score += 2
-        add_unique(result.setdefault("reasons", []), "🚀 Fresh leader ignition")
+        add_unique(result.setdefault("reasons", []), "Fresh leader ignition")
 
     if result.get("leader_reclaim"):
         score += 2
-        add_unique(result.setdefault("reasons", []), "🟢 Leader VWAP reclaim")
+        add_unique(result.setdefault("reasons", []), "Leader VWAP reclaim")
 
     if result.get("rvol_label"):
         add_unique(result.setdefault("reasons", []), result.get("rvol_label"))
 
     if result.get("clean_trend_runner"):
         score += 2
-        add_unique(result.setdefault("reasons", []), "📈 Clean trend runner")
+        add_unique(result.setdefault("reasons", []), "Clean trend runner")
 
     if result.get("true_second_leg"):
         score += 2
@@ -1449,10 +1499,10 @@ def apply_clean_scoring(result):
         add_unique(result.setdefault("reasons", []), "No-news volume runner")
 
     if result.get("momentum_decay"):
-        add_unique(result.setdefault("risks", []), "⚠️ Momentum decay / wait for reclaim")
+        add_unique(result.setdefault("risks", []), "Momentum decay / wait for reclaim")
 
     if result.get("midday_chop_risk"):
-        add_unique(result.setdefault("risks", []), "⚠️ Midday chop / volume fade risk")
+        add_unique(result.setdefault("risks", []), "Midday chop / volume fade risk")
 
     if result.get("above_vwap") is False:
         if result.get("vwap_distance", 0) <= -5:
@@ -1462,6 +1512,7 @@ def apply_clean_scoring(result):
 
     result["score"] = max(0, min(score, 10))
     result = compute_leader_entry_scores(result)
+    result = enforce_score_quality_boundaries(result)
     return compact_reasons(result)
 
 
@@ -1475,8 +1526,13 @@ def passes_master_alert_gate(result):
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
 
+    # V15 hard rule: no phone alerts under 6. Period.
+    if score < MIN_ALERT_SCORE:
+        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
+
     leader_override = bool(
-        gain >= LEADER_MIN_GAIN
+        score >= MIN_ALERT_SCORE
+        and gain >= LEADER_MIN_GAIN
         and (
             day_vol >= LEADER_MIN_DAY_VOLUME
             or recent_vol >= LEADER_MIN_RECENT_VOLUME
@@ -1487,9 +1543,6 @@ def passes_master_alert_gate(result):
 
     if gain < ALERT_MIN_GAIN and not leader_override:
         return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
-
-    if score < MIN_ALERT_SCORE and not leader_override:
-        return False, f"score {score}/10 under {MIN_ALERT_SCORE}/10 floor"
 
     if not active_volume and not leader_override:
         return False, "not enough active volume"
@@ -1509,39 +1562,37 @@ def classify_alert_tier(result, rank):
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
-    # True entry-quality setups come before generic leader awareness.
-    if result.get("fresh_leader_ignition") and score >= 7:
+    # Damaged structure can only be LEADER awareness, not RUNNER/WATCH.
+    if deep_vwap_loss or bad_structure:
+        if result.get("market_leader") and score >= 6:
+            return "LEADER"
+        return "AVOID"
+
+    if not above_vwap and not result.get("leader_reclaim"):
+        if result.get("market_leader") and score >= 6:
+            return "LEADER"
+        return "AVOID"
+
+    # RUNNER = tradeable, clean entry-quality setup.
+    if score >= 7 and entry_score >= 6 and (
+        result.get("fresh_leader_ignition")
+        or result.get("leader_reclaim")
+        or result.get("true_second_leg")
+        or result.get("clean_trend_runner")
+        or result.get("fresh_high_after_vwap_hold")
+        or result.get("massive_no_news_runner")
+    ):
         return "RUNNER"
 
-    if result.get("leader_reclaim") and score >= 7:
+    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap and entry_score >= 7:
         return "RUNNER"
 
-    if result.get("true_second_leg") and score >= 7:
-        return "RUNNER"
-
-    if result.get("clean_trend_runner") and score >= 7:
-        return "RUNNER"
-
-    if result.get("fresh_high_after_vwap_hold") and score >= 7:
-        return "RUNNER"
-
-    if result.get("massive_no_news_runner") and score >= 7 and entry_score >= 6:
-        return "RUNNER"
-
-    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap and entry_score >= 6:
-        return "RUNNER"
-
-    # Market leaders still surface as awareness even when entry is not clean.
-    if result.get("market_leader"):
+    # Market leaders can still surface as awareness, but only at score 6+.
+    if result.get("market_leader") and score >= 6:
         return "LEADER"
 
-    # Hard damaged structure blocks weak WATCH alerts.
-    if deep_vwap_loss or bad_structure:
-        if not (score >= 8 and entry_score >= 6):
-            return "AVOID"
-
-    # Cleaner watch rule: no weak/noisy watch alerts.
-    if score >= 5 and gain >= ALERT_MIN_GAIN and entry_score >= 5:
+    # WATCH = score 6+ but not clean enough for runner yet.
+    if score >= 6 and gain >= ALERT_MIN_GAIN and entry_score >= 5:
         return "WATCH"
 
     return "AVOID"
@@ -1687,7 +1738,60 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     return False, "no meaningful change"
 
 
+def first_matching_reason(result):
+    preferred = [
+        "Fresh leader ignition",
+        "Leader VWAP reclaim",
+        "Second leg continuation",
+        "Fresh high after VWAP hold",
+        "Clean trend runner",
+        "No-news volume runner",
+        "Market leader / heavy tape",
+        "Volume expanding",
+        "RVOL",
+        "Price above VWAP",
+        "Higher lows",
+    ]
+
+    reasons = result.get("reasons", []) or []
+    for pref in preferred:
+        for reason in reasons:
+            if pref.lower() in str(reason).lower():
+                return str(reason).replace("🔥 ", "").replace("🟢 ", "").replace("📈 ", "").strip()
+
+    return str(reasons[0]).strip() if reasons else "Momentum watch"
+
+
+def first_matching_risk(result):
+    risks = result.get("risks", []) or []
+    if not risks:
+        return "None obvious"
+
+    preferred = [
+        "dilution",
+        "offering",
+        "warrant",
+        "momentum decay",
+        "midday chop",
+        "upper wick",
+        "below vwap",
+        "no confirmed catalyst",
+        "float unknown",
+    ]
+
+    for pref in preferred:
+        for risk in risks:
+            if pref in str(risk).lower():
+                return str(risk).strip()
+
+    return str(risks[0]).strip()
+
+
 def build_compact_alert(result):
+    """
+    V15 phone alert: no long Why/Status/Bias sections.
+    Title + stats + catalyst + setup + entry + risk.
+    """
     result = compact_reasons(result)
 
     float_shares = safe_float(result.get("float"))
@@ -1696,32 +1800,30 @@ def build_compact_alert(result):
     news_quality = result.get("news_quality", "UNKNOWN")
     catalyst_line = result.get("catalyst_text") or "No fresh catalyst found"
 
-    reasons = "\n".join(f"• {x}" for x in result.get("reasons", [])[:5]) or "• Momentum watch"
-    risks = "\n".join(f"• {x}" for x in result.get("risks", [])[:4]) or "• None obvious"
-
     if news_quality in ["NONE", "UNKNOWN", "JUNK"]:
-        news_header = "❌ NO CONFIRMED NEWS"
+        news_header = "❌ No confirmed news"
+        catalyst_line = "Technical momentum only"
     elif news_quality == "STRONG":
-        news_header = "⚡ STRONG NEWS"
+        news_header = "⚡ Strong news"
     else:
-        news_header = "⚠️ WEAK/UNCLEAR NEWS"
+        news_header = "⚠️ Weak/unclear news"
 
     tier = result.get("alert_tier", "WATCH")
     title = result.get("title", title_for_tier(result, tier))
 
+    setup_line = first_matching_reason(result)
+    risk_line = first_matching_risk(result)
+    entry_line = result.get("entry_hint", "Wait for confirmation")
+
     return (
         f"{title}\n\n"
-        f"{result['ticker']} | Score: {result['score']}/10 | {tier}\n"
-        f"Leader: {safe_int(result.get('leader_score'))}/10 | Entry: {safe_int(result.get('entry_score'))}/10\n"
-        f"Price: ${safe_float(result.get('price')):.4f}\n"
-        f"Gain: {safe_float(result.get('gain')):.1f}%\n"
-        f"Float: {float_text}\n\n"
-        f"Catalyst: {news_header}\n"
-        f"{catalyst_line}\n\n"
-        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
-        f"Entry: {result.get('entry_hint', 'Wait for confirmation')}\n\n"
-        f"Why:\n{reasons}\n\n"
-        f"Risk / Awareness:\n{risks}"
+        f"{result['ticker']} | {result['score']}/10 | {tier} | "
+        f"${safe_float(result.get('price')):.4f} | +{safe_float(result.get('gain')):.1f}% | Float {float_text}\n"
+        f"Leader {safe_int(result.get('leader_score'))}/10 | Entry {safe_int(result.get('entry_score'))}/10\n"
+        f"Catalyst: {news_header} — {catalyst_line}\n\n"
+        f"Setup: {setup_line}\n"
+        f"Entry: {entry_line}\n"
+        f"Risk: {risk_line}"
     )
 
 
@@ -2042,7 +2144,7 @@ def run_scanner():
             msg = build_compact_alert(result)
 
             print(
-                f"[SEND] {ticker} tier={tier} score={result['score']} "
+                f"[SEND] {ticker} tier={result.get('alert_tier')} score={result['score']} "
                 f"gain={safe_float(result.get('gain')):.1f}% reason={reason}",
                 flush=True,
             )
