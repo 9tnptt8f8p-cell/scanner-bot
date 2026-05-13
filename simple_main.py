@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v15 — compact alerts + hard 6 floor + rare elite 10s"
+BOOT_MARKER = "elite scanner rebuild v16 — deduped tape + strict news + clean 6+ alerts"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,7 +33,7 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# V14 ALERT PHILOSOPHY:
+# V16 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
 # 2. Still separate elite entry setups from awareness alerts.
 ALERT_MIN_GAIN = 25
@@ -115,6 +115,30 @@ BAD_NEWS_KEYWORDS = [
     "here are 20 stocks moving",
     "most active stocks",
 ]
+
+BAD_PR_MATCH_PHRASES = [
+    "market global forecast",
+    "global forecast",
+    "industry report",
+    "research report",
+    "market report",
+    "market size",
+    "featuring",
+    "replacement vacuum",
+    "introduces rvi",
+    "clinical study on",
+    "non- stim",
+    "non-stim",
+    "pr newswire",
+]
+
+AMBIGUOUS_TICKERS_REQUIRE_COMPANY = {
+    # These symbols can also be common words/acronyms in unrelated PRs.
+    "BESS": ["bess", "battery", "storage"],
+    "GUTS": ["guts"],
+    "STIM": ["stim", "non-stim", "stimulation"],
+    "RVI": ["rvi", "vacuum interrupter"],
+}
 
 WEAK_NEWS_OVERRIDES = [
     "investor alert",
@@ -410,6 +434,36 @@ def get_nasdaq_gainers():
         return []
 
 
+def dedupe_movers(movers):
+    """Keep one row per ticker before any expensive quote/news/profile calls."""
+    deduped = {}
+
+    for mover in movers or []:
+        ticker = str(mover.get("ticker", "")).upper().strip()
+
+        if not ticker or is_bad_ticker(ticker):
+            continue
+
+        mover["ticker"] = ticker
+        gain = safe_float(mover.get("gain", mover.get("gain_percent", 0)))
+        old = deduped.get(ticker)
+
+        if not old:
+            deduped[ticker] = mover
+            continue
+
+        old_gain = safe_float(old.get("gain", old.get("gain_percent", 0)))
+        old_volume = safe_int(old.get("volume"))
+        volume = safe_int(mover.get("volume"))
+
+        if gain > old_gain or (gain == old_gain and volume > old_volume):
+            deduped[ticker] = mover
+
+    cleaned = list(deduped.values())
+    cleaned.sort(key=lambda x: safe_float(x.get("gain", x.get("gain_percent", 0))), reverse=True)
+    return cleaned
+
+
 def get_percent_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -467,10 +521,9 @@ def get_percent_gainers():
         if not old or m.get("gain", 0) > old.get("gain", 0):
             all_movers[ticker] = m
 
-    movers = list(all_movers.values())
-    movers.sort(key=lambda x: x["gain"], reverse=True)
+    movers = dedupe_movers(list(all_movers.values()))
 
-    print(f"[GAINERS] Found {len(movers)} scan candidates over {SCAN_MIN_GAIN}%", flush=True)
+    print(f"[GAINERS] Found {len(movers)} deduped scan candidates over {SCAN_MIN_GAIN}%", flush=True)
     print("[GAINERS] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:20]]), flush=True)
 
     return movers[:max(MAX_GAINERS, 100)]
@@ -685,7 +738,7 @@ def get_news_catalyst(ticker):
 
 
 def clean_headline(text):
-    text = str(text or "").strip()
+    text = re.sub(r"\s+", " ", str(text or "").strip())
     if not text:
         return ""
 
@@ -693,7 +746,47 @@ def clean_headline(text):
     if any(x in lower for x in BAD_NEWS_KEYWORDS):
         return ""
 
+    if any(x in lower for x in BAD_PR_MATCH_PHRASES):
+        return ""
+
     return text
+
+
+def looks_like_stale_pr(text):
+    """Reject old PR dates when scrape pages surface stale results."""
+    lower = str(text or "").lower()
+    stale_years = ["2025", "2024", "2023", "2022", "2021"]
+    return any(year in lower for year in stale_years)
+
+
+def valid_scraped_headline(ticker, text):
+    ticker = str(ticker or "").upper().strip()
+    text = clean_headline(text)
+
+    if not text or len(text) < 35:
+        return False
+
+    lower = text.lower()
+
+    # Reject company-name-only / symbol-only page fragments.
+    if lower in {ticker.lower(), f"{ticker.lower()} stock", f"{ticker.lower()} news"}:
+        return False
+
+    # Reject stale PR pages like Oct 2025 results.
+    if looks_like_stale_pr(text):
+        return False
+
+    # Ticker must appear as a clean standalone token.
+    if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
+        return False
+
+    # Symbols that are also generic words/acronyms need stronger evidence.
+    if ticker in AMBIGUOUS_TICKERS_REQUIRE_COMPANY:
+        words = AMBIGUOUS_TICKERS_REQUIRE_COMPANY[ticker]
+        if any(w in lower for w in words) and "nasdaq" not in lower and "inc" not in lower and "corp" not in lower and "ltd" not in lower:
+            return False
+
+    return True
 
 
 def scrape_pr_headline(ticker):
@@ -714,22 +807,21 @@ def scrape_pr_headline(ticker):
 
     for url in sources:
         try:
-            r = requests.get(url, headers=headers, timeout=2)
+            r = requests.get(url, headers=headers, timeout=3)
             if r.status_code != 200:
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
 
             for tag in soup.find_all(["a", "h1", "h2", "h3"]):
-                text = clean_headline(tag.get_text(" ", strip=True))
+                text = tag.get_text(" ", strip=True)
 
-                if not text or len(text) < 25:
+                if not valid_scraped_headline(ticker, text):
                     continue
 
-                if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
-                    continue
-
+                text = clean_headline(text)
                 quality = classify_news_quality(text)
+
                 if quality in ["STRONG", "WEAK"]:
                     PR_CACHE[cache_key] = (now, text)
                     print(f"[PR SCRAPE] {ticker}: {text} ({quality})", flush=True)
@@ -740,7 +832,6 @@ def scrape_pr_headline(ticker):
 
     PR_CACHE[cache_key] = (now, "")
     return ""
-
 
 def find_real_news_headline(ticker, current_headline=""):
     now = time.time()
@@ -768,14 +859,12 @@ def find_real_news_headline(ticker, current_headline=""):
             soup = BeautifulSoup(r.text, "html.parser")
 
             for link in soup.find_all("a"):
-                text = clean_headline(link.get_text(" ", strip=True))
+                raw_text = link.get_text(" ", strip=True)
 
-                if not text or len(text) < 25:
+                if not valid_scraped_headline(ticker, raw_text):
                     continue
 
-                if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
-                    continue
-
+                text = clean_headline(raw_text)
                 scraped_quality = classify_news_quality(text)
                 if scraped_quality in ["STRONG", "WEAK"]:
                     print(f"[NEWS SCRAPE] {ticker}: {text} ({scraped_quality})", flush=True)
@@ -1592,7 +1681,7 @@ def classify_alert_tier(result, rank):
         return "LEADER"
 
     # WATCH = score 6+ but not clean enough for runner yet.
-    if score >= 6 and gain >= ALERT_MIN_GAIN and entry_score >= 5:
+    if score >= MIN_ALERT_SCORE and gain >= ALERT_MIN_GAIN and entry_score >= 5:
         return "WATCH"
 
     return "AVOID"
@@ -1880,7 +1969,7 @@ def run_scanner():
         print("[SCAN] Market active — refreshing top gainers", flush=True)
 
         session = get_market_session()
-        movers = get_percent_gainers()
+        movers = dedupe_movers(get_percent_gainers())
         movers = sorted(movers, key=lambda x: safe_float(x.get("gain")), reverse=True)[:MAX_GAINERS]
 
         print(
@@ -1925,6 +2014,17 @@ def run_scanner():
                 if volume <= 0:
                     mover["volume"] = 500_000
 
+                # Cheap profile filter BEFORE slow news/PR scraping.
+                market_cap, float_shares = get_finnhub_profile(ticker)
+
+                if market_cap and market_cap > MAX_MARKET_CAP:
+                    print(f"[FILTER] {ticker} market cap over 1B", flush=True)
+                    continue
+
+                if float_shares and float_shares > MAX_FLOAT_SHARES:
+                    print(f"[FILTER] {ticker} float too high {float_shares:,.0f}", flush=True)
+                    continue
+
                 catalyst_type, catalyst_text = get_news_catalyst(ticker)
                 headline, news_quality = find_real_news_headline(ticker, catalyst_text)
 
@@ -1934,6 +2034,8 @@ def run_scanner():
                 result["catalyst_text"] = headline
                 result["news_quality"] = news_quality
                 result["session"] = session
+                result["market_cap"] = market_cap
+                result["float"] = float_shares
 
                 if news_quality == "STRONG":
                     result["catalyst_type"] = "⚡ STRONG NEWS"
@@ -1943,18 +2045,6 @@ def run_scanner():
                     result["catalyst_type"] = "🚫 JUNK NEWS"
                 else:
                     result["catalyst_type"] = "❌ NO NEWS"
-
-                market_cap, float_shares = get_finnhub_profile(ticker)
-                result["market_cap"] = market_cap
-                result["float"] = float_shares
-
-                if market_cap and market_cap > MAX_MARKET_CAP:
-                    print(f"[FILTER] {ticker} market cap over 1B", flush=True)
-                    continue
-
-                if float_shares and float_shares > MAX_FLOAT_SHARES:
-                    print(f"[FILTER] {ticker} float too high {float_shares:,.0f}", flush=True)
-                    continue
 
                 if not float_shares:
                     add_unique(result.setdefault("risks", []), "⚠️ Float unknown")
