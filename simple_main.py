@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v5 — clean tiers + fresh runners + awareness-only dilution"
+BOOT_MARKER = "elite scanner rebuild v6 — balanced alert tiers + major mover awareness"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,7 +33,7 @@ SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
 ALERT_COOLDOWN_SECONDS = 900
-MAX_ALERTS_PER_CYCLE = 5
+MAX_ALERTS_PER_CYCLE = 6
 
 MAX_GAINERS = 60
 MIN_VOLUME = 50_000
@@ -1216,37 +1216,66 @@ def apply_clean_scoring(result):
 
 def classify_alert_tier(result, rank):
     """
-    Clean 3-type logic:
-    RUNNER = best trade-quality setup.
-    WATCH = important mover / developing setup.
-    AVOID = blocked or risky.
+    Balanced tier logic:
+    RUNNER = trade-quality structure.
+    MAJOR MOVER = big market-awareness name that should not disappear.
+    WATCH = developing setup / important mover.
+    AVOID = truly broken, faded, or unsafe structure.
     """
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
+    above_vwap = bool(result.get("above_vwap", True))
+    near_high = bool(result.get("near_high"))
+    high_rank = rank <= 15
     no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
 
-    if result.get("bad_structure") and not result.get("true_second_leg"):
+    hard_bad_structure = bool(result.get("bad_structure")) and not (
+        result.get("true_second_leg")
+        or result.get("clean_trend_runner")
+        or result.get("fresh_high_after_vwap_hold")
+    )
+
+    hard_lost_vwap = bool(result.get("lost_vwap")) and safe_float(result.get("vwap_distance")) <= -2.0
+
+    # True avoids only. Do not bury a monster mover just because volume faded for one cycle.
+    if hard_bad_structure or hard_lost_vwap:
+        if score >= 8 and gain >= 50 and day_vol >= 2_000_000 and high_rank:
+            return "MAJOR MOVER"
         return "AVOID"
 
-    if result.get("momentum_decay") and not result.get("fresh_high_after_vwap_hold") and not result.get("true_second_leg"):
-        return "AVOID"
-
-    if result.get("true_second_leg") or result.get("clean_trend_runner"):
+    # Best trade-quality alerts.
+    if result.get("true_second_leg"):
         return "RUNNER"
 
-    if result.get("massive_no_news_runner"):
+    if result.get("clean_trend_runner") and score >= 7:
         return "RUNNER"
 
-    if score >= 8 and gain >= 20 and result.get("above_vwap") and recent_vol >= 100_000:
+    if result.get("massive_no_news_runner") and score >= 7:
         return "RUNNER"
 
-    # Awareness tier prevents major top gainers from disappearing.
-    if rank <= 12 and gain >= 25 and day_vol >= 1_000_000 and result.get("above_vwap") and recent_vol >= 60_000:
+    if score >= 8 and gain >= 20 and above_vwap and recent_vol >= 100_000:
+        return "RUNNER"
+
+    # Major mover awareness tier: fixes missed WOK/BWEN/HTCO-style names.
+    if high_rank and gain >= 75 and score >= 6 and day_vol >= 750_000:
+        return "MAJOR MOVER"
+
+    if gain >= 50 and score >= 7 and day_vol >= 1_000_000:
+        return "MAJOR MOVER"
+
+    if score >= 8 and gain >= 35 and day_vol >= 750_000:
+        return "MAJOR MOVER"
+
+    # Watch tier: not an entry call, but important enough to see.
+    if high_rank and gain >= 25 and day_vol >= 500_000 and score >= 5:
         return "WATCH"
 
-    if score >= 7 and gain >= 20 and result.get("above_vwap") and not no_news:
+    if score >= 7 and gain >= 20 and above_vwap:
+        return "WATCH"
+
+    if score >= 6 and gain >= 35 and day_vol >= 1_000_000 and not no_news:
         return "WATCH"
 
     return "AVOID"
@@ -1270,12 +1299,19 @@ def title_for_tier(result, tier):
         return "🟢 RUNNER — CLEAN TREND"
     if tier == "RUNNER":
         return "🟢 RUNNER"
+    if tier == "MAJOR MOVER":
+        return "🟠 MAJOR MOVER — WATCH"
 
     return "🟡 WATCH"
 
 
 def setup_bias_and_entry(result):
-    if result.get("momentum_decay"):
+    tier = result.get("alert_tier", "WATCH")
+
+    if tier == "MAJOR MOVER":
+        result["trap_runner"] = "🟠 Major mover / awareness"
+        result["entry_hint"] = "Do not chase blind — wait for VWAP hold, pullback, or fresh high confirmation"
+    elif result.get("momentum_decay"):
         result["trap_runner"] = "🔴 Avoid / faded"
         result["entry_hint"] = "Wait for VWAP reclaim + volume to return"
     elif result.get("bad_structure"):
@@ -1618,7 +1654,7 @@ def run_scanner():
             tier = classify_alert_tier(result, safe_int(result.get("rank", 99)))
 
             if tier == "AVOID":
-                print(f"[NO ALERT] {ticker} avoided — tier filter", flush=True)
+                print(f"[NO ALERT] {ticker} avoided — tier filter score={result.get('score')} gain={safe_float(result.get('gain')):.1f}% above_vwap={result.get('above_vwap')} decay={result.get('momentum_decay')}", flush=True)
                 continue
 
             result = setup_bias_and_entry(result)
