@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v11 — strict meaningful alerts only"
+BOOT_MARKER = "elite scanner rebuild v12 — market leaders + elite entry engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,16 +33,24 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# HARD PHONE ALERT RULES
-ALERT_MIN_GAIN = 27
+# V12 ALERT PHILOSOPHY:
+# 1. Surface true market leaders.
+# 2. Still separate elite entry setups from awareness alerts.
+ALERT_MIN_GAIN = 15
 MIN_ALERT_SCORE = 5
 MIN_ALERT_RECENT_VOLUME = 75_000
-BLOCK_FADING_WATCH_ALERTS = True
+
+LEADER_MIN_GAIN = 40
+LEADER_MIN_DAY_VOLUME = 2_000_000
+LEADER_MIN_RECENT_VOLUME = 150_000
+
+# Do not hard-block fading leaders. Downgrade the title/bias instead.
+BLOCK_FADING_WATCH_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
-MAX_ALERTS_PER_CYCLE = 4
+MAX_ALERTS_PER_CYCLE = 5
 
-MAX_GAINERS = 60
+MAX_GAINERS = 70
 MIN_VOLUME = 50_000
 MAX_PRICE = 100
 MIN_PRICE = 0.50
@@ -270,6 +278,7 @@ def dedupe_phrases(items):
         "volume_fade": ["volume fading", "momentum weakening"],
         "volume_expand": ["volume expanding", "momentum increasing"],
         "dilution": ["dilution", "offering", "warrant", "shelf", "atm"],
+        "leader": ["market leader", "leaderboard"],
     }
 
     for item in items or []:
@@ -940,6 +949,9 @@ def score_mover(mover, catalyst_type, catalyst_text):
     elif gain >= 27:
         score += 2
         reasons.append("27%+ momentum mover")
+    elif gain >= 15:
+        score += 1
+        reasons.append("15%+ active mover")
 
     if volume >= 20_000_000:
         score += 4
@@ -1120,6 +1132,7 @@ def compute_momentum_flags(result):
 
     recent_vol = safe_int(result.get("recent_volume"))
     prev_vol = safe_int(result.get("prev_volume"))
+    day_vol = safe_int(result.get("volume"))
     gain = safe_float(result.get("gain"))
 
     has_vwap = vwap > 0
@@ -1177,6 +1190,14 @@ def compute_momentum_flags(result):
         or (volume_fading and not above_vwap and not has_higher_lows and not result.get("near_high"))
     )
 
+    result["market_leader"] = bool(
+        gain >= LEADER_MIN_GAIN
+        and (
+            day_vol >= LEADER_MIN_DAY_VOLUME
+            or recent_vol >= LEADER_MIN_RECENT_VOLUME
+        )
+    )
+
     result["clean_trend_runner"] = bool(
         gain >= ALERT_MIN_GAIN
         and above_vwap
@@ -1205,7 +1226,7 @@ def compute_momentum_flags(result):
     result["massive_no_news_runner"] = bool(
         result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
         and gain >= 35
-        and result.get("volume", 0) >= 2_000_000
+        and day_vol >= 2_000_000
         and recent_vol >= 150_000
         and above_vwap
         and (has_higher_lows or breakout or result.get("near_high"))
@@ -1216,6 +1237,10 @@ def compute_momentum_flags(result):
 
 def apply_clean_scoring(result):
     score = int(result.get("score", 0) or 0)
+
+    if result.get("market_leader"):
+        score += 1
+        add_unique(result.setdefault("reasons", []), "🔥 Market leader / heavy tape")
 
     if result.get("clean_trend_runner"):
         score += 2
@@ -1234,11 +1259,9 @@ def apply_clean_scoring(result):
         add_unique(result.setdefault("reasons", []), "No-news volume runner")
 
     if result.get("momentum_decay"):
-        score -= 1
         add_unique(result.setdefault("risks", []), "⚠️ Momentum decay / wait for reclaim")
 
     if result.get("above_vwap") is False:
-        score -= 1
         add_unique(result.setdefault("risks", []), "Below VWAP")
 
     result["score"] = max(0, min(score, 10))
@@ -1250,32 +1273,29 @@ def apply_clean_scoring(result):
 # ============================================================
 
 def passes_master_alert_gate(result):
-    ticker = result.get("ticker", "UNKNOWN")
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
-    volume_fading = bool(result.get("volume_fading"))
+
+    leader_override = bool(
+        gain >= LEADER_MIN_GAIN
+        and (
+            day_vol >= LEADER_MIN_DAY_VOLUME
+            or recent_vol >= LEADER_MIN_RECENT_VOLUME
+        )
+    )
 
     active_volume = recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000
 
-    if gain < ALERT_MIN_GAIN:
+    if gain < ALERT_MIN_GAIN and not leader_override:
         return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
 
-    if score < MIN_ALERT_SCORE:
+    if score < MIN_ALERT_SCORE and not leader_override:
         return False, f"score {score}/10 under {MIN_ALERT_SCORE}/10 floor"
 
-    if not active_volume:
+    if not active_volume and not leader_override:
         return False, "not enough active volume"
-
-    if BLOCK_FADING_WATCH_ALERTS and volume_fading:
-        if not (
-            result.get("true_second_leg")
-            or result.get("clean_trend_runner")
-            or result.get("fresh_high_after_vwap_hold")
-            or score >= 8
-        ):
-            return False, "volume fading — weak watch blocked"
 
     return True, "passed"
 
@@ -1291,6 +1311,9 @@ def classify_alert_tier(result, rank):
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
+    if result.get("market_leader"):
+        return "LEADER"
+
     if deep_vwap_loss or bad_structure:
         if not (
             result.get("true_second_leg")
@@ -1305,16 +1328,16 @@ def classify_alert_tier(result, rank):
     if result.get("clean_trend_runner") and score >= 7:
         return "RUNNER"
 
+    if result.get("fresh_high_after_vwap_hold") and score >= 7:
+        return "RUNNER"
+
     if result.get("massive_no_news_runner") and score >= 7:
         return "RUNNER"
 
     if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
         return "RUNNER"
 
-    if score >= 7 and gain >= 30:
-        return "MAJOR MOVER"
-
-    if score >= 5 and gain >= ALERT_MIN_GAIN and above_vwap:
+    if score >= 5 and gain >= ALERT_MIN_GAIN:
         return "WATCH"
 
     return "AVOID"
@@ -1328,14 +1351,20 @@ def title_for_tier(result, tier):
             return "🔴 AVOID — TRAP RISK"
         return "🔴 AVOID"
 
-    if tier == "MAJOR MOVER":
-        return "🟠 MAJOR MOVER — WATCH"
+    if tier == "LEADER":
+        if result.get("momentum_decay"):
+            return "🔥 MARKET LEADER — PULLBACK WATCH"
+        if result.get("above_vwap"):
+            return "🔥 MARKET LEADER"
+        return "🔥 MARKET LEADER — RECLAIM WATCH"
 
     if tier == "WATCH":
         if result.get("fresh_high_after_vwap_hold"):
             return "🟡 WATCH — VWAP HOLD"
         if result.get("massive_no_news_runner"):
             return "🟡 WATCH — NO-NEWS VOLUME"
+        if result.get("momentum_decay"):
+            return "🟡 WATCH — PULLBACK"
         return "🟡 WATCH"
 
     if result.get("true_second_leg"):
@@ -1353,9 +1382,12 @@ def title_for_tier(result, tier):
 def setup_bias_and_entry(result):
     tier = result.get("alert_tier", "WATCH")
 
-    if tier == "MAJOR MOVER":
-        result["trap_runner"] = "🟠 Major mover / awareness"
-        result["entry_hint"] = "Do not chase blind — wait for VWAP hold, pullback, or fresh high confirmation"
+    if tier == "LEADER":
+        result["trap_runner"] = "🔥 Market leader / awareness first"
+        if result.get("above_vwap"):
+            result["entry_hint"] = "Leader tape — wait for VWAP hold, higher low, or fresh high confirmation"
+        else:
+            result["entry_hint"] = "Leader below VWAP — wait for reclaim before entry"
     elif result.get("true_second_leg"):
         result["trap_runner"] = "🟢 Runner watch"
         result["entry_hint"] = "Second leg — watch hold over VWAP/recent high"
@@ -1393,7 +1425,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if last_time == 0:
         return True, "first alert"
 
-    if not cooldown_done and not result.get("true_second_leg"):
+    if not cooldown_done and not result.get("true_second_leg") and not result.get("market_leader"):
         return False, "cooldown active"
 
     if last_price and current_price >= last_price * 1.03:
@@ -1407,6 +1439,9 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 
     if result.get("true_second_leg") and last_price and current_price >= last_price * 1.02:
         return True, "second leg new high"
+
+    if result.get("market_leader") and cooldown_done and last_price and current_price >= last_price * 1.015:
+        return True, "leader continuation"
 
     return False, "no meaningful change"
 
@@ -1461,11 +1496,12 @@ def detect_market_regime(results):
         and (safe_int(r.get("volume")) >= 500_000 or safe_int(r.get("recent_volume")) >= 50_000)
     )
     quality_setups = sum(1 for r in top if safe_int(r.get("score")) >= 7)
+    leaders = sum(1 for r in top if r.get("market_leader"))
 
-    if big_runners >= 5 or (big_runners >= 3 and quality_setups >= 1):
+    if leaders >= 2 or big_runners >= 5 or (big_runners >= 3 and quality_setups >= 1):
         return "HOT"
 
-    if big_runners >= 2 or active_runners >= 4 or quality_setups >= 1:
+    if leaders >= 1 or big_runners >= 2 or active_runners >= 4 or quality_setups >= 1:
         return "MIXED"
 
     return "CHOP"
@@ -1477,7 +1513,12 @@ def detect_market_regime(results):
 
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print(f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | alerts require {ALERT_MIN_GAIN}%+ and {MIN_ALERT_SCORE}/10+", flush=True)
+    print(
+        f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
+        f"leaders require {LEADER_MIN_GAIN}%+ / heavy tape | "
+        f"alerts require {ALERT_MIN_GAIN}%+ or leader override",
+        flush=True,
+    )
 
     alert_history = {}
     runner_prices = {}
@@ -1629,7 +1670,7 @@ def run_scanner():
                 sec_risk = False
                 sec_note = ""
 
-                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 12:
+                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 12 or result.get("market_leader"):
                     sec_risk, sec_note = check_sec_offering_risk(ticker)
                     result["sec_note"] = sec_note
 
@@ -1658,11 +1699,13 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
+        # V12: leaders first, then gain, then active tape, then score.
         results.sort(
             key=lambda r: (
-                safe_int(r.get("score")),
+                r.get("market_leader", False),
                 safe_float(r.get("gain")),
                 safe_int(r.get("recent_volume")),
+                safe_int(r.get("score")),
             ),
             reverse=True,
         )
@@ -1673,7 +1716,8 @@ def run_scanner():
             r["market_regime"] = regime
 
         top_line = " | ".join(
-            f"#{r.get('rank')} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
+            f"#{r.get('rank')} {r['ticker']} {r['score']}/10 {r['gain']:.1f}% "
+            f"{'LEADER' if r.get('market_leader') else ''}"
             for r in results[:10]
         )
 
@@ -1729,7 +1773,8 @@ def run_scanner():
             msg = build_compact_alert(result)
 
             print(
-                f"[SEND] {ticker} tier={tier} score={result['score']} gain={safe_float(result.get('gain')):.1f}% reason={reason}",
+                f"[SEND] {ticker} tier={tier} score={result['score']} "
+                f"gain={safe_float(result.get('gain')):.1f}% reason={reason}",
                 flush=True,
             )
 
