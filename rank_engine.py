@@ -45,16 +45,13 @@ def rank_result(result):
     elif news_quality == "WEAK":
         score -= 1
     elif news_quality == "NEGATIVE":
-        score -= 3
+        score -= 2
 
     # Risk penalties
-    if "dilution" in risks_text or "offering" in risks_text or "warrant" in risks_text:
-        score -= 3
-
     if "below vwap" in risks_text:
         score -= 2
 
     if "upper wick" in risks_text or "trap" in risks_text:
-        score -= 2
+        score -= 1
 
     return max(0, score)
