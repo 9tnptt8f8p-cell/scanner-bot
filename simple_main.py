@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v13 — 25% alerts + leader/entry scores + reclaim engine"
+BOOT_MARKER = "elite scanner rebuild v14 — clean tiers + stricter cooldown + leader/entry engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,7 +33,7 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# V12 ALERT PHILOSOPHY:
+# V14 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
 # 2. Still separate elite entry setups from awareness alerts.
 ALERT_MIN_GAIN = 25
@@ -54,6 +54,7 @@ MIDDAY_CHOP_END = dtime(14, 0)
 BLOCK_FADING_WATCH_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
+MIN_RE_ALERT_SECONDS = 300
 MAX_ALERTS_PER_CYCLE = 5
 
 MAX_GAINERS = 70
@@ -255,8 +256,12 @@ def is_above_vwap(price, vwap):
 
 
 def detect_bad_structure(structure_text):
-    bad_keywords = [
-        "below vwap",
+    """
+    Hard bad structure only.
+    Soft warnings like 'below VWAP / reclaim watch' should not automatically
+    poison the ticker into AVOID.
+    """
+    hard_bad_keywords = [
         "upper wick",
         "trap",
         "failed",
@@ -267,9 +272,20 @@ def detect_bad_structure(structure_text):
         "vwap rejection",
         "bad structure",
         "avoid chasing",
+        "clear below vwap",
     ]
     text = str(structure_text or "").lower()
-    return any(k in text for k in bad_keywords)
+    return any(k in text for k in hard_bad_keywords)
+
+
+def detect_soft_structure_warning(structure_text):
+    soft_keywords = [
+        "below vwap",
+        "reclaim watch",
+        "slightly below vwap",
+    ]
+    text = str(structure_text or "").lower()
+    return any(k in text for k in soft_keywords)
 
 
 def dedupe_phrases(items):
@@ -1161,6 +1177,7 @@ def compute_momentum_flags(result):
 
     text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
     bad_structure = detect_bad_structure(text)
+    soft_structure_warning = detect_soft_structure_warning(text)
 
     has_higher_lows = bool(
         result.get("has_higher_lows")
@@ -1174,6 +1191,7 @@ def compute_momentum_flags(result):
     result["volume_fading"] = volume_fading
     result["lost_vwap"] = lost_vwap
     result["bad_structure"] = bad_structure
+    result["soft_structure_warning"] = soft_structure_warning
     result["has_higher_lows"] = has_higher_lows
     result["breakout_confirmed"] = breakout
 
@@ -1486,21 +1504,12 @@ def classify_alert_tier(result, rank):
 
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
+    entry_score = safe_int(result.get("entry_score"))
     above_vwap = bool(result.get("above_vwap", True))
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
-    if result.get("market_leader"):
-        return "LEADER"
-
-    if deep_vwap_loss or bad_structure:
-        if not (
-            result.get("true_second_leg")
-            or result.get("clean_trend_runner")
-            or score >= 8
-        ):
-            return "AVOID"
-
+    # True entry-quality setups come before generic leader awareness.
     if result.get("fresh_leader_ignition") and score >= 7:
         return "RUNNER"
 
@@ -1516,13 +1525,23 @@ def classify_alert_tier(result, rank):
     if result.get("fresh_high_after_vwap_hold") and score >= 7:
         return "RUNNER"
 
-    if result.get("massive_no_news_runner") and score >= 7:
+    if result.get("massive_no_news_runner") and score >= 7 and entry_score >= 6:
         return "RUNNER"
 
-    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
+    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap and entry_score >= 6:
         return "RUNNER"
 
-    if score >= 5 and gain >= ALERT_MIN_GAIN:
+    # Market leaders still surface as awareness even when entry is not clean.
+    if result.get("market_leader"):
+        return "LEADER"
+
+    # Hard damaged structure blocks weak WATCH alerts.
+    if deep_vwap_loss or bad_structure:
+        if not (score >= 8 and entry_score >= 6):
+            return "AVOID"
+
+    # Cleaner watch rule: no weak/noisy watch alerts.
+    if score >= 5 and gain >= ALERT_MIN_GAIN and entry_score >= 5:
         return "WATCH"
 
     return "AVOID"
@@ -1573,7 +1592,9 @@ def setup_bias_and_entry(result):
 
     if tier == "LEADER":
         result["trap_runner"] = "🔥 Market leader / awareness first"
-        if result.get("above_vwap"):
+        if safe_int(result.get("entry_score")) >= 6 and result.get("above_vwap"):
+            result["entry_hint"] = "Leader tape improving — wait for clean hold or fresh high confirmation"
+        elif result.get("above_vwap"):
             result["entry_hint"] = "Leader tape — wait for VWAP hold, higher low, or fresh high confirmation"
         else:
             result["entry_hint"] = "Leader below VWAP — wait for reclaim before entry"
@@ -1609,10 +1630,14 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     ticker = result["ticker"]
     current_price = safe_float(result.get("price"))
     current_score = safe_int(result.get("score"))
+    current_entry_score = safe_int(result.get("entry_score"))
     setup = result.get("title") or result.get("setup_tag") or ""
+    tier = result.get("alert_tier", "")
 
     last_time = alert_history.get(ticker, 0)
     cooldown_done = now - last_time >= ALERT_COOLDOWN_SECONDS
+    hard_cooldown_done = now - last_time >= MIN_RE_ALERT_SECONDS
+
     last_price = runner_prices.get(ticker, 0)
     last_score = alert_scores.get(ticker, 0)
     last_setup = alert_setups.get(ticker, "")
@@ -1620,23 +1645,44 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if last_time == 0:
         return True, "first alert"
 
-    if not cooldown_done and not result.get("true_second_leg") and not result.get("market_leader"):
+    # Absolute anti-spam floor. Nothing re-alerts inside this window.
+    if not hard_cooldown_done:
+        return False, "hard cooldown active"
+
+    # Major title/category upgrade only.
+    major_upgrade = (
+        ("WATCH" in last_setup and "RUNNER" in setup)
+        or ("LEADER" in last_setup and "RUNNER" in setup)
+        or ("RECLAIM" in setup and "RECLAIM" not in last_setup)
+        or ("SECOND LEG" in setup and "SECOND LEG" not in last_setup)
+        or ("FRESH IGNITION" in setup and "FRESH IGNITION" not in last_setup)
+    )
+
+    if major_upgrade and last_price and current_price >= last_price * 1.02:
+        return True, "major setup upgrade"
+
+    # Strong second-leg continuation can re-alert before full cooldown,
+    # but still needs real price improvement.
+    if result.get("true_second_leg") and last_price and current_price >= last_price * 1.04:
+        return True, "second leg new high +4%"
+
+    # Reclaim / fresh ignition needs confirmation, not just title flip.
+    if (result.get("leader_reclaim") or result.get("fresh_leader_ignition")):
+        if last_price and current_price >= last_price * 1.03 and current_entry_score >= 7:
+            return True, "confirmed ignition/reclaim"
+
+    # Outside normal cooldown, allow meaningful continuation only.
+    if not cooldown_done:
         return False, "cooldown active"
 
-    if last_price and current_price >= last_price * 1.03:
-        return True, "new high +3%"
+    if last_price and current_price >= last_price * 1.05:
+        return True, "new high +5%"
 
-    if current_score > last_score:
-        return True, "score improved"
+    if current_score >= last_score + 2:
+        return True, "score improved +2"
 
-    if setup and setup != last_setup and current_price >= last_price * 1.01:
-        return True, "setup upgraded"
-
-    if result.get("true_second_leg") and last_price and current_price >= last_price * 1.02:
-        return True, "second leg new high"
-
-    if result.get("market_leader") and cooldown_done and last_price and current_price >= last_price * 1.015:
-        return True, "leader continuation"
+    if result.get("market_leader") and last_price and current_price >= last_price * 1.04:
+        return True, "leader continuation +4%"
 
     return False, "no meaningful change"
 
@@ -1895,7 +1941,7 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
-        # V12: leaders first, then gain, then active tape, then score.
+        # V14: leaders ranked first internally, alerts later prioritize RUNNER > LEADER > WATCH.
         results.sort(
             key=lambda r: (
                 r.get("market_leader", False),
@@ -1925,14 +1971,11 @@ def run_scanner():
         now = time.time()
         sent_count = 0
 
+        alert_candidates = []
+        tier_priority = {"RUNNER": 3, "LEADER": 2, "WATCH": 1, "AVOID": 0}
+
         for result in results[:MAX_GAINERS]:
             ticker = result["ticker"]
-
-            if ticker in sent_this_cycle:
-                continue
-
-            if sent_count >= MAX_ALERTS_PER_CYCLE:
-                break
 
             gate_ok, gate_reason = passes_master_alert_gate(result)
             if not gate_ok:
@@ -1945,15 +1988,43 @@ def run_scanner():
                 print(
                     f"[NO ALERT] {ticker} avoided — tier filter score={result.get('score')} "
                     f"gain={safe_float(result.get('gain')):.1f}% above_vwap={result.get('above_vwap')} "
-                    f"decay={result.get('momentum_decay')}",
+                    f"decay={result.get('momentum_decay')} entry={result.get('entry_score')}",
                     flush=True,
                 )
+                continue
+
+            # Extra noise filter: WATCH must have a usable entry score.
+            if tier == "WATCH" and safe_int(result.get("entry_score")) < 5:
+                print(f"[NO ALERT] {ticker} weak WATCH entry score", flush=True)
                 continue
 
             result["alert_tier"] = tier
             result = setup_bias_and_entry(result)
             result["title"] = title_for_tier(result, tier)
             result["setup_tag"] = result["title"]
+
+            alert_candidates.append(result)
+
+        alert_candidates.sort(
+            key=lambda r: (
+                tier_priority.get(r.get("alert_tier", "AVOID"), 0),
+                safe_int(r.get("entry_score")),
+                safe_int(r.get("leader_score")),
+                safe_float(r.get("gain")),
+                safe_int(r.get("recent_volume")),
+                safe_int(r.get("score")),
+            ),
+            reverse=True,
+        )
+
+        for result in alert_candidates:
+            ticker = result["ticker"]
+
+            if ticker in sent_this_cycle:
+                continue
+
+            if sent_count >= MAX_ALERTS_PER_CYCLE:
+                break
 
             ok, reason = meaningful_realert(
                 result,
