@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v6 — balanced alert tiers + major mover awareness"
+BOOT_MARKER = "elite scanner rebuild v7 — softer decay + stronger watch alerts"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -1216,11 +1216,11 @@ def apply_clean_scoring(result):
 
 def classify_alert_tier(result, rank):
     """
-    Balanced tier logic:
+    v7 balanced behavior layer:
     RUNNER = trade-quality structure.
-    MAJOR MOVER = big market-awareness name that should not disappear.
-    WATCH = developing setup / important mover.
-    AVOID = truly broken, faded, or unsafe structure.
+    MAJOR MOVER = huge mover awareness even if not a perfect entry.
+    WATCH = developing / pullback / VWAP reclaim watch.
+    AVOID = truly broken, illiquid, or deep below VWAP.
     """
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
@@ -1230,18 +1230,26 @@ def classify_alert_tier(result, rank):
     near_high = bool(result.get("near_high"))
     high_rank = rank <= 15
     no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
+    vwap_distance = safe_float(result.get("vwap_distance"))
+    momentum_decay = bool(result.get("momentum_decay"))
 
+    active_volume = recent_vol >= 75_000 or day_vol >= 750_000
+    strong_active_mover = gain >= 25 and active_volume
+    monster_mover = high_rank and gain >= 50 and day_vol >= 750_000
+
+    # Only hard block truly broken charts. A normal pullback/decay candle becomes WATCH, not invisible.
     hard_bad_structure = bool(result.get("bad_structure")) and not (
         result.get("true_second_leg")
         or result.get("clean_trend_runner")
         or result.get("fresh_high_after_vwap_hold")
+        or monster_mover
     )
 
-    hard_lost_vwap = bool(result.get("lost_vwap")) and safe_float(result.get("vwap_distance")) <= -2.0
+    # Do not call every VWAP slip an avoid. Only deep VWAP loss is a hard avoid.
+    hard_lost_vwap = bool(result.get("lost_vwap")) and vwap_distance <= -5.0 and not monster_mover
 
-    # True avoids only. Do not bury a monster mover just because volume faded for one cycle.
     if hard_bad_structure or hard_lost_vwap:
-        if score >= 8 and gain >= 50 and day_vol >= 2_000_000 and high_rank:
+        if monster_mover and score >= 5:
             return "MAJOR MOVER"
         return "AVOID"
 
@@ -1258,24 +1266,34 @@ def classify_alert_tier(result, rank):
     if score >= 8 and gain >= 20 and above_vwap and recent_vol >= 100_000:
         return "RUNNER"
 
-    # Major mover awareness tier: fixes missed WOK/BWEN/HTCO-style names.
-    if high_rank and gain >= 75 and score >= 6 and day_vol >= 750_000:
+    # Major mover awareness: do not let top gainers disappear just because setup is not perfect.
+    if high_rank and gain >= 75 and score >= 4 and day_vol >= 500_000:
         return "MAJOR MOVER"
 
-    if gain >= 50 and score >= 7 and day_vol >= 1_000_000:
+    if gain >= 50 and score >= 5 and day_vol >= 750_000:
         return "MAJOR MOVER"
 
-    if score >= 8 and gain >= 35 and day_vol >= 750_000:
+    if score >= 8 and gain >= 30 and day_vol >= 500_000:
         return "MAJOR MOVER"
+
+    # Softer decay handling: faded strong movers become WATCH instead of full suppression.
+    if momentum_decay and strong_active_mover:
+        return "WATCH"
 
     # Watch tier: not an entry call, but important enough to see.
-    if high_rank and gain >= 25 and day_vol >= 500_000 and score >= 5:
+    if high_rank and gain >= 25 and day_vol >= 300_000 and score >= 4:
         return "WATCH"
 
-    if score >= 7 and gain >= 20 and above_vwap:
+    if gain >= 25 and score >= 5 and active_volume:
         return "WATCH"
 
-    if score >= 6 and gain >= 35 and day_vol >= 1_000_000 and not no_news:
+    if gain >= 15 and above_vwap and active_volume and score >= 3:
+        return "WATCH"
+
+    if score >= 7 and gain >= 20:
+        return "WATCH"
+
+    if score >= 6 and gain >= 35 and day_vol >= 500_000 and not no_news:
         return "WATCH"
 
     return "AVOID"
@@ -1311,24 +1329,27 @@ def setup_bias_and_entry(result):
     if tier == "MAJOR MOVER":
         result["trap_runner"] = "🟠 Major mover / awareness"
         result["entry_hint"] = "Do not chase blind — wait for VWAP hold, pullback, or fresh high confirmation"
-    elif result.get("momentum_decay"):
-        result["trap_runner"] = "🔴 Avoid / faded"
-        result["entry_hint"] = "Wait for VWAP reclaim + volume to return"
-    elif result.get("bad_structure"):
-        result["trap_runner"] = "🔴 Avoid / trap risk"
-        result["entry_hint"] = "Avoid chase — needs clean reclaim"
     elif result.get("true_second_leg"):
         result["trap_runner"] = "🟢 Runner watch"
         result["entry_hint"] = "Second leg — watch hold over VWAP/recent high"
     elif result.get("clean_trend_runner") or result.get("fresh_high_after_vwap_hold"):
         result["trap_runner"] = "🟢 Runner lean"
         result["entry_hint"] = "Clean trend — watch breakout/hold or VWAP dip"
+    elif result.get("momentum_decay") and tier in ["WATCH", "MAJOR MOVER"]:
+        result["trap_runner"] = "🟡 Pullback watch / not an entry yet"
+        result["entry_hint"] = "Wait for VWAP reclaim, higher low, or volume return"
+    elif result.get("momentum_decay"):
+        result["trap_runner"] = "🔴 Avoid / faded"
+        result["entry_hint"] = "Wait for VWAP reclaim + volume to return"
+    elif result.get("bad_structure"):
+        result["trap_runner"] = "🔴 Avoid / trap risk"
+        result["entry_hint"] = "Avoid chase — needs clean reclaim"
     elif result.get("above_vwap"):
         result["trap_runner"] = "🟡 Watchlist only"
         result["entry_hint"] = "Needs stronger confirmation before entry"
     else:
-        result["trap_runner"] = "🔴 Avoid / unclear"
-        result["entry_hint"] = "Wait for setup confirmation"
+        result["trap_runner"] = "🟡 Reclaim watch"
+        result["entry_hint"] = "Below VWAP — wait for reclaim before entry"
 
     return result
 
