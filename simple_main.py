@@ -126,7 +126,7 @@ def should_scan_now():
 
     return True
 
-BOOT_MARKER = "20pct runner re-alert v1"
+BOOT_MARKER = "elite scanner rebuild v3 — top gainer refresh + alert tiers"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -141,10 +141,10 @@ SCAN_SLEEP = 90
 
 ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN = 600
-MAX_ALERTS_PER_CYCLE = 3
+MAX_ALERTS_PER_CYCLE = 5
 
-MAX_GAINERS = 25
-ALERT_MIN_GAIN = 27
+MAX_GAINERS = 60
+ALERT_MIN_GAIN = 20
 MIN_VOLUME = 50_000
 MAX_PRICE = 100
 
@@ -438,7 +438,7 @@ def get_percent_gainers():
         flush=True
     )
  
-    return movers[:25]
+    return movers[:MAX_GAINERS]
 
 def get_yahoo_candles(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -602,13 +602,18 @@ def get_finnhub_quote(ticker):
         return None
 
 def score_mover(mover, catalyst_type, catalyst_text):
+    """
+    Cleaner base score. Structure/news adjustments happen later after candles.
+    Goal: do NOT kill clean no-news runners too early.
+    """
     score = 0
     reasons = []
     risks = []
 
-    gain = mover["gain"]
-    price = mover["price"]
-    volume = mover["volume"]
+    ticker = str(mover.get("ticker", "")).upper()
+    gain = float(mover.get("gain", mover.get("gain_percent", 0)) or 0)
+    price = float(mover.get("price", 0) or 0)
+    volume = int(float(mover.get("volume", 0) or 0))
 
     if gain >= 100:
         score += 5
@@ -619,11 +624,17 @@ def score_mover(mover, catalyst_type, catalyst_text):
     elif gain >= 50:
         score += 3
         reasons.append("50%+ gainer")
-    elif gain >= 27:
+    elif gain >= 25:
         score += 2
-        reasons.append("27%+ spike")
+        reasons.append("25%+ mover")
+    elif gain >= 15:
+        score += 1
+        reasons.append("15%+ early mover")
 
-    if volume >= 10_000_000:
+    if volume >= 20_000_000:
+        score += 4
+        reasons.append("20M+ volume")
+    elif volume >= 10_000_000:
         score += 3
         reasons.append("10M+ volume")
     elif volume >= 2_000_000:
@@ -633,45 +644,44 @@ def score_mover(mover, catalyst_type, catalyst_text):
         score += 1
         reasons.append("500k+ volume")
 
-    # --- NEWS QUALITY SCORE ---
-    if catalyst_type not in ["none", "unknown"]:
-        news_quality = classify_news_quality(catalyst_text)
-
-        if news_quality == "STRONG":
-            score += 2
-            reasons.append("confirmed catalyst")
-
-        elif news_quality == "WEAK":
-            score += 1
-            reasons.append("weak catalyst")
-
-        elif news_quality == "JUNK":
-            risks.append("⚠️ Mover roundup / aggregator headline")
+    news_quality = classify_news_quality(catalyst_text)
+    if news_quality == "STRONG":
+        score += 2
+        reasons.append("confirmed catalyst")
+    elif news_quality == "WEAK":
+        score += 1
+        reasons.append("weak catalyst")
+    elif news_quality == "JUNK":
+        risks.append("⚠️ Aggregator headline only")
+    else:
+        # small warning only, no heavy penalty here
+        risks.append("⚠️ No confirmed catalyst / technical momentum only")
 
     if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
         score += 1
         reasons.append(f"strong catalyst: {catalyst_type}")
 
-    if gain > 30 and volume < 1_000_000:
+    if gain > 30 and volume < 500_000:
         score -= 2
-        risks.append("low volume spike")
+        risks.append("thin-volume spike")
 
     if price < 1:
         risks.append("sub-$1 stock")
 
-    score = max(0, min(score, 10))
-
     return {
-        "ticker": mover["ticker"],
+        "ticker": ticker,
         "price": price,
         "gain": gain,
+        "gain_percent": gain,
         "volume": volume,
-        "score": score,
+        "score": max(0, min(score, 10)),
         "catalyst_type": catalyst_type,
         "catalyst_text": catalyst_text,
+        "news_quality": news_quality,
         "reasons": reasons,
-        "risks": risks
+        "risks": risks,
     }
+
 def get_alert_title(result):
     risks_text = " ".join(result.get("risks", [])).lower()
     structure_text = " ".join(result.get("reasons", [])).lower()
@@ -1568,1267 +1578,482 @@ def adjust_score(result, amount, reason=None, risk=None):
 
     return result
     
+
+# =====================================================================
+# CLEAN REBUILD HELPERS — alert quality, dedupe, contradiction cleanup
+# =====================================================================
+BAD_TICKER_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
+
+
+def is_bad_ticker(ticker):
+    ticker = str(ticker or "").upper().strip()
+    return (
+        not ticker
+        or "." in ticker
+        or "-" in ticker
+        or ticker.endswith(BAD_TICKER_SUFFIXES)
+        or (ticker.endswith("W") and len(ticker) > 4)
+    )
+
+
+def dedupe_phrases(items):
+    """Dedupes noisy repeated reasons like VWAP / higher lows / structure."""
+    cleaned = []
+    seen_keys = set()
+    buckets = {
+        "vwap": ["vwap", "above vwap", "price above vwap", "vwap hold"],
+        "higher_lows": ["higher lows"],
+        "clean_structure": ["clean structure", "clean trend runner structure", "structure confirmation"],
+        "no_news": ["no confirmed catalyst", "technical momentum only"],
+        "volume_fade": ["volume fading", "momentum weakening"],
+        "dilution": ["dilution", "offering", "warrant", "shelf", "atm"],
+    }
+
+    for item in items or []:
+        if not item:
+            continue
+        text = str(item).strip()
+        if not text or text.lower() in ["none", "n/a", "null"]:
+            continue
+        lower = text.lower()
+        key = lower
+        for bucket, words in buckets.items():
+            if any(w in lower for w in words):
+                key = bucket
+                break
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        cleaned.append(text)
+    return cleaned
+
+
+def compact_reasons(result):
+    result["reasons"] = dedupe_phrases(result.get("reasons", []))[:7]
+    result["risks"] = dedupe_phrases(result.get("risks", []))[:5]
+    return result
+
+
+def compute_momentum_flags(result):
+    price = float(result.get("price_float", result.get("price", 0)) or 0)
+    vwap = float(result.get("vwap_float", result.get("vwap", 0)) or 0)
+    candles = result.get("candles", []) or []
+    recent_vol = int(result.get("recent_volume", 0) or 0)
+    prev_vol = int(result.get("prev_volume", 0) or 0)
+    gain = float(result.get("gain", 0) or 0)
+
+    has_vwap = vwap > 0
+    above_vwap = (price >= vwap) if has_vwap else True
+    result["has_vwap"] = has_vwap
+    result["above_vwap"] = above_vwap
+    result["vwap_distance"] = round(((price - vwap) / vwap) * 100, 2) if has_vwap and price else 0
+
+    recent_high = price
+    if candles:
+        recent_high = max(float(c.get("high", 0) or 0) for c in candles[-10:]) or price
+    result["recent_high"] = recent_high
+    result["near_high"] = price >= recent_high * 0.97 if recent_high else False
+
+    volume_expanding = recent_vol >= max(75_000, prev_vol)
+    volume_fading = prev_vol > 0 and recent_vol < prev_vol * 0.60
+    lost_vwap = has_vwap and price < vwap
+
+    text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
+    bad_structure = detect_bad_structure(text)
+    has_higher_lows = bool(result.get("has_higher_lows") or result.get("higher_lows") or "higher lows" in text)
+    breakout = bool(result.get("breakout") or result.get("breakout_confirmed"))
+
+    result["volume_expanding"] = volume_expanding
+    result["volume_fading"] = volume_fading
+    result["lost_vwap"] = lost_vwap
+    result["bad_structure"] = bad_structure
+    result["has_higher_lows"] = has_higher_lows
+    result["breakout_confirmed"] = breakout
+
+    result["momentum_decay"] = bool((volume_fading or lost_vwap or bad_structure) and not (above_vwap and has_higher_lows and result.get("near_high")))
+    result["clean_trend_runner"] = bool(gain >= 20 and above_vwap and not bad_structure and recent_vol >= 100_000 and (has_higher_lows or breakout or result.get("near_high")))
+    result["true_second_leg"] = bool(gain >= 25 and above_vwap and not bad_structure and recent_vol >= 150_000 and has_higher_lows and (breakout or result.get("near_high")))
+    result["fresh_high_after_vwap_hold"] = bool(gain >= 20 and above_vwap and has_higher_lows and result.get("near_high") and recent_vol >= 100_000)
+    result["massive_no_news_runner"] = bool(result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"] and gain >= 35 and result.get("volume", 0) >= 2_000_000 and recent_vol >= 150_000 and above_vwap and (has_higher_lows or breakout or result.get("near_high")))
+    return result
+
+
+def apply_clean_scoring(result):
+    score = int(result.get("score", 0) or 0)
+    if result.get("clean_trend_runner"):
+        score += 2
+        result.setdefault("reasons", []).append("📈 Clean trend runner")
+    if result.get("true_second_leg"):
+        score += 2
+        result.setdefault("reasons", []).append("Second leg continuation")
+    if result.get("fresh_high_after_vwap_hold"):
+        score += 1
+        result.setdefault("reasons", []).append("Fresh high after VWAP hold")
+    if result.get("massive_no_news_runner"):
+        score += 1
+        result.setdefault("reasons", []).append("No-news volume runner")
+    if result.get("momentum_decay"):
+        score -= 2
+        result.setdefault("risks", []).append("⚠️ Momentum decay / wait for reclaim")
+    if result.get("above_vwap") is False:
+        score -= 2
+        result.setdefault("risks", []).append("Below VWAP")
+    result["score"] = max(0, min(score, 10))
+    return compact_reasons(result)
+
+
+def classify_alert_tier(result, rank):
+    gain = float(result.get("gain", 0) or 0)
+    score = int(result.get("score", 0) or 0)
+    recent_vol = int(result.get("recent_volume", 0) or 0)
+    no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
+
+    if result.get("bad_structure") and not result.get("true_second_leg"):
+        return "BLOCK"
+    if result.get("momentum_decay") and not result.get("fresh_high_after_vwap_hold") and not result.get("true_second_leg"):
+        return "BLOCK"
+    if result.get("true_second_leg"):
+        return "ELITE"
+    if result.get("clean_trend_runner") and score >= 7:
+        return "ELITE"
+    if result.get("massive_no_news_runner"):
+        return "ELITE"  # WOK-style: structure + volume can alert without news
+    if score >= 8 and gain >= 20 and result.get("above_vwap") and recent_vol >= 100_000:
+        return "ELITE"
+    if rank <= 10 and gain >= 25 and result.get("volume", 0) >= 1_000_000 and result.get("above_vwap") and recent_vol >= 75_000:
+        return "WATCH"  # awareness tier so top gainers don't vanish
+    if no_news:
+        return "BLOCK"
+    if score >= 7 and gain >= 20 and result.get("above_vwap"):
+        return "WATCH"
+    return "BLOCK"
+
+
+def title_for_tier(result, tier):
+    if result.get("momentum_decay"):
+        return "⚠️ MOMENTUM FADED"
+    if result.get("true_second_leg"):
+        return "🚨 SECOND LEG RUNNER"
+    if result.get("fresh_high_after_vwap_hold"):
+        return "🚀 FRESH HIGH VWAP HOLD"
+    if result.get("massive_no_news_runner"):
+        return "🔥 NO-NEWS VOLUME RUNNER"
+    if result.get("clean_trend_runner"):
+        return "📈 CLEAN TREND RUNNER"
+    if tier == "WATCH":
+        return "👁️ TOP GAINER WATCH"
+    if result.get("score", 0) >= 9:
+        return "🔥 MOMENTUM RUNNER"
+    return "🚨 BUILDING MOMENTUM"
+
+
+def setup_bias_and_entry(result):
+    if result.get("momentum_decay"):
+        result["trap_runner"] = "⚠️ Momentum faded — wait for reclaim"
+        result["entry_hint"] = "Wait for VWAP reclaim + volume to return"
+    elif result.get("bad_structure"):
+        result["trap_runner"] = "⚠️ Trap risk"
+        result["entry_hint"] = "Avoid chase — needs clean reclaim"
+    elif result.get("true_second_leg"):
+        result["trap_runner"] = "🟢 Runner watch"
+        result["entry_hint"] = "Second leg — watch hold over VWAP/recent high"
+    elif result.get("clean_trend_runner") or result.get("fresh_high_after_vwap_hold"):
+        result["trap_runner"] = "🚀 Runner lean"
+        result["entry_hint"] = "Clean trend — watch breakout/hold or VWAP dip"
+    elif result.get("above_vwap"):
+        result["trap_runner"] = "👁️ Watchlist only"
+        result["entry_hint"] = "Needs stronger confirmation before entry"
+    else:
+        result["trap_runner"] = "🤔 Unclear"
+        result["entry_hint"] = "Wait for setup confirmation"
+    return result
+
+
+def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert_setups, now):
+    ticker = result["ticker"]
+    current_price = float(result.get("price", 0) or 0)
+    current_score = int(result.get("score", 0) or 0)
+    setup = result.get("title") or result.get("setup_tag") or ""
+
+    last_time = alert_history.get(ticker, 0)
+    cooldown_done = now - last_time >= ALERT_COOLDOWN_SECONDS
+    last_price = runner_prices.get(ticker, 0)
+    last_score = alert_scores.get(ticker, 0)
+    last_setup = alert_setups.get(ticker, "")
+
+    if last_time == 0:
+        return True, "first alert"
+    if not cooldown_done and not result.get("true_second_leg"):
+        return False, "cooldown active"
+    if last_price and current_price >= last_price * 1.03:
+        return True, "new high +3%"
+    if current_score > last_score:
+        return True, "score improved"
+    if setup and setup != last_setup and current_price >= last_price * 1.01:
+        return True, "setup upgraded"
+    if result.get("true_second_leg") and last_price and current_price >= last_price * 1.02:
+        return True, "second leg new high"
+    return False, "no meaningful change"
+
+
+def build_compact_alert(result):
+    result = compact_reasons(result)
+    float_shares = float(result.get("float", 0) or 0)
+    float_text = f"{float_shares/1_000_000:.1f}M" if float_shares else "Unknown"
+    news_quality = result.get("news_quality", "UNKNOWN")
+    catalyst_line = result.get("catalyst_text") or "No fresh catalyst found"
+
+    reasons = "\n".join(f"• {x}" for x in result.get("reasons", [])[:6]) or "• Momentum watch"
+    risks = "\n".join(f"• {x}" for x in result.get("risks", [])[:4]) or "• None obvious"
+
+    if news_quality in ["NONE", "UNKNOWN", "JUNK"]:
+        news_header = "❌ NO CONFIRMED NEWS"
+    elif news_quality == "STRONG":
+        news_header = "⚡ STRONG NEWS"
+    else:
+        news_header = "⚠️ WEAK/UNCLEAR NEWS"
+
+    return (
+        f"{result.get('title', get_alert_title(result))}\n\n"
+        f"{result['ticker']} | Score: {result['score']}/10 | Rank #{result.get('rank', '?')}\n"
+        f"Price: ${float(result.get('price', 0) or 0):.4f}\n"
+        f"Gain: {float(result.get('gain', 0) or 0):.1f}%\n"
+        f"Float: {float_text}\n\n"
+        f"Catalyst: {news_header}\n"
+        f"{catalyst_line}\n\n"
+        f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
+        f"Entry: {result.get('entry_hint', 'Wait for confirmation')}\n"
+        f"Regime: {result.get('market_regime', 'UNKNOWN')}\n\n"
+        f"Why:\n{reasons}\n\n"
+        f"Risk:\n{risks}"
+    )
+
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print(f"[BOOT] No watchlist — scanning {SCAN_MIN_GAIN}%+ gainers with VWAP filter", flush=True)
+    print(f"[BOOT] Scanning fresh {SCAN_MIN_GAIN}%+ gainers | elite + watch tiers", flush=True)
+
     alert_history = {}
     runner_prices = {}
-    first_alert_price = {}
     alert_scores = {}
-    sent_this_cycle = set()
+    alert_setups = {}
+
     while True:
         sent_this_cycle = set()
+
         if not should_scan_now():
             print("[SLEEP] Market inactive — skipping scan", flush=True)
             time.sleep(60)
             continue
 
-        print("[SCAN] Market active — running scan", flush=True)
-
+        print("[SCAN] Market active — refreshing top gainers", flush=True)
         session, session_notes = get_market_session()
         movers = get_percent_gainers()
-        results = []
 
+        # Fresh top-gainer protection: always process the biggest movers first,
+        # then rank by final score after news/candles/structure.
+        movers = sorted(movers, key=lambda x: float(x.get("gain", 0) or 0), reverse=True)[:MAX_GAINERS]
+        print("[FRESH GAINERS] " + ", ".join([f"{m['ticker']} {m['gain']:.1f}%" for m in movers[:15]]), flush=True)
+
+        results = []
         seen_tickers = set()
 
-        for mover in movers:
-            ticker = mover.get("ticker", "").upper()
-
-            if ticker in seen_tickers:
+        for raw_rank, mover in enumerate(movers, start=1):
+            ticker = str(mover.get("ticker", "")).upper().strip()
+            if ticker in seen_tickers or is_bad_ticker(ticker):
                 continue
-
             seen_tickers.add(ticker)
+            mover["ticker"] = ticker
 
-            bad_structure = False
-            good_structure = False
-            sec_risk = False
-            sec_note = ""
+            try:
+                # Confirm quote, but don't let a temporary quote miss kill the candidate.
+                quote = get_finnhub_quote(ticker)
+                if quote:
+                    mover["price"] = float(quote.get("price", mover.get("price", 0)) or 0)
+                    mover["gain"] = float(quote.get("gain", mover.get("gain", 0)) or 0)
+                    mover["gain_percent"] = mover["gain"]
+                    print(f"[LIVE] {ticker} ${mover['price']:.4f} {mover['gain']:.1f}%", flush=True)
+                else:
+                    print(f"[LIVE] {ticker} quote unavailable — using screener values", flush=True)
 
-            ticker = mover["ticker"]
-            
-            # --- WARRANT / RIGHTS / UNIT FILTER EARLY ---
-            BAD_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
+                price = float(mover.get("price", 0) or 0)
+                gain = float(mover.get("gain", 0) or 0)
+                volume = int(float(mover.get("volume", 0) or 0))
 
-            if ticker.endswith(BAD_SUFFIXES):
-                print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
-                continue
-            if ticker.endswith("W") and len(ticker) > 4:
-                print(f"[FILTER] {ticker} skipped early — warrant/unit/rights ticker", flush=True)
-                continue
-                
-            # 🔥 Finnhub quote confirmation
-            finnhub_quote = get_finnhub_quote(ticker)
-
-            if finnhub_quote:
-                mover["price"] = finnhub_quote["price"]
-                mover["gain"] = finnhub_quote["gain"]
-                mover["gain_percent"] = finnhub_quote["gain"]
-
-                print(
-                    f"[LIVE GAIN] {ticker} synced to {mover['gain']:.1f}%",
-                    flush=True
-                )
-
-                # 🚫 Kill dead/flat movers immediately after live sync
-                if mover["gain"] < 5:
-                    print(
-                        f"[FILTER] {ticker} skipped — live gain too weak {mover['gain']:.1f}%",
-                        flush=True
-                    )
+                if price < 0.50 or price > MAX_PRICE:
+                    print(f"[FILTER] {ticker} price ${price:.2f} outside range", flush=True)
                     continue
-                    
-                # 🚫 Kill bad price range before scoring/ranking/news
-                live_price = float(mover.get("price", 0) or 0)
-                
-                if live_price < 0.50 or live_price > 80:
-                    print(
-                        f"[FILTER] {ticker} skipped — price ${live_price:.2f} outside range",
-                        flush=True
-                    )
+                if gain < 5:
+                    print(f"[FILTER] {ticker} live gain too weak {gain:.1f}%", flush=True)
                     continue
-                    
-                print(
-                    f"[FINNHUB] {ticker} quote confirmed ${mover['price']:.4f} {mover['gain']:.1f}%",
-                    flush=True
-                )
+                if volume <= 0:
+                    mover["volume"] = 500_000
 
-            else:
-                print(f"[FINNHUB] {ticker} quote unavailable — using scanner price/gain", flush=True)
-                
-            if mover.get("volume", 0) == 0:
-                mover["volume"] = 500_000
+                catalyst_type, catalyst_text = get_news_catalyst(ticker)
+                headline, news_quality = find_real_news_headline(ticker, catalyst_text)
 
-            catalyst_type, catalyst_text = get_news_catalyst(ticker)
+                result = score_mover(mover, catalyst_type, headline)
+                result["rank"] = raw_rank
+                result["headline"] = headline
+                result["catalyst_text"] = headline
+                result["news_quality"] = news_quality
+                result["strong_news"] = news_quality == "STRONG"
 
-            result = score_mover(
-                mover=mover,
-                catalyst_type=catalyst_type,
-                catalyst_text=catalyst_text
-            )
-            result["true_second_leg"] = False
-            result["valid_second_leg"] = False
-            result["momentum_decay"] = False
-            result["trend_builder_alert"] = False
-            
-            initial_news_quality = classify_news_quality(catalyst_text)
-            result["news_quality"] = initial_news_quality
-            result["strong_news"] = initial_news_quality == "STRONG"
+                if news_quality == "STRONG":
+                    result["catalyst_type"] = "⚡ STRONG NEWS"
+                elif news_quality == "WEAK":
+                    result["catalyst_type"] = "⚠️ WEAK NEWS"
+                elif news_quality == "JUNK":
+                    result["catalyst_type"] = "🚫 JUNK NEWS"
+                else:
+                    result["catalyst_type"] = "❌ NO NEWS"
 
-            market_cap, float_shares = get_finnhub_profile(ticker)
-            if market_cap == 0 and float_shares == 0:
-                print(f"[WARN] {ticker} profile missing — allowing but flagged", flush=True)
-                result.setdefault("risks", []).append("⚠️ Profile data missing")
-                            
-            result["market_cap"] = market_cap
-            result["float"] = float_shares
-            if float_shares > 40_000_000 or market_cap > 800_000_000:
-                print(f"[FILTER] {ticker} skipped early — too big", flush=True)
-                continue
-            if 0 < float_shares <= 10_000_000:
-                result["score"] = min(10, result.get("score", 0) + 1)
-                result.setdefault("reasons", []).append("Low float momentum potential")
-            print(f"[MARKET CAP] {ticker}: {market_cap}", flush=True)
-            print(f"[FLOAT] {ticker}: {float_shares}", flush=True)
-            
-            if market_cap:
-                result["reasons"].append(f"Market cap: ${market_cap:,}")
+                market_cap, float_shares = get_finnhub_profile(ticker)
+                result["market_cap"] = market_cap
+                result["float"] = float_shares
 
-            candles = get_alpaca_candles(ticker)
+                if market_cap and market_cap > MAX_MARKET_CAP:
+                    print(f"[FILTER] {ticker} market cap over 1B", flush=True)
+                    continue
+                if float_shares and float_shares > 50_000_000:
+                    print(f"[FILTER] {ticker} float too high {float_shares:,.0f}", flush=True)
+                    continue
+                if not float_shares:
+                    result.setdefault("risks", []).append("⚠️ Float unknown")
+                elif float_shares <= 10_000_000:
+                    result["score"] = min(10, result["score"] + 1)
+                    result.setdefault("reasons", []).append("Low float momentum potential")
 
-            if not candles:
-                print(f"[DATA FALLBACK] {ticker} Alpaca failed — using Yahoo", flush=True)
-                candles = get_yahoo_candles(ticker)
-            else:
-                print(f"[DATA] {ticker} candles from Alpaca", flush=True)
-                
-            result["candles"] = candles
-            
-            recent_volume = sum(c["volume"] for c in candles[-5:]) if candles else 0
-            total_candle_volume = sum(c["volume"] for c in candles) if candles else 0
-            
-            result["recent_volume"] = recent_volume
-            result["total_candle_volume"] = total_candle_volume
-            
-            # --- COIL / CONSOLIDATION CHECK ---
-            tight, coil_len = detect_consolidation(candles)
-            result["coil_tight"] = tight
-            result["coil_len"] = coil_len
+                candles = get_alpaca_candles(ticker)
+                if not candles:
+                    print(f"[DATA] {ticker} Alpaca failed — using Yahoo candles", flush=True)
+                    candles = get_yahoo_candles(ticker)
+                result["candles"] = candles or []
 
-            if candles:
-                result["high"] = max(float(c["high"]) for c in candles[-10:])
-                result["prev_volume"] = sum(c["volume"] for c in candles[-10:-5]) if len(candles) >= 10 else 0
-                # --- SECOND LEG BREAKOUT CHECK ---
-                recent_high = max(float(c["high"]) for c in candles[-3:])
-                coil_high = max(float(c["high"]) for c in candles[-9:-3]) if len(candles) >= 9 else result["high"]
-                
-                recent_vol_3 = sum(c["volume"] for c in candles[-3:])
-                prev_vol_3 = sum(c["volume"] for c in candles[-6:-3]) if len(candles) >= 6 else 0
-                
-                breakout = recent_high > coil_high * 1.01
-                volume_spike = recent_vol_3 > prev_vol_3 * 1.5 if prev_vol_3 > 0 else False
-                
-                result["coil_high"] = coil_high
-                result["volume_spike"] = volume_spike
-                
-                gain = float(
-                    result.get("gain_percent", result.get("gain", 0)) or 0
-                )
-            
-                # --- SECOND LEG COIL SETUP ---
-                second_leg = (
-                    gain >= 40
-                    and result.get("coil_tight", False)
-                    and result.get("volume_spike", False)
-                )
-                
-                result["second_leg"] = second_leg
-                
-                # --- BLOCK FAKE SECOND LEGS ---
-                if result.get("second_leg"):
-                    if not result.get("coil_tight") or not result.get("volume_spike"):
-                        result["second_leg"] = False
-                              
-                day_open = float(candles[0]["open"])
-                last_close = float(candles[-1]["close"])
-                result["volume_status"] = describe_volume_quality(candles)
-                
-                if result["volume_status"] not in result.setdefault("reasons", []):
-                    result["reasons"].append(result["volume_status"])
-                                
-                volume_status = result.get("volume_status", "")
+                recent_volume = sum(int(c.get("volume", 0) or 0) for c in result["candles"][-5:]) if candles else 0
+                prev_volume = sum(int(c.get("volume", 0) or 0) for c in result["candles"][-10:-5]) if candles and len(candles) >= 10 else 0
+                total_candle_volume = sum(int(c.get("volume", 0) or 0) for c in result["candles"]) if candles else 0
+                result["recent_volume"] = recent_volume
+                result["prev_volume"] = prev_volume
+                result["total_candle_volume"] = total_candle_volume
 
-                if "expanding" in volume_status.lower():
-                    result["volume_confirmed"] = True
-                
-                if "fading" in volume_status.lower():
-                    result["momentum_fading"] = True
-                    
-            # --- STRUCTURE DATA ---
-            structure = analyze_structure(ticker, candles)
-            
-            result["structure_score"] = structure.get("structure_score", 0)
-            result["above_vwap"] = structure.get("above_vwap", False)
-            result["vwap"] = structure.get("vwap")
-            
-            result = update_vwap_state(result)
-            
-            result["breakout"] = structure.get("breakout", False)
-            result["breakout_confirmed"] = structure.get("breakout", False)
-            result["breakout_level"] = structure.get("breakout_level")
-            
-            result["higher_lows"] = structure.get("higher_lows", False)
-            result["has_higher_lows"] = structure.get("higher_lows", False)
-            result["trend_builder"] = structure.get("trend_builder", False)
-            
-            structure_reasons = structure.get("reasons", [])
-            structure_risks = structure.get("risk_flags", [])
-            
-            result["reasons"] = result.get("reasons", [])
-            result["risks"] = result.get("risks", [])
-            
-            result["reasons"].extend(structure_reasons)
-            result["risks"].extend(structure_risks)
-            
-            structure_text = " ".join(structure_reasons + structure_risks).lower()
-            bad_structure = detect_bad_structure(structure_text)
-            
-            result["bad_structure"] = bad_structure
-            
-            structure_score = result.get("structure_score", 0)
-            
-            price = result.get("price_float", float(result.get("price", 0) or 0))
-            vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
-            
-            has_vwap = result.get("has_vwap", False)
-            above_vwap = result.get("above_vwap", True)
-            
-            good_structure = (
-                above_vwap
-                and not bad_structure
-                and (
-                    result.get("has_higher_lows", False)
-                    or has_strong_news(result)
-                    or result.get("breakout", False)
-                )
-            )
+                if candles:
+                    result["high"] = max(float(c.get("high", 0) or 0) for c in candles[-10:])
+                    result["volume_status"] = describe_volume_quality(candles)
+                    result.setdefault("reasons", []).append(result["volume_status"])
 
-            result["good_structure"] = good_structure
+                structure = analyze_structure(ticker, candles or [])
+                result["structure_score"] = int(structure.get("structure_score", 0) or 0)
+                result["vwap"] = structure.get("vwap")
+                result["above_vwap"] = structure.get("above_vwap", True)
+                result["breakout"] = structure.get("breakout", False)
+                result["breakout_confirmed"] = structure.get("breakout", False)
+                result["breakout_level"] = structure.get("breakout_level")
+                result["higher_lows"] = structure.get("higher_lows", False)
+                result["has_higher_lows"] = structure.get("higher_lows", False)
+                result["trend_builder"] = structure.get("trend_builder", False)
 
-            recent_vol = result.get("recent_volume", 0)
-            gain = float(
-                result.get("gain_percent", result.get("gain", 0)) or 0
-            )
-            has_higher_lows = (
-                result.get("higher_lows", False)
-                or result.get("has_higher_lows", False)
-            )
+                result.setdefault("reasons", []).extend(structure.get("reasons", []) or [])
+                result.setdefault("risks", []).extend(structure.get("risk_flags", []) or [])
+                result = update_vwap_state(result)
+                result = compute_momentum_flags(result)
+                result = apply_clean_scoring(result)
 
-            result["has_higher_lows"] = has_higher_lows
+                # SEC / dilution check only for real candidates so API is not hammered.
+                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 10:
+                    sec_risk, sec_note = check_sec_offering_risk(ticker)
+                    result["sec_note"] = sec_note
+                    if sec_risk:
+                        if any(form in sec_note for form in ["S-1", "S-3", "F-1", "F-3", "424B"]):
+                            result = adjust_score(result, -2, risk=f"🚨 Active dilution filing: {sec_note}")
+                        else:
+                            result.setdefault("risks", []).append(f"⚠️ Filing detected: {sec_note}")
 
-            breakout_confirmed = (
-                result.get("breakout", False)
-                or result.get("breakout_confirmed", False)
-            )
+                filing_text = result.get("sec_note", "") + " " + result.get("catalyst_text", "")
+                extra_risks = detect_offering_risk(filing_text, price=float(result.get("price", 0) or 0)) or []
+                if isinstance(extra_risks, tuple):
+                    found, msg = extra_risks
+                    extra_risks = [f"🚨 DILUTION RISK: {msg}"] if found else []
+                elif not isinstance(extra_risks, list):
+                    extra_risks = [str(extra_risks)] if extra_risks else []
+                result.setdefault("risks", []).extend(extra_risks)
 
-            result["breakout_confirmed"] = breakout_confirmed
+                dilution_label = describe_dilution_risk(" ".join(result.get("risks", []) + [filing_text]))
+                if dilution_label:
+                    result.setdefault("risks", []).insert(0, dilution_label)
 
-            true_second_leg = (
-                result.get("second_leg", False)
-                and above_vwap
-                and has_higher_lows
-                and breakout_confirmed
-                and recent_vol >= 150_000
-            )
+                result = compact_reasons(result)
+                results.append(result)
+                time.sleep(0.01)
 
-            result["true_second_leg"] = true_second_leg
-            result["valid_second_leg"] = true_second_leg  # legacy safety alias
-            
-            result["has_higher_lows"] = has_higher_lows
-            
-            clean_trend_runner = (
-                gain >= 20
-                and structure_score >= 2
-                and above_vwap
-                and not bad_structure
-                and recent_vol >= 100000
-                and (
-                    result.get("breakout", False)
-                    or has_higher_lows
-                    or has_strong_news(result)
-                )
-            )
-            
-            if clean_trend_runner:
-                result["clean_trend_runner"] = True
-                result = adjust_score(result, 2, reason="📈 Clean trend runner structure")
-            # --- A+ RUNNER FILTER ---
-            price = result.get("price_float", float(result.get("price", 0) or 0))
-            recent_high = result.get("high", price)
-            strong_volume = recent_vol >= 150_000
-            near_high = price >= recent_high * 0.97
-            has_momentum = has_momentum_structure(result)
-            
-            a_plus_runner = (
-                good_structure
-                and (
-                    strong_volume
-                    or near_high
-                    or has_momentum
-                    or has_higher_lows
-                )
-            )
-            
-            result["a_plus_runner"] = a_plus_runner
-          
-            # --- TREND BUILDER QUALITY FILTER ---
-            trend_builder_ok = (
-                result.get("trend_builder")
-                and not bad_structure
-                and result.get("above_vwap")
-                and result.get("recent_volume", 0) >= 100000
-                and result.get("gain", 0) >= 15
-            )
-            
-            if trend_builder_ok:
-                result["trend_builder_alert"] = True
-                result["setup_tag"] = "📈 CLEAN TREND RUNNER"
-            else:
-                result["trend_builder_alert"] = False
-            
-            # --- DEAD CHOP / VWAP HUG FILTER ---
-            vwap_hug = False
-            if vwap > 0 and price > 0:
-                vwap_hug = abs(price - vwap) / price < 0.003
-            
-            if vwap_hug and not result.get("breakout"):
-                result["trend_builder_alert"] = False
-                result["risks"].append("Dead chop / VWAP hug — no alert")
-      
-                result["score"] = max(0, result["score"] - 3)
-                result.setdefault("risks", []).append("🚨 Bad structure — avoid chasing")
-                structure_score = result.get("structure_score", 0)
-
-              
-                    
-            # --- STRUCTURE CONFIRMATION ---
-            good_structure = (
-                structure_score >= 2
-                and above_vwap
-                and not bad_structure
-            )
-            
-            result["good_structure"] = good_structure
-
-            if result.get("trend_builder_alert"):
-                result["score"] = min(result.get("score", 0) + 1, 10)
-
-                if "Trend builder setup / possible second leg" not in result["reasons"]:
-                    result["reasons"].append("Trend builder setup / possible second leg")
-
-            elif result.get("good_structure", False):
-                result["score"] = min(10, result["score"] + 2)
-
-                if "✅ Clean structure confirmation" not in result["reasons"]:
-                    result.setdefault("reasons", []).append("✅ Clean structure confirmation")
-
-            elif structure_score > 0 and not bad_structure:
-                result["score"] = min(10, result["score"] + structure_score)
-
-            result["score"] = max(0, min(result["score"], 10))
-
-            # 🚫 Final price filter before rankings
-            price = float(result.get("price", 0) or 0)
-
-            if price < 0.50 or price > 80:
+            except Exception as e:
+                print(f"[CANDIDATE ERROR] {ticker}: {e}", flush=True)
                 continue
 
-            results.append(result)
-            time.sleep(0.005)
+        if not results:
+            print("[SCAN] No qualified gainers found", flush=True)
+            time.sleep(SCAN_SLEEP)
+            continue
 
-        # ✅ Remove duplicate tickers before ranking
-        seen = set()
-        deduped = []
-
-        for r in results:
-            t = r.get("ticker")
-
-            if not t or t in seen:
-                continue
-
-            seen.add(t)
-            deduped.append(r)
-
-        results = deduped
-
-        results.sort(key=lambda x: x["score"], reverse=True)
+        # Rank by score first, but keep raw top-gainer rank in the alert.
+        results.sort(key=lambda r: (int(r.get("score", 0)), float(r.get("gain", 0)), int(r.get("recent_volume", 0))), reverse=True)
 
         regime, regime_notes = detect_market_regime(results)
-        
-
         for r in results:
             r["market_regime"] = regime
             r["regime_notes"] = regime_notes
-            
-        print("[SCAN] Cycle complete", flush=True)
-        print("[HEARTBEAT] alive", flush=True)
-                
-        if results:
-            top_line = " | ".join(
-                f"#{i + 1} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%"
-                for i, r in enumerate(results[:10])
-            )
-            print(f"[SCAN] Top ranked: {top_line}", flush=True)
-        else:
-            print("[SCAN] No qualified gainers found", flush=True)
+
+        top_line = " | ".join(f"#{r.get('rank')} {r['ticker']} {r['score']}/10 {r['gain']:.1f}%" for r in results[:10])
+        print(f"[SCAN] Top ranked: {top_line}", flush=True)
+        print(f"[REGIME] {regime} — {regime_notes}", flush=True)
 
         now = time.time()
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-        hour = now_et.hour
-        minute = now_et.minute
-        weekday = now_et.weekday() 
-        
-        alerts_allowed = True
+        sent_count = 0
 
-        # 🚫 Weekend
-        if weekday >= 5:
-            alerts_allowed = False
-        
-        # 🚫 After 4:10 PM
-        if (hour > 16) or (hour == 16 and minute >= 10):
-            alerts_allowed = False
-        
-        if not alerts_allowed:
-            print(f"[MARKET] Alerts OFF — {now_et.strftime('%I:%M %p')}", flush=True)
-            time.sleep(SCAN_SLEEP)
-            continue
-            
-        results = results[:MAX_GAINERS]
-
-        print(f"[SCAN SIZE] Processing {len(results)} tickers", flush=True)
-
-        for rank, result in enumerate(results, start=1):
+        for result in results[:MAX_GAINERS]:
             ticker = result["ticker"]
-
-            price = result.get("price_float", float(result.get("price", 0) or 0))
-            current_price = price
-            vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
-            
-            gain = float(
-                result.get("gain_percent", result.get("gain", 0)) or 0
-            )
-            
-            score = result.get("score", 0)
-            
-            recent_vol = result.get("recent_volume", 0)
-            prev_vol = result.get("prev_volume", 0)
-            total_vol = result.get("total_candle_volume", 0)
-            
-            float_shares = result.get("float", 0)
-            market_cap = result.get("market_cap", 0)
-
-            candles = result.get("candles", [])
-
-            has_vwap = result.get("has_vwap", False)
-            above_vwap = result.get("above_vwap", True)
-
-            structure_text = " ".join(
-                result.get("reasons", []) + result.get("risks", [])
-            ).lower()
-            
-            # ✅ Weak early filter — but let elite ranked movers through
-            if gain < 20 and recent_vol < 150_000:
-                if score >= 8 and gain >= 15:
-                    print(f"[OVERRIDE] {ticker} weak early allowed — elite score {score}/10", flush=True)
-                else:
-                    print(f"[FILTER] {ticker} skipped — weak early", flush=True)
-                    continue
-
-            if float_shares > 40_000_000 or market_cap > 800_000_000:
-                print(f"[FILTER] {ticker} skipped early — too big", flush=True)
-                continue
-
-            if len(sent_this_cycle) >= MAX_ALERTS_PER_CYCLE:
-                break
-
             if ticker in sent_this_cycle:
                 continue
+            if sent_count >= MAX_ALERTS_PER_CYCLE:
+                break
 
-            # --- SECOND LEG vs DEAD BOUNCE DETECTOR ---
-            risks_text = " ".join(result.get("risks", [])).lower()
-            last_price = runner_prices.get(ticker, 0)
-
-            price_realert_breakout = (
-                last_price > 0
-                and current_price > last_price * 1.02
-            )
-
-            dead_bounce = (
-                (
-                    "below vwap" in risks_text
-                    or "rejection" in risks_text
-                    or "lower highs" in risks_text
-                    or "upper wick" in risks_text
-                )
-                and not result.get("true_second_leg", False)
-            )
-
-            if dead_bounce:
-                result["alert_type"] = "TRAP"
-                result["score"] = min(result.get("score", 0), 6)
-
-            # --- COIL BREAKOUT DETECTOR ---
-            if candles:
-                recent_high = max(c["high"] for c in candles[-6:])
-                high_6 = max(c["high"] for c in candles[-6:])
-                low_6 = min(c["low"] for c in candles[-6:])
-                range_pct = ((high_6 - low_6) / high_6) * 100 if high_6 else 999
-            else:
-                recent_high = price
-                range_pct = 999
-
-            near_high = current_price >= recent_high * 0.97
-            tight_range = range_pct <= 5
-            clean_structure = "clean structure confirmation" in structure_text
-
-            # --- EXTENDED RUNNER / LATE CHASE DETECTOR ---
-            extended_runner = (
-                gain >= 60
-                and above_vwap
-                
-            )
-
-            if extended_runner:
-                result["status"] = "Extended runner — pullback risk, wait for clean setup."
-
-            candles = result.get("candles", [])
-
-            if candles:
-                recent_high = max(c["high"] for c in candles[-6:])
-            else:
-                recent_high = price
-            
-            # --- BAD DATA / FLOAT HANDLING ---
-            if market_cap == 0:
-                print(f"[FILTER] {ticker} skipped — bad market cap", flush=True)
-                continue
-             
-            if float_shares == 0:
-                print(f"[WARN] {ticker} float unknown — allowing", flush=True)
-            
-                if "⚠️ Float unknown" not in result.get("risks", []):
-                    result.setdefault("risks", []).append("⚠️ Float unknown")
-                        
-            # --- RISK HOOK ---
-            filing_text = result.get("filing_text", "") or result.get("catalyst_text", "")
-            filing_date = result.get("filing_date", None)
-            headline = result.get("catalyst_text", "") or result.get("headline", "")
-            
-            headline, news_quality = find_real_news_headline(ticker, headline)
-            print(f"[NEWS] {ticker}: {headline} ({news_quality})", flush=True)
-            
-            result["catalyst_text"] = headline
-            result["headline"] = headline
-            result["news_quality"] = news_quality
-            result["news_label"] = describe_news_quality(headline, news_quality)
-            result["catalyst_type"] = result["news_label"]
-            result["strong_news"] = news_quality == "STRONG"
-            if news_quality == "JUNK":
-                result["catalyst_type"] = "🚫 JUNK NEWS"
-            
-                result = adjust_score(
-                    result,
-                    -1,
-                    risk="⚠️ Junk/aggregator headline"
-                )
-            
-            elif news_quality == "NONE":
-                result["catalyst_type"] = "❌ NO NEWS"
-            
-                result = adjust_score(
-                    result,
-                    -1,
-                    risk="⚠️ No confirmed catalyst / technical momentum only"
-                )
-            
-            elif news_quality == "STRONG":
-                result["catalyst_type"] = "⚡ STRONG NEWS"
-            
-                structure_text = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
-            
-                if not detect_bad_structure(structure_text):
-                    result = adjust_score(result, 1)
-            
-            elif news_quality == "WEAK":
-                result["catalyst_type"] = "⚠️ WEAK NEWS"
-            
-                result = adjust_score(
-                    result,
-                    -1,
-                    risk="⚠️ Weak/unclear news"
-                )
-            
-            else:  # UNKNOWN fallback
-                result["catalyst_type"] = "❓ UNKNOWN NEWS"
-            
-                result = adjust_score(
-                    result,
-                    -1,
-                    risk="⚠️ No confirmed catalyst / technical momentum only"
-                )
-            # --- VWAP DISTANCE SCORE IMPACT ---
-            if vwap and price:
-                vwap_distance = ((price - vwap) / vwap) * 100
-            
-                if vwap_distance <= -12:
-                    result = adjust_score(
-                        result,
-                        -3,
-                        risk="🚨 Way below VWAP (-12%+) / failed momentum"
-                    )
-            
-                elif vwap_distance < 0:
-                    if "👀 Slightly below VWAP / reclaim watch" not in result.get("risks", []):
-                        result.setdefault("risks", []).append("👀 Slightly below VWAP / reclaim watch")
-                        
-            # --- SEC FILING CLEANUP (FIXED) ---
-            risk_list = build_risk(filing_text, filing_date)
-            offering_risks = detect_offering_risk(
-                filing_text,
-                price=float(result.get("price", 0) or 0)
-            ) or []
-            
-            clean_risks = []
-            base_risks = result.get("risks", [])
-            if not isinstance(base_risks, list):
-                base_risks = [base_risks]
-            
-            if not isinstance(risk_list, list):
-                risk_list = [risk_list]
-            if isinstance(offering_risks, tuple):
-                found, msg = offering_risks
-                if found:
-                    offering_risks = [f"🚨 DILUTION RISK: {msg}"]
-                else:
-                    offering_risks = []
-            elif not isinstance(offering_risks, list):
-                offering_risks = [offering_risks]
-            seen = set()
-            for r in base_risks + risk_list + offering_risks:
-                if isinstance(r, dict):
-                    r = r.get("text") or r.get("message") or str(r)
-            
-                r = str(r)
-            
-                if not r or r == "None":
-                    continue
-
-                if "SEC offering risk" in r:
-                    continue
-
-                if r in seen:
-                    continue
-
-                seen.add(r)
-                clean_risks.append(r)
-
-            result["risks"] = clean_risks
-            # --- DILUTION DESCRIPTION LABEL ---
-            combined_risk_text = " ".join(clean_risks + [filing_text or ""])
-            
-            dilution_label = describe_dilution_risk(combined_risk_text)
-            
-            if dilution_label and dilution_label not in clean_risks:
-                clean_risks.insert(0, dilution_label)
-            
-            result["risks"] = clean_risks
-            # ✅ FINALIZE + DEDUPE (only once)
-            result["risks"] = list(dict.fromkeys(clean_risks))
-            
-            result["momentum_state"] = describe_momentum_state(result)
-            
-            if result["momentum_state"] not in result.setdefault("reasons", []):
-                result["reasons"].append(result["momentum_state"])
-            # ===== TRASH FILTERS =====
-
-            if price < 0.5 or price > 500:
-                print(f"[FILTER] {ticker} skipped — price ${price:.2f} outside range", flush=True)
+            tier = classify_alert_tier(result, int(result.get("rank", 99)))
+            if tier == "BLOCK":
+                print(f"[NO ALERT] {ticker} blocked — tier filter", flush=True)
                 continue
 
-            elif market_cap > MAX_MARKET_CAP:
-                print(f"[FILTER] {ticker} skipped — market cap over 1B", flush=True)
+            result = setup_bias_and_entry(result)
+            result["alert_tier"] = tier
+            result["title"] = title_for_tier(result, tier)
+            result["setup_tag"] = result["title"]
+
+            ok, reason = meaningful_realert(result, alert_history, runner_prices, alert_scores, alert_setups, now)
+            if not ok:
+                print(f"[SKIP] {ticker} {reason}", flush=True)
                 continue
 
-            elif float_shares > 50_000_000:
-                print(f"[FILTER] {ticker} skipped — float too high", flush=True)
-                continue
-            if (
-                result.get("gain", 0) < 25
-                and recent_vol < 250_000
-                and not has_strong_news(result)
-            ):
-                print(f"[FILTER] {ticker} skipped — slow mover", flush=True)
-                continue
-                            
-            # --- CLEAN TREND RUNNER ALERT ---
-            if result.get("clean_trend_runner", False):
-                result["status"] = "Clean trend runner — breakout/hold structure forming."
-            early_momentum_alert = (
-                result["gain"] >= 15
-                and result.get("volume", 0) >= 750_000
-                and result.get("recent_volume", 0) >= 75_000
-                and above_vwap
-            )
-            if early_momentum_alert:
-                print(f"[EARLY] {ticker} building momentum", flush=True)
-            
-            result["early_momentum_alert"] = early_momentum_alert
-            
-            has_vwap = result.get("has_vwap", False)
-            above_vwap = result.get("above_vwap", True)
-            recent_vol = result.get("recent_volume", 0)
-            total_vol = result.get("total_candle_volume", 0)
-            
-            volume_confirmed = has_volume_confirmation(result)
-
-            gain = float(
-                result.get("gain_percent", result.get("gain", 0)) or 0
-            )
-            recent_high = float(result.get("recent_high", result.get("high", price)) or price)
-            prev_vol = result.get("prev_volume", 0)
-            
-            valid_early_alert = (
-                (
-                    gain >= 25
-                    and result.get("score", 0) >= 6
-                    and recent_vol >= 100_000
-                )
-                or
-                (
-                    gain >= 15
-                    and result.get("score", 0) >= 8
-                    and recent_vol >= 75_000
-                )
-            ) and (
-                price >= 0.50
-                and float_shares > 0
-                and market_cap > 0
-                and above_vwap
-            )
-            
-            # --- RUNNER CONFIRMATION FILTER ---
-            breakout_confirmed = (
-                result.get("breakout", False)
-                and price > (float(result.get("breakout_level", 0) or 0) * 1.01)
-            )
-            
-            volume_expanding = (
-                recent_vol > prev_vol
-                and recent_vol >= 200_000
-            )
-            
-            not_extended = price <= recent_high * 1.03
-            
-            valid_runner_alert = (
-                gain >= ALERT_MIN_GAIN
-                and above_vwap
-                and (
-                    breakout_confirmed
-                    or volume_expanding
-                    or has_strong_news(result)
-                )
-                and not_extended
-            )
-            
-            # ===== SECOND LEG + BREAKOUT BURST =====
-            volume_spike = recent_vol > (prev_vol * 1.5) if prev_vol > 0 else False
-            
-            if volume_spike:
-                result = adjust_score(
-                    result,
-                    1,
-                    reason="Volume surge"
-                )
-            
-            pullback = price < recent_high * 0.95
-            
-            breakout_burst_alert = (
-                gain >= 25
-                and price > recent_high
-                and volume_spike
-            )
-            
-            # ===== ENTRY SETUP ALERTS =====
-            vwap_reclaim_setup = (
-                gain >= 15
-                and above_vwap
-                and recent_vol >= 75_000
-            )
-            
-            breakout_hold_setup = (
-                gain >= 20
-                and price >= recent_high * 0.98
-                and recent_vol >= 150_000
-            )
-            
-            dip_buy_setup = (
-                gain >= 20
-                and above_vwap
-                and pullback
-                and recent_vol >= 100_000
-            )
-            
-            trend_builder_alert = result.get("trend_builder_alert", False)
-            second_leg_alert = result.get("true_second_leg", False)
-            
-            elite_score_alert = (
-                score >= 8
-                and gain >= 15
-                and recent_vol >= 75_000
-                and price >= 0.50
-                and float_shares > 0
-                and market_cap > 0
-                and above_vwap
-            )
-            
-            if second_leg_alert:
-                print(f"[SECOND LEG] {ticker} true second-leg detected", flush=True)
-            
-            if gain < 15 and not (
-                elite_score_alert
-                or early_momentum_alert
-                or trend_builder_alert
-                or second_leg_alert
-                or vwap_reclaim_setup
-            ):
-                continue
-         
-            should_alert = (
-                elite_score_alert
-                or valid_early_alert
-                or valid_runner_alert
-                or early_momentum_alert
-                or trend_builder_alert
-                or second_leg_alert
-                or breakout_burst_alert
-                or vwap_reclaim_setup
-                or breakout_hold_setup
-                or dip_buy_setup
-                or result.get("clean_trend_runner", False)
-            )
-            # ✅ Final elite fallback
-            if (
-                score >= 8
-                and gain >= 20
-                and above_vwap
-            ):
-                should_alert = True
-            if elite_score_alert:
-                result["a_plus_runner"] = True
-                result["clean_trend_runner"] = True
-                result.setdefault("reasons", []).append("Elite score momentum setup")
-            # --- STRONG NEWS OVERRIDE ---
-            if (
-                has_strong_news(result)
-                and gain >= 25
-                and above_vwap
-                and not result.get("bad_structure", False)
-            ):
-                should_alert = True
-            
-            # --- TRUE SECOND LEG LOGIC ---
-            if second_leg_alert:
-                tight_second_leg_title = (
-                    price >= recent_high * 0.97
-                    and recent_vol >= 150_000
-                    and has_higher_lows
-                )
-            
-                if tight_second_leg_title:
-                    if "Second leg building" not in result.get("reasons", []):
-                        result.setdefault("reasons", []).append("Second leg building")
-            
-                    if "Runner watch" not in result.get("reasons", []):
-                        result.setdefault("reasons", []).append("Runner watch")
-            
-            # 🚫 MOMENTUM DECAY FILTER
-            if result.get("momentum_decay", False):
-            
-                strong_override = (
-                    result.get("clean_trend_runner", False)
-                    or breakout_burst_alert
-                    or second_leg_alert
-                    or vwap_reclaim_setup
-                )
-            
-                if not strong_override:
-                    print(f"[NO ALERT] {ticker} blocked — momentum decay", flush=True)
-                    continue
-            
-            sec_risk = False
-            sec_note = "SEC check skipped — low score"
-            
-            if result.get("score", 0) >= 6:
-                sec_risk, sec_note = check_sec_offering_risk(ticker)
-            
-            result["sec_note"] = sec_note
-            
-            if sec_risk:
-                if any(x in sec_note for x in ["S-1", "S-3", "F-1", "F-3", "424B"]):
-                    result = adjust_score(
-                        result,
-                        -2,
-                        risk=f"🚨 Active dilution filing: {sec_note}"
-                    )
-                else:
-                    result["risks"].append(f"⚠️ Filing detected (monitor): {sec_note}")
-            
-            # --- FINAL ALERT BLOCKERS ---
-            if not should_alert:
-                print(f"[NO ALERT] {ticker} blocked — should_alert False", flush=True)
-                continue
-            
-            # 🚫 SCORE FILTER
-            elite_override = (
-                elite_score_alert
-                or result.get("clean_trend_runner", False)
-                or has_strong_news(result)
-            )
-            
-            if result.get("score", 0) < 6 and not second_leg_alert and not elite_override:
-                print(f"[NO ALERT] {ticker} blocked — score too low", flush=True)
-                continue
-            
-            # 🚫 BASIC STRUCTURE FILTER
-            if not above_vwap and not second_leg_alert:
-                print(f"[NO ALERT] {ticker} blocked — below VWAP", flush=True)
-                continue
-                
-            current_price = float(result.get("price", 0))
-            last_alert = alert_history.get(ticker, 0)
-            cooldown_done = now - last_alert >= ALERT_COOLDOWN_SECONDS
-
-            # --- COOLDOWN LOGIC ---
-            second_leg_bypass = second_leg_alert
-
-            if not cooldown_done and not second_leg_bypass:
-                print(f"[SKIP] {ticker} cooldown active", flush=True)
+            # Final no-news safety: only elite structure/no-news volume runner can send.
+            if result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"] and tier != "ELITE":
+                print(f"[NO ALERT] {ticker} no-news watch blocked — not elite", flush=True)
                 continue
 
-            if second_leg_bypass and not cooldown_done:
-                last_price = runner_prices.get(ticker, 0)
-
-                if last_price > 0 and current_price <= last_price * 1.05:
-                    print(f"[SKIP] {ticker} second leg not enough new high", flush=True)
-                    continue
-
-                print(f"[SECOND LEG BYPASS] {ticker} cooldown bypassed", flush=True)
-            
-            if ticker not in first_alert_price and result.get("score", 0) >= 7:
-                first_alert_price[ticker] = current_price
-            
-            last_alert_price = runner_prices.get(ticker, 0)
-            new_high_realert = last_alert_price > 0 and current_price > last_alert_price * 1.05
-            
-            result["score"] = max(0, min(result["score"], 10))
-            
-            structure_text = " ".join(
-                result.get("reasons", []) + result.get("risks", [])
-            ).lower()
-            
-            # ===== RUNNER / ENTRY ENGINE =====
-            if result.get("momentum_decay", False):
-                result["trap_runner"] = "⚠️ MOMENTUM FADED"
-            elif detect_bad_structure(structure_text):
-                result["trap_runner"] = "⚠️ TRAP RISK"
-            
-            elif second_leg_alert:
-                result["trap_runner"] = "🟢 RUNNER WATCH"
-            
-            elif above_vwap and result.get("recent_volume", 0) >= 150_000:
-                result["trap_runner"] = "🚀 RUNNER LEAN"
-            
-            else:
-                result["trap_runner"] = "🤔 UNCLEAR"
-            
-            if (
-                above_vwap
-                and has_higher_lows
-                and not bad_structure
-                and not result.get("momentum_decay", False)
-            ):
-                result["trap_runner"] = "🟢 RUNNER WATCH"
-            
-            # ===== ENTRY HINTS =====
-            if result.get("trap_runner") in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]:
-            
-                if result.get("clean_trend_runner", False):
-                    result["entry_hint"] = "📈 Clean trend — watch breakout/hold"
-            
-                elif second_leg_alert:
-                    result["entry_hint"] = "🟢 Second leg — watch hold over VWAP / recent high"
-            
-                elif price >= recent_high * 0.98:
-                    result["entry_hint"] = "🚀 Near highs — wait for breakout/hold"
-            
-                elif above_vwap:
-                    result["entry_hint"] = "🟢 VWAP hold — watch dip/coil"
-            
-                else:
-                    result["entry_hint"] = "👀 Watch for VWAP reclaim"
-            
-            elif result.get("trap_runner") == "⚠️ TRAP RISK":
-                result["entry_hint"] = "⚠️ Avoid chasing — wait for reclaim"
-            
-            elif result.get("trap_runner") == "⚠️ MOMENTUM FADED":
-                result["entry_hint"] = "⚠️ Momentum faded — wait for reclaim"
-            
-            else:
-                result["entry_hint"] = "🤔 Wait for setup confirmation"
-            
-            # ===== ALERT TAG ENGINE =====
-            if result.get("clean_trend_runner", False):
-                alert_tag = "📈 CLEAN TREND RUNNER"
-            
-            elif trend_builder_alert:
-                alert_tag = "🚨 TREND BUILDER"
-            
-            elif second_leg_alert:
-            
-                tight_second_leg_title = (
-                    price >= recent_high * 0.97
-                    and recent_vol >= 150_000
-                    and has_higher_lows
-                )
-            
-                if tight_second_leg_title:
-                    alert_tag = "🚨 SECOND LEG COIL BREAKOUT"
-                else:
-                    alert_tag = "🟢 RUNNER WATCH"
-            
-            elif breakout_burst_alert:
-                alert_tag = "🚀 BREAKOUT BURST"
-            
-            elif vwap_reclaim_setup:
-                alert_tag = "🟢 VWAP RECLAIM"
-            
-            elif breakout_hold_setup:
-                alert_tag = "🚀 BREAKOUT HOLD"
-            
-            elif dip_buy_setup:
-                alert_tag = "📈 DIP BUY"
-            
-            else:
-                alert_tag = ""
-            
-         
-            bad_chart = detect_bad_structure(structure_text)
-
-            if bad_chart and not second_leg_alert and not vwap_reclaim_setup:
-                print(f"[FILTER] {ticker} skipped — bad structure", flush=True)
-                continue
-            
-            # --- WEAK MIDDAY CHOP FILTER ---
-            weak_midday_chop = (
-                session == "MIDDAY"
-                and not above_vwap
-                and not has_higher_lows
-                and recent_vol < 150_000
-            )
-            
-            if weak_midday_chop and not second_leg_alert:
-                print(f"[FILTER] {ticker} weak midday chop", flush=True)
-                continue
-            
-            # --- SECOND LEG QUALITY FILTER ---
-            weak_second_leg = (
-                result.get("second_leg", False)
-                and not second_leg_alert
-            )
-            
-            if weak_second_leg:
-                print(f"[FILTER] {ticker} weak second-leg quality", flush=True)
-                continue
-            
-            # --- BREAKOUT HOLD QUALITY FILTER ---
-            failed_breakout_hold = (
-                breakout_hold_setup
-                and price < recent_high * 0.97
-                and not above_vwap
-            )
-            
-            if failed_breakout_hold:
-                print(f"[FILTER] {ticker} failed breakout hold", flush=True)
-                continue
-            
-            first_alert = last_alert_price == 0
-            realert_ok = new_high_realert
-            
-            no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
-            
-            # 🚨 A+ FILTER — allow only special setups or strong scores through
-            if (
-                result.get("momentum_decay", False)
-                and not result.get("true_second_leg", False)
-                and not vwap_reclaim_setup
-            ):
-                print(f"[FILTER] {ticker} skipped — momentum decay", flush=True)
-                continue
-            
-            # 🚫 TRAP FILTER
-            if (
-                result.get("trap_runner") == "⚠️ TRAP RISK"
-                and not second_leg_alert
-            ):
-                print(f"[FILTER] {ticker} skipped — trap", flush=True)
-                continue
-            
-            # 🚫 RE-ALERT FILTER
-            if not (first_alert or realert_ok or second_leg_alert):
-                print(f"[SKIP] {ticker} no new high / already alerted", flush=True)
-                continue
-            
-            # 🚫 VOLUME CONFIRMATION FILTER
-            if (
-                not volume_confirmed
-                and result.get("trap_runner") not in ["🚀 RUNNER LEAN", "🟢 RUNNER WATCH"]
-                and not second_leg_alert
-            ):
-                print(f"[FILTER] {ticker} skipped — volume not confirmed", flush=True)
-                continue
-            
-            # 🚫 NO-NEWS FILTER
-            if no_news and not (
-                elite_score_alert
-                or second_leg_alert
-                or result.get("clean_trend_runner", False)
-                or result.get("trend_builder_alert", False)
-                or (
-                    above_vwap
-                    and has_higher_lows
-                    and result.get("recent_volume", 0) >= 150_000
-                    and float_shares <= 20_000_000
-                )
-            ):
-                print(f"[FILTER] {ticker} skipped — no news / no valid structure", flush=True)
-                continue
-            if (
-                not elite_score_alert
-                and not good_structure
-                and not result.get("second_leg", False)
-                and not has_strong_news(result)
-            ):
-                print(f"[FILTER] {ticker} failed runner structure", flush=True)
-                continue
-                    # --- MOMENTUM DECAY ENGINE ---
-            recent_vol = result.get("recent_volume", 0)
-            prev_vol = result.get("prev_volume", 0)
-
-            volume_fading = (
-                prev_vol > 0
-                and recent_vol < prev_vol * 0.60
-            )
-
-            lost_vwap = (
-                has_vwap
-                and price < vwap
-            )
-            failed_structure = detect_bad_structure(structure_text)
-
-            bad_momentum_decay = (
-                volume_fading
-                or lost_vwap
-                or failed_structure
-            )
-            if bad_momentum_decay:
-            
-                # don't decay strong second legs
-                if not result.get("true_second_leg", False):
-            
-                    result["momentum_decay"] = True
-            
-                    result = adjust_score(
-                        result,
-                        -2,
-                        risk="⚠️ Momentum decay / weak continuation"
-                    )
-            
-            has_higher_lows = result.get("has_higher_lows", False)
-            
-            bad_structure = detect_bad_structure(structure_text)
-            
-            good_structure = (
-                above_vwap
-                and not bad_structure
-                and (
-                    has_higher_lows
-                    or has_strong_news(result)
-                    or result.get("breakout", False)
-                )
-            )
-            if (
-                not good_structure
-                and not result.get("second_leg", False)
-                and not has_strong_news(result)
-            ):
-                print(f"[FILTER] {ticker} failed runner structure", flush=True)
-                continue
-                
-            # --- VWAP HOLD CONFIRMATION ---
-            if above_vwap and has_higher_lows:
-                result = adjust_score(result, 2, reason="📈 Clean trend runner structure")
-                print(f"[BOOST] {ticker} VWAP hold confirmed", flush=True)
-            
-            result["setup_tag"] = alert_tag.strip()
-            result["title"] = get_alert_title(result)
-            last_price = runner_prices.get(ticker, 0)
-            last_score = alert_scores.get(ticker, 0)
-            
-            # --- REPEAT ALERT FILTER ---
-            last_price = runner_prices.get(ticker, 0)
-            last_score = alert_scores.get(ticker, 0)
-            
-            meaningful_change = (
-                last_price == 0
-                or current_price > last_price * 1.03
-                or result.get("score", 0) > last_score
-                or result.get("trap_runner") == "🟢 RUNNER WATCH"
-                or breakout_hold_setup
-                or result.get("true_second_leg", False)
-            )
-            
-            if ticker in runner_prices and not meaningful_change:
-                print(f"[SKIP] {ticker} repeat alert without meaningful change", flush=True)
-                continue
-                
-            result["trap_runner"] = build_trade_bias(result)
-            
-          
-            print(f"[SEND TEST] {ticker} entering alert send", flush=True)
-            
-            alert_msg = build_alert(result)
-            sent = send_alert(alert_msg)
-            
+            msg = build_compact_alert(result)
+            print(f"[SEND] {ticker} tier={tier} score={result['score']} reason={reason}", flush=True)
+            sent = send_alert(msg)
             print(f"[SEND RESULT] {ticker} sent={sent}", flush=True)
-                        
+
             if sent:
-                if result.get("true_second_leg", False):
-                    print(f"🟢 SECOND LEG BUILDING {ticker} {price}", flush=True)
-
-                elif result.get("trap_runner") == "🟢 RUNNER WATCH":
-                    print(f"🟢 RUNNER WATCH {ticker} {price}", flush=True)
-
-                elif breakout_burst_alert:
-                    print(f"🚀 BREAKOUT BURST {ticker} {price}", flush=True)
+                sent_this_cycle.add(ticker)
+                sent_count += 1
+                alert_history[ticker] = now
+                runner_prices[ticker] = float(result.get("price", 0) or 0)
+                alert_scores[ticker] = int(result.get("score", 0) or 0)
+                alert_setups[ticker] = result.get("title", "")
+                print(f"[ALERT SENT] {ticker} {result.get('title')}", flush=True)
 
             time.sleep(0.1)
-                                
-            if sent:
-                alert_history[ticker] = now
-                runner_prices[ticker] = current_price
 
-                print(f"[ALERT SENT] {ticker}", flush=True)
-
-        print("[SCAN] Sleeping before next cycle", flush=True)
+        print("[SCAN] Cycle complete — sleeping", flush=True)
+        print("[HEARTBEAT] alive", flush=True)
         time.sleep(SCAN_SLEEP)
 
 if __name__ == "__main__":
