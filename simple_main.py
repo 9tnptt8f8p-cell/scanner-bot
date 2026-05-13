@@ -15,9 +15,56 @@ from rank_engine import rank_result
 
 load_dotenv()
 def build_trade_bias(result):
-    risks = " ".join(result.get("risks", [])).lower()
+    """Bias engine. Dilution is awareness-only and must not override runner/trap bias."""
     news_quality = result.get("news_quality", "")
     structure = " ".join(result.get("reasons", []) + result.get("risks", [])).lower()
+
+    price = result.get("price_float", float(result.get("price", 0) or 0))
+    vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
+    recent_volume = int(result.get("recent_volume", result.get("volume", 0)) or 0)
+
+    above_vwap = True
+    vwap_distance = 0
+    if vwap and price:
+        vwap_distance = ((price - vwap) / vwap) * 100
+        above_vwap = price >= vwap
+        result["above_vwap"] = above_vwap
+        result["vwap_distance"] = round(vwap_distance, 2)
+
+    has_higher_lows = result.get("has_higher_lows", False) or "higher lows" in structure
+    breakout_confirmed = result.get("breakout_confirmed", False) or "breakout" in structure or "strong candle close" in structure
+
+    true_second_leg = above_vwap and has_higher_lows and breakout_confirmed and recent_volume >= 150000
+    result["true_second_leg"] = true_second_leg
+
+    result["momentum_decay"] = bool((vwap and price and price < vwap) or result.get("volume_fading", False))
+
+    if news_quality == "NEGATIVE":
+        return "❌ Negative catalyst — avoid unless extreme scalp only"
+
+    if vwap and price:
+        if vwap_distance <= -12:
+            return "🚨 Way below VWAP — failed momentum / avoid"
+        if vwap_distance < 0:
+            return "👀 Slightly below VWAP — reclaim watch"
+
+    if result.get("momentum_decay", False) and not true_second_leg:
+        return "⚠️ Momentum faded — wait for reclaim"
+
+    if "upper wick" in structure or "trap" in structure:
+        return "⚠️ Trap risk — wait for cleaner setup"
+
+    if true_second_leg:
+        return "🚀 RUNNER WATCH — VWAP hold + second-leg setup"
+
+    if news_quality == "STRONG":
+        return "✅ Strong catalyst — watch for continuation"
+
+    if news_quality == "WEAK":
+        return "⚠️ Weak catalyst — could fade fast"
+
+    return "🤔 Mixed/unclear — wait for confirmation"
+
 
     price = result.get("price_float", float(result.get("price", 0) or 0))
     vwap = result.get("vwap_float", float(result.get("vwap", 0) or 0))
@@ -126,7 +173,7 @@ def should_scan_now():
 
     return True
 
-BOOT_MARKER = "elite scanner rebuild v3 — top gainer refresh + alert tiers"
+BOOT_MARKER = "elite scanner rebuild v4 — cleaner alerts + awareness-only dilution + fresh gainer tiers"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -438,14 +485,53 @@ def get_percent_gainers():
         flush=True
     )
  
-    return movers[:MAX_GAINERS]
+    return movers[:max(MAX_GAINERS, 100)]
 
 def get_yahoo_candles(ticker):
+    """Robust Yahoo candle fallback. Handles malformed/missing quote arrays cleanly."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {
-        "interval": "5m",
-        "range": "1d"
-    }
+    params = {"interval": "5m", "range": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json() if r.content else {}
+        chart = data.get("chart", {})
+        results = chart.get("result") or []
+        if not results:
+            return []
+
+        quote_list = (results[0].get("indicators", {}) or {}).get("quote") or []
+        if not quote_list:
+            return []
+        quote = quote_list[0] or {}
+
+        opens = quote.get("open") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
+        closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
+
+        candles = []
+        for o, h, l, c, v in zip(opens, highs, lows, closes, volumes):
+            if None in (o, h, l, c, v):
+                continue
+            try:
+                candles.append({
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": int(float(v or 0)),
+                })
+            except Exception:
+                continue
+
+        return candles
+    except Exception as e:
+        print(f"[CANDLE ERROR] {ticker}: {e}", flush=True)
+        return []
+
 
     headers = {
         "User-Agent": "Mozilla/5.0"
@@ -1350,10 +1436,72 @@ def scrape_pr_headline(ticker):
     return ""
 
 def find_real_news_headline(ticker, current_headline=""):
-    """
-    Keeps current headline if usable.
-    If junk/empty, tries Yahoo fallback.
-    """
+    """Find usable catalyst; rejects roundup junk and falls back to Yahoo/PR."""
+    now = time.time()
+    ticker = str(ticker or "").upper().strip()
+
+    if ticker in NEWS_CACHE:
+        cached = NEWS_CACHE[ticker]
+        if now - cached["time"] < CACHE_TTL_SECONDS:
+            return cached["data"]
+
+    def clean_headline(text):
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        lower = text.lower()
+        junk_phrases = [
+            "top gainers", "top gainers and losers", "stocks moving", "stocks are moving",
+            "pre-market session", "premarket session", "market session", "gainers and losers",
+            "stocks to watch today", "insights into", "get insights into", "market movers",
+            "gap-ups and gap-downs", "most active stocks", "shares are trading higher",
+            "why shares are trading", "why these stocks", "roundup",
+        ]
+        if any(x in lower for x in junk_phrases):
+            return ""
+        return text
+
+    current_headline = clean_headline(current_headline)
+    quality = classify_news_quality(current_headline)
+
+    if quality in ["STRONG", "WEAK"]:
+        data = (current_headline, quality)
+        NEWS_CACHE[ticker] = {"time": now, "data": data}
+        return data
+
+    # Yahoo news fallback — strict ticker word matching to avoid false hits like GLE inside a word.
+    try:
+        url = f"https://finance.yahoo.com/quote/{ticker}/news/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=2)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for link in soup.find_all("a"):
+                text = clean_headline(link.get_text(" ", strip=True))
+                if not text or len(text) < 25:
+                    continue
+                if not re.search(rf"{re.escape(ticker)}", text, re.IGNORECASE):
+                    continue
+                scraped_quality = classify_news_quality(text)
+                if scraped_quality in ["STRONG", "WEAK"]:
+                    print(f"[NEWS SCRAPE] {ticker}: {text} ({scraped_quality})", flush=True)
+                    data = (text, scraped_quality)
+                    NEWS_CACHE[ticker] = {"time": now, "data": data}
+                    return data
+    except Exception as e:
+        print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
+
+    pr_headline = scrape_pr_headline(ticker)
+    if pr_headline:
+        pr_quality = classify_news_quality(pr_headline)
+        data = (pr_headline, pr_quality)
+        NEWS_CACHE[ticker] = {"time": now, "data": data}
+        return data
+
+    data = ("No fresh catalyst found", "NONE")
+    NEWS_CACHE[ticker] = {"time": now, "data": data}
+    return data
+
 
     now = time.time()
 
@@ -1679,7 +1827,9 @@ def compute_momentum_flags(result):
 
 
 def apply_clean_scoring(result):
+    """Final score tune. Dilution/SEC risks are never score penalties — awareness only."""
     score = int(result.get("score", 0) or 0)
+
     if result.get("clean_trend_runner"):
         score += 2
         result.setdefault("reasons", []).append("📈 Clean trend runner")
@@ -1692,21 +1842,48 @@ def apply_clean_scoring(result):
     if result.get("massive_no_news_runner"):
         score += 1
         result.setdefault("reasons", []).append("No-news volume runner")
+
+    # Structure can reduce confidence; dilution never does.
     if result.get("momentum_decay"):
-        score -= 2
+        score -= 1
         result.setdefault("risks", []).append("⚠️ Momentum decay / wait for reclaim")
     if result.get("above_vwap") is False:
-        score -= 2
+        score -= 1
         result.setdefault("risks", []).append("Below VWAP")
+
     result["score"] = max(0, min(score, 10))
     return compact_reasons(result)
 
 
+
 def classify_alert_tier(result, rank):
+    """Elite alerts for trade-quality setups; watch tier for important top gainers."""
     gain = float(result.get("gain", 0) or 0)
     score = int(result.get("score", 0) or 0)
     recent_vol = int(result.get("recent_volume", 0) or 0)
+    day_vol = int(result.get("volume", 0) or 0)
     no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
+
+    if result.get("bad_structure") and not result.get("true_second_leg"):
+        return "BLOCK"
+    if result.get("momentum_decay") and not result.get("fresh_high_after_vwap_hold") and not result.get("true_second_leg"):
+        return "BLOCK"
+
+    if result.get("true_second_leg") or result.get("clean_trend_runner"):
+        return "ELITE"
+    if result.get("massive_no_news_runner"):
+        return "ELITE"
+    if score >= 8 and gain >= 20 and result.get("above_vwap") and recent_vol >= 100_000:
+        return "ELITE"
+
+    # Awareness tier prevents major fresh gainers from silently disappearing.
+    if rank <= 12 and gain >= 25 and day_vol >= 1_000_000 and result.get("above_vwap") and recent_vol >= 60_000:
+        return "WATCH"
+    if score >= 7 and gain >= 20 and result.get("above_vwap") and not no_news:
+        return "WATCH"
+
+    return "BLOCK"
+
 
     if result.get("bad_structure") and not result.get("true_second_leg"):
         return "BLOCK"
@@ -1803,7 +1980,7 @@ def build_compact_alert(result):
     news_quality = result.get("news_quality", "UNKNOWN")
     catalyst_line = result.get("catalyst_text") or "No fresh catalyst found"
 
-    reasons = "\n".join(f"• {x}" for x in result.get("reasons", [])[:6]) or "• Momentum watch"
+    reasons = "\n".join(f"• {x}" for x in result.get("reasons", [])[:5]) or "• Momentum watch"
     risks = "\n".join(f"• {x}" for x in result.get("risks", [])[:4]) or "• None obvious"
 
     if news_quality in ["NONE", "UNKNOWN", "JUNK"]:
@@ -1813,19 +1990,19 @@ def build_compact_alert(result):
     else:
         news_header = "⚠️ WEAK/UNCLEAR NEWS"
 
+    tier = result.get("alert_tier", "WATCH")
     return (
         f"{result.get('title', get_alert_title(result))}\n\n"
-        f"{result['ticker']} | Score: {result['score']}/10 | Rank #{result.get('rank', '?')}\n"
+        f"{result['ticker']} | Score: {result['score']}/10 | {tier}\n"
         f"Price: ${float(result.get('price', 0) or 0):.4f}\n"
         f"Gain: {float(result.get('gain', 0) or 0):.1f}%\n"
         f"Float: {float_text}\n\n"
         f"Catalyst: {news_header}\n"
         f"{catalyst_line}\n\n"
         f"Bias: {result.get('trap_runner', 'UNKNOWN')}\n"
-        f"Entry: {result.get('entry_hint', 'Wait for confirmation')}\n"
-        f"Regime: {result.get('market_regime', 'UNKNOWN')}\n\n"
+        f"Entry: {result.get('entry_hint', 'Wait for confirmation')}\n\n"
         f"Why:\n{reasons}\n\n"
-        f"Risk:\n{risks}"
+        f"Risk / Awareness:\n{risks}"
     )
 
 def run_scanner():
@@ -1959,7 +2136,9 @@ def run_scanner():
                 result = apply_clean_scoring(result)
 
                 # SEC / dilution check only for real candidates so API is not hammered.
-                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 10:
+                # IMPORTANT: dilution is awareness-only. It never subtracts score or blocks alerts.
+                sec_risk, sec_note = False, ""
+                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 12:
                     sec_risk, sec_note = check_sec_offering_risk(ticker)
                     result["sec_note"] = sec_note
                 if sec_risk:
@@ -2031,9 +2210,9 @@ def run_scanner():
                 print(f"[SKIP] {ticker} {reason}", flush=True)
                 continue
 
-            # Final no-news safety: only elite structure/no-news volume runner can send.
-            if result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"] and tier != "ELITE":
-                print(f"[NO ALERT] {ticker} no-news watch blocked — not elite", flush=True)
+            # Final no-news safety: allow ELITE technical runners and top-gainer WATCH awareness.
+            if result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"] and tier not in ["ELITE", "WATCH"]:
+                print(f"[NO ALERT] {ticker} no-news blocked — weak setup", flush=True)
                 continue
 
             msg = build_compact_alert(result)
