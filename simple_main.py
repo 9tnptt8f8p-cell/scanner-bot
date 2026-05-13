@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v7 — softer decay + stronger watch alerts"
+BOOT_MARKER = "elite scanner rebuild v8 — softer decay + stronger watch alerts"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -1135,9 +1135,28 @@ def compute_momentum_flags(result):
     result["has_higher_lows"] = has_higher_lows
     result["breakout_confirmed"] = breakout
 
+    # Softer decay model:
+    # - Volume fading alone is NOT dead momentum.
+    # - A small VWAP slip alone is NOT dead momentum.
+    # - Decay should require combined weakness unless structure is truly bad.
+    # This prevents strong movers above VWAP / near highs from being hidden as AVOID.
+    shallow_vwap_slip = bool(lost_vwap and result.get("vwap_distance", 0) > -5.0)
+    deep_vwap_loss = bool(lost_vwap and result.get("vwap_distance", 0) <= -5.0)
+
+    result["shallow_vwap_slip"] = shallow_vwap_slip
+    result["deep_vwap_loss"] = deep_vwap_loss
+
+    healthy_pullback = bool(
+        gain >= 15
+        and (above_vwap or shallow_vwap_slip)
+        and (has_higher_lows or result.get("near_high") or breakout)
+    )
+
     result["momentum_decay"] = bool(
-        (volume_fading or lost_vwap or bad_structure)
-        and not (above_vwap and has_higher_lows and result.get("near_high"))
+        bad_structure
+        or deep_vwap_loss
+        or (volume_fading and lost_vwap and not healthy_pullback)
+        or (volume_fading and not above_vwap and not has_higher_lows and not result.get("near_high"))
     )
 
     result["clean_trend_runner"] = bool(
@@ -1246,7 +1265,7 @@ def classify_alert_tier(result, rank):
     )
 
     # Do not call every VWAP slip an avoid. Only deep VWAP loss is a hard avoid.
-    hard_lost_vwap = bool(result.get("lost_vwap")) and vwap_distance <= -5.0 and not monster_mover
+    hard_lost_vwap = bool(result.get("deep_vwap_loss")) and not monster_mover
 
     if hard_bad_structure or hard_lost_vwap:
         if monster_mover and score >= 5:
@@ -1277,7 +1296,11 @@ def classify_alert_tier(result, rank):
         return "MAJOR MOVER"
 
     # Softer decay handling: faded strong movers become WATCH instead of full suppression.
-    if momentum_decay and strong_active_mover:
+    if momentum_decay and strong_active_mover and not bool(result.get("deep_vwap_loss")):
+        return "WATCH"
+
+    # Shallow VWAP pullback on a major gainer = visible WATCH, not invisible.
+    if bool(result.get("shallow_vwap_slip")) and high_rank and gain >= 25 and score >= 4 and active_volume:
         return "WATCH"
 
     # Watch tier: not an entry call, but important enough to see.
