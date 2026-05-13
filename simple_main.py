@@ -1,13 +1,18 @@
 import os
 import re
 import time
+import html
+import json
+import email.utils
+from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
+from threading import Thread
+from urllib.parse import quote_plus
+
 import requests
 from bs4 import BeautifulSoup
-from threading import Thread
 from flask import Flask
 from dotenv import load_dotenv
-from datetime import datetime, time as dtime
-from zoneinfo import ZoneInfo
 
 from structure_engine import analyze_structure
 from alerts import send_alert
@@ -20,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v19 — runner/leader only + hard 7 floor"
+BOOT_MARKER = "elite scanner rebuild v20 — deep catalyst engine + runner/leader only"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,10 +38,12 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# V19 ALERT PHILOSOPHY:
+# V20 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
 # 2. Phone alerts are RUNNER / LEADER only.
-# 3. No WATCH tier. Score 6 and below is ignored.
+# 3. No WATCH tier.
+# 4. Score 6 and below is ignored.
+# 5. Catalyst engine digs deeper before saying no confirmed news.
 ALERT_MIN_GAIN = 25
 MIN_ALERT_SCORE = 7
 MIN_ALERT_RECENT_VOLUME = 75_000
@@ -45,13 +52,13 @@ LEADER_MIN_GAIN = 40
 LEADER_MIN_DAY_VOLUME = 2_000_000
 LEADER_MIN_RECENT_VOLUME = 150_000
 
-# Fresh ignition / reclaim upgrades
+# Fresh ignition / reclaim upgrades.
 FRESH_IGNITION_MIN_GAIN = 25
 RECLAIM_MAX_DISTANCE_PCT = 2.0
 MIDDAY_CHOP_START = dtime(11, 0)
 MIDDAY_CHOP_END = dtime(14, 0)
 
-# Do not hard-block fading leaders. Downgrade the title/bias instead.
+# Do not hard-block fading leaders. Downgrade title/bias instead.
 BLOCK_FADING_WATCH_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
@@ -68,12 +75,15 @@ MAX_FLOAT_SHARES = 50_000_000
 TREND_BUILDER_MIN_GAIN = 12
 
 CACHE_TTL_SECONDS = 60 * 30
+NEWS_CACHE_TTL_SECONDS = 60 * 20
 PR_CACHE_TTL_SECONDS = 60 * 30
+SEC_CACHE_TTL_SECONDS = 60 * 30
 
 PROFILE_CACHE = {}
 NEWS_CACHE = {}
 SEC_CACHE = {}
 PR_CACHE = {}
+COMPANY_CACHE = {}
 
 MARKET_HOLIDAYS_2026 = {
     "2026-01-01", "2026-01-19", "2026-02-16",
@@ -82,7 +92,7 @@ MARKET_HOLIDAYS_2026 = {
     "2026-12-25",
 }
 
-BAD_TICKER_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT")
+BAD_TICKER_SUFFIXES = ("WS", "WT", "WQ", "WSA", "WSC", "IW", "WARRANT", "U", "R")
 
 BAD_NEWS_KEYWORDS = [
     "top gainers",
@@ -121,6 +131,7 @@ BAD_NEWS_KEYWORDS = [
     "most active stocks",
 ]
 
+# Bad PR/page fragments that commonly create false catalysts.
 BAD_PR_MATCH_PHRASES = [
     "market global forecast",
     "global forecast",
@@ -135,6 +146,15 @@ BAD_PR_MATCH_PHRASES = [
     "non- stim",
     "non-stim",
     "pr newswire",
+    "globenewswire",
+    "accesswire",
+    "benzinga.com",
+    "newsfile corp",
+    "privacy policy",
+    "terms of use",
+    "cookie",
+    "subscribe",
+    "sign in",
 ]
 
 AMBIGUOUS_TICKERS_REQUIRE_COMPANY = {
@@ -143,6 +163,10 @@ AMBIGUOUS_TICKERS_REQUIRE_COMPANY = {
     "GUTS": ["guts"],
     "STIM": ["stim", "non-stim", "stimulation"],
     "RVI": ["rvi", "vacuum interrupter"],
+    "AI": ["artificial intelligence"],
+    "CAN": ["can"],
+    "ON": ["on"],
+    "FOR": ["for"],
 }
 
 WEAK_NEWS_OVERRIDES = [
@@ -158,6 +182,8 @@ WEAK_NEWS_OVERRIDES = [
     "encourages investors",
     "secure counsel",
     "losses on their investment",
+    "shareholder alert",
+    "lead plaintiff",
 ]
 
 SOFT_NEWS_PHRASES = [
@@ -167,6 +193,9 @@ SOFT_NEWS_PHRASES = [
     "announces stock ticker",
     "reports first quarter",
     "quarterly results",
+    "annual meeting",
+    "conference participation",
+    "to present at",
 ]
 
 STRONG_KEYWORDS = [
@@ -187,7 +216,66 @@ STRONG_KEYWORDS = [
     "profitability", "record revenue",
     "bitcoin", "ethereum", "crypto", "blockchain",
     "artificial intelligence", "ai-powered", "nvidia",
+    "patent", "granted patent", "exclusive license", "licensing",
+    "department of defense", "dod", "army", "navy", "air force",
+    "launches", "commercialization", "strategic investment",
 ]
+
+CATALYST_BUCKETS = {
+    "FDA / biotech": [
+        "fda", "approval", "approved", "clearance", "cleared", "510(k)", "510k",
+        "clinical", "phase 1", "phase 2", "phase 3", "trial", "topline",
+        "primary endpoint", "statistically significant", "orphan drug",
+        "fast track", "breakthrough therapy", "nda", "bla", "de novo",
+    ],
+    "Contract / order": [
+        "contract", "purchase order", "order", "supply agreement",
+        "customer agreement", "award", "awarded", "procurement",
+    ],
+    "Partnership / MOU": [
+        "partnership", "collaboration", "strategic alliance", "mou",
+        "memorandum of understanding", "joint venture", "letter of intent",
+    ],
+    "AI / Nvidia": [
+        "artificial intelligence", " ai ", "ai-powered", "machine learning",
+        "nvidia", "gpu", "data center", "datacenter",
+    ],
+    "Battery / EV / energy": [
+        "battery", "solid-state", "energy storage", "lithium", "ev",
+        "charging", "solar", "grid", "bess",
+    ],
+    "Crypto / blockchain": [
+        "bitcoin", "ethereum", "crypto", "blockchain", "mining", "digital asset",
+    ],
+    "Merger / acquisition": [
+        "acquisition", "merger", "buyout", "takeover", "definitive agreement",
+        "to acquire", "combination",
+    ],
+    "Earnings / guidance": [
+        "earnings", "revenue", "guidance", "raises guidance", "record revenue",
+        "profitability", "quarterly results",
+    ],
+    "Patent / IP": [
+        "patent", "intellectual property", "exclusive license", "license agreement",
+        "licensing agreement",
+    ],
+    "Financing / offering": [
+        "offering", "registered direct", "private placement", "atm",
+        "at-the-market", "warrant", "convertible", "securities purchase agreement",
+    ],
+    "Defense / government": [
+        "department of defense", "dod", "army", "navy", "air force", "government",
+        "federal", "nasa", "homeland security",
+    ],
+}
+
+SECTOR_HINTS = {
+    "biotech": ["FDA / biotech", "clinical", "trial", "phase", "drug", "therapy"],
+    "ai": ["AI / Nvidia", "artificial intelligence", "nvidia", "gpu", "data center"],
+    "crypto": ["Crypto / blockchain", "bitcoin", "crypto", "blockchain"],
+    "battery": ["Battery / EV / energy", "battery", "ev", "lithium", "energy storage"],
+    "defense": ["Defense / government", "dod", "defense", "government", "army"],
+}
 
 app = Flask(__name__)
 
@@ -284,6 +372,30 @@ def is_above_vwap(price, vwap):
     return price > (vwap * 0.995)
 
 
+def request_get(url, headers=None, params=None, timeout=8):
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 scanner-bot/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if headers:
+        base_headers.update(headers)
+    return requests.get(url, headers=base_headers, params=params, timeout=timeout)
+
+
+def normalize_text(text):
+    text = html.unescape(str(text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def ticker_token_present(ticker, text):
+    ticker = str(ticker or "").upper().strip()
+    text = str(text or "")
+    if not ticker or not text:
+        return False
+    return bool(re.search(rf"(?<![A-Z0-9]){re.escape(ticker)}(?![A-Z0-9])", text, re.IGNORECASE))
+
+
 def detect_bad_structure(structure_text):
     """
     Hard bad structure only.
@@ -330,6 +442,7 @@ def dedupe_phrases(items):
         "volume_expand": ["volume expanding", "momentum increasing"],
         "dilution": ["dilution", "offering", "warrant", "shelf", "atm"],
         "leader": ["market leader", "leaderboard"],
+        "rvol": ["rvol"],
     }
 
     for item in items or []:
@@ -440,7 +553,7 @@ def get_nasdaq_gainers():
 
 
 def dedupe_movers(movers):
-    """Keep one row per ticker before any expensive quote/news/profile calls."""
+    """Keep one row per ticker before expensive quote/news/profile calls."""
     deduped = {}
 
     for mover in movers or []:
@@ -500,6 +613,7 @@ def get_percent_gainers():
                 price = safe_float(q.get("regularMarketPrice"))
                 gain = safe_float(q.get("regularMarketChangePercent"))
                 volume = safe_int(q.get("regularMarketVolume"))
+                company_name = normalize_text(q.get("shortName") or q.get("longName") or "")
 
                 if price <= 0 or gain < SCAN_MIN_GAIN or volume < MIN_VOLUME or price > MAX_PRICE:
                     continue
@@ -513,6 +627,7 @@ def get_percent_gainers():
                         "gain_percent": gain,
                         "volume": volume,
                         "source": f"YAHOO:{screener}",
+                        "company_name": company_name,
                     }
 
         except Exception as e:
@@ -581,6 +696,10 @@ def get_finnhub_profile(ticker):
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
 
+        company_name = normalize_text(data.get("name", ""))
+        if company_name:
+            COMPANY_CACHE[ticker] = {"time": now, "data": company_name}
+
         market_cap = safe_float(data.get("marketCapitalization")) * 1_000_000
         float_shares = safe_float(data.get("shareOutstanding")) * 1_000_000
 
@@ -590,6 +709,34 @@ def get_finnhub_profile(ticker):
     except Exception as e:
         print(f"[FINNHUB PROFILE ERROR] {ticker}: {e}", flush=True)
         return 0, 0
+
+
+def get_company_name(ticker, fallback=""):
+    ticker = str(ticker or "").upper().strip()
+    now = time.time()
+
+    if ticker in COMPANY_CACHE:
+        cached = COMPANY_CACHE[ticker]
+        if now - cached["time"] < CACHE_TTL_SECONDS:
+            return cached["data"]
+
+    if fallback:
+        COMPANY_CACHE[ticker] = {"time": now, "data": normalize_text(fallback)}
+        return normalize_text(fallback)
+
+    if not FINNHUB_API_KEY:
+        return ""
+
+    try:
+        url = "https://finnhub.io/api/v1/stock/profile2"
+        params = {"symbol": ticker, "token": FINNHUB_API_KEY}
+        r = requests.get(url, params=params, timeout=8)
+        data = r.json()
+        name = normalize_text(data.get("name", ""))
+        COMPANY_CACHE[ticker] = {"time": now, "data": name}
+        return name
+    except Exception:
+        return ""
 
 
 def get_alpaca_candles(ticker):
@@ -672,42 +819,300 @@ def get_yahoo_candles(ticker):
 
 
 # ============================================================
-# NEWS
+# DEEP NEWS / CATALYST ENGINE
 # ============================================================
 
 def classify_news_quality(headline):
     if not headline:
         return "NONE"
 
-    text = str(headline).lower().strip()
+    text = normalize_text(headline).lower()
 
-    if text in ["none", "no fresh catalyst found", "news check failed", "missing finnhub key"]:
+    if text in ["none", "no fresh catalyst found", "news check failed", "missing finnhub key", "technical momentum only"]:
         return "NONE"
-
-    if any(word in text for word in BAD_NEWS_KEYWORDS):
-        return "JUNK"
 
     if any(word in text for word in WEAK_NEWS_OVERRIDES):
         return "WEAK"
 
+    # Aggregator titles are junk only if they contain no real catalyst keywords.
+    has_strong_keyword = any(word in text for word in STRONG_KEYWORDS)
+    if any(word in text for word in BAD_NEWS_KEYWORDS) and not has_strong_keyword:
+        return "JUNK"
+
     if any(word in text for word in SOFT_NEWS_PHRASES):
         return "WEAK"
 
-    if any(word in text for word in STRONG_KEYWORDS):
+    if has_strong_keyword:
         return "STRONG"
 
     return "WEAK"
 
 
+def classify_catalyst_bucket(text):
+    lower = f" {normalize_text(text).lower()} "
+    for bucket, keywords in CATALYST_BUCKETS.items():
+        for keyword in keywords:
+            if keyword.strip().lower() in lower:
+                return bucket
+    return "General news"
+
+
+def catalyst_display_label(bucket, quality):
+    if quality == "STRONG":
+        return f"⚡ {bucket}"
+    if quality == "WEAK":
+        return f"⚠️ {bucket}"
+    if quality == "JUNK":
+        return "🚫 Aggregator headline"
+    return "❌ No confirmed news"
+
+
+def clean_headline(text, allow_aggregator=False):
+    text = normalize_text(text)
+
+    if not text:
+        return ""
+
+    lower = text.lower()
+
+    if any(x in lower for x in BAD_PR_MATCH_PHRASES):
+        return ""
+
+    # Reject pure aggregator headlines, but do not delete real catalyst titles
+    # just because they include "shares higher after announcing..."
+    has_real_keyword = any(k in lower for k in STRONG_KEYWORDS)
+    if not allow_aggregator and any(x in lower for x in BAD_NEWS_KEYWORDS) and not has_real_keyword:
+        return ""
+
+    # Remove common duplicated source/publisher tails.
+    text = re.sub(r"^\s*(PR Newswire|GlobeNewswire|Accesswire)\s*[-:]\s*", "", text, flags=re.I)
+    text = re.sub(r"\s+\|\s+(Yahoo Finance|Benzinga|StockTitan|MarketWatch).*$", "", text, flags=re.I)
+
+    return text[:280].strip()
+
+
+def parse_news_datetime(raw):
+    if raw is None:
+        return None
+
+    try:
+        if isinstance(raw, (int, float)) and raw > 0:
+            return datetime.fromtimestamp(raw, ET)
+    except Exception:
+        pass
+
+    try:
+        dt = email.utils.parsedate_to_datetime(str(raw))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ET)
+        return dt.astimezone(ET)
+    except Exception:
+        return None
+
+
+def news_age_hours(dt):
+    if not dt:
+        return None
+    try:
+        return max(0, (datetime.now(ET) - dt).total_seconds() / 3600)
+    except Exception:
+        return None
+
+
+def is_fresh_news(dt, max_hours=96):
+    if not dt:
+        # Unknown freshness is allowed, but lower confidence.
+        return True
+    return news_age_hours(dt) <= max_hours
+
+
+def looks_like_stale_pr(text):
+    """Reject old PR dates when scrape pages surface stale results."""
+    lower = str(text or "").lower()
+    this_year = str(datetime.now(ET).year)
+    stale_years = [str(y) for y in range(2020, datetime.now(ET).year)]
+    if this_year in lower:
+        return False
+    return any(year in lower for year in stale_years)
+
+
+def company_tokens(company_name):
+    name = normalize_text(company_name)
+    if not name:
+        return []
+
+    remove_words = {
+        "inc", "inc.", "corp", "corp.", "corporation", "company", "co",
+        "ltd", "limited", "plc", "holdings", "holding", "group",
+        "technologies", "technology", "therapeutics", "pharmaceuticals",
+        "systems", "solutions", "international", "common", "stock",
+    }
+
+    tokens = []
+    for token in re.findall(r"[A-Za-z0-9]+", name):
+        if len(token) < 3:
+            continue
+        if token.lower() in remove_words:
+            continue
+        tokens.append(token.lower())
+
+    return tokens[:4]
+
+
+def headline_matches_ticker_or_company(ticker, text, company_name=""):
+    ticker = str(ticker or "").upper().strip()
+    text = normalize_text(text)
+    lower = text.lower()
+
+    if ticker_token_present(ticker, text):
+        return True
+
+    tokens = company_tokens(company_name)
+    if tokens and any(tok in lower for tok in tokens[:3]):
+        return True
+
+    return False
+
+
+def valid_scraped_headline(ticker, text, company_name="", require_symbol_or_company=True):
+    ticker = str(ticker or "").upper().strip()
+    text = clean_headline(text, allow_aggregator=True)
+
+    if not text or len(text) < 25:
+        return False
+
+    lower = text.lower()
+
+    # Reject page fragments.
+    if lower in {ticker.lower(), f"{ticker.lower()} stock", f"{ticker.lower()} news"}:
+        return False
+
+    if looks_like_stale_pr(text):
+        return False
+
+    if require_symbol_or_company and not headline_matches_ticker_or_company(ticker, text, company_name):
+        return False
+
+    # Symbols that are also generic words/acronyms need stronger evidence.
+    if ticker in AMBIGUOUS_TICKERS_REQUIRE_COMPANY:
+        words = AMBIGUOUS_TICKERS_REQUIRE_COMPANY[ticker]
+        if any(w in lower for w in words):
+            has_company_evidence = headline_matches_ticker_or_company(ticker, text, company_name)
+            has_exchange_evidence = "nasdaq" in lower or "nyse" in lower or "inc" in lower or "corp" in lower or "ltd" in lower
+            if not (has_company_evidence or has_exchange_evidence):
+                return False
+
+    return True
+
+
+def extract_meta_candidates_from_html(html_text):
+    candidates = []
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    for tag in soup.find_all(["h1", "h2", "h3", "a"]):
+        text = normalize_text(tag.get_text(" ", strip=True))
+        if text:
+            candidates.append(text)
+
+    for meta_name in [
+        {"name": "description"},
+        {"property": "og:description"},
+        {"property": "twitter:description"},
+        {"property": "og:title"},
+        {"name": "twitter:title"},
+    ]:
+        tag = soup.find("meta", attrs=meta_name)
+        if tag and tag.get("content"):
+            candidates.append(normalize_text(tag.get("content")))
+
+    for p in soup.find_all("p")[:6]:
+        text = normalize_text(p.get_text(" ", strip=True))
+        if text:
+            candidates.append(text)
+
+    return candidates
+
+
+def build_news_result(text, source, ticker, company_name="", published_at=None, confidence=0.70):
+    clean = clean_headline(text, allow_aggregator=False)
+
+    if not clean:
+        return None
+
+    quality = classify_news_quality(clean)
+    if quality not in ["STRONG", "WEAK"]:
+        return None
+
+    if not valid_scraped_headline(ticker, clean, company_name, require_symbol_or_company=True):
+        return None
+
+    age = news_age_hours(published_at)
+    bucket = classify_catalyst_bucket(clean)
+
+    if age is not None and age > 96:
+        return None
+
+    if quality == "STRONG":
+        confidence += 0.15
+    if source in ["FINNHUB", "PR", "GLOBE", "GOOGLE_NEWS", "YAHOO"]:
+        confidence += 0.05
+    if published_at:
+        confidence += 0.05
+
+    return {
+        "headline": clean,
+        "quality": quality,
+        "source": source,
+        "bucket": bucket,
+        "published_at": published_at,
+        "age_hours": round(age, 1) if age is not None else None,
+        "confidence": min(confidence, 0.98),
+    }
+
+
+def best_news_result(results):
+    if not results:
+        return None
+
+    def score_item(item):
+        quality_score = 2 if item.get("quality") == "STRONG" else 1
+        source_score = {
+            "FINNHUB": 4,
+            "PR": 4,
+            "GLOBE": 4,
+            "GOOGLE_NEWS": 3,
+            "YAHOO": 3,
+            "SEC": 3,
+        }.get(item.get("source"), 1)
+        age = item.get("age_hours")
+        freshness = 3
+        if age is not None:
+            if age <= 24:
+                freshness = 4
+            elif age <= 48:
+                freshness = 3
+            elif age <= 96:
+                freshness = 1
+        bucket_bonus = 1 if item.get("bucket") != "General news" else 0
+        return (quality_score, source_score, freshness, bucket_bonus, item.get("confidence", 0))
+
+    return sorted(results, key=score_item, reverse=True)[0]
+
+
 def get_news_catalyst(ticker):
+    """
+    Finnhub same-day check. V20 still uses it, but it is no longer the only truth.
+    """
     if not FINNHUB_API_KEY:
         return "none", "Missing Finnhub key"
 
-    today = time.strftime("%Y-%m-%d")
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    three_days_ago = (datetime.now(ET) - timedelta(days=3)).strftime("%Y-%m-%d")
+
     url = "https://finnhub.io/api/v1/company-news"
     params = {
         "symbol": ticker,
-        "from": today,
+        "from": three_days_ago,
         "to": today,
         "token": FINNHUB_API_KEY,
     }
@@ -719,236 +1124,293 @@ def get_news_catalyst(ticker):
         if not isinstance(news, list) or not news:
             return "none", "No fresh catalyst found"
 
-        headline = news[0].get("headline", "")
-        h = headline.lower()
+        candidates = []
+        company_name = get_company_name(ticker)
 
-        if "earnings" in h or "results" in h:
-            return "earnings", headline
-        if "patent" in h:
-            return "patent", headline
-        if "contract" in h or "agreement" in h or "partnership" in h:
-            return "contract", headline
-        if "fda" in h or "trial" in h or "phase" in h:
-            return "biotech", headline
-        if "lawsuit" in h or "jury" in h or "damages" in h:
-            return "legal", headline
-        if "offering" in h or "warrant" in h or "registered direct" in h:
-            return "offering", headline
+        for item in news[:8]:
+            headline = normalize_text(item.get("headline", ""))
+            published_at = parse_news_datetime(item.get("datetime"))
+            result = build_news_result(headline, "FINNHUB", ticker, company_name, published_at, confidence=0.78)
+            if result:
+                candidates.append(result)
 
-        return "news", headline
+        best = best_news_result(candidates)
+        if best:
+            return best.get("bucket", "news"), best.get("headline", "")
+
+        return "none", "No fresh catalyst found"
 
     except Exception as e:
         print(f"[NEWS ERROR] {ticker}: {e}", flush=True)
         return "unknown", "News check failed"
 
 
-def clean_headline(text):
-    text = re.sub(r"\s+", " ", str(text or "").strip())
-    if not text:
-        return ""
+def scrape_yahoo_news_deep(ticker, company_name=""):
+    results = []
 
-    lower = text.lower()
-    if any(x in lower for x in BAD_NEWS_KEYWORDS):
-        return ""
+    urls = [
+        f"https://finance.yahoo.com/quote/{ticker}/news/",
+        f"https://finance.yahoo.com/quote/{ticker}",
+    ]
 
-    if any(x in lower for x in BAD_PR_MATCH_PHRASES):
-        return ""
+    for url in urls:
+        try:
+            r = request_get(url, timeout=4)
+            if r.status_code != 200:
+                continue
 
-    return text
+            for text in extract_meta_candidates_from_html(r.text):
+                result = build_news_result(text, "YAHOO", ticker, company_name, None, confidence=0.68)
+                if result:
+                    print(f"[YAHOO DEEP] {ticker}: {result['headline']} ({result['quality']})", flush=True)
+                    results.append(result)
 
+        except Exception as e:
+            print(f"[YAHOO DEEP ERROR] {ticker}: {e}", flush=True)
 
-def looks_like_stale_pr(text):
-    """Reject old PR dates when scrape pages surface stale results."""
-    lower = str(text or "").lower()
-    stale_years = ["2025", "2024", "2023", "2022", "2021"]
-    return any(year in lower for year in stale_years)
-
-
-def valid_scraped_headline(ticker, text):
-    ticker = str(ticker or "").upper().strip()
-    text = clean_headline(text)
-
-    if not text or len(text) < 35:
-        return False
-
-    lower = text.lower()
-
-    # Reject company-name-only / symbol-only page fragments.
-    if lower in {ticker.lower(), f"{ticker.lower()} stock", f"{ticker.lower()} news"}:
-        return False
-
-    # Reject stale PR pages like Oct 2025 results.
-    if looks_like_stale_pr(text):
-        return False
-
-    # Ticker must appear as a clean standalone token.
-    if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
-        return False
-
-    # Symbols that are also generic words/acronyms need stronger evidence.
-    if ticker in AMBIGUOUS_TICKERS_REQUIRE_COMPANY:
-        words = AMBIGUOUS_TICKERS_REQUIRE_COMPANY[ticker]
-        if any(w in lower for w in words) and "nasdaq" not in lower and "inc" not in lower and "corp" not in lower and "ltd" not in lower:
-            return False
-
-    return True
+    return results
 
 
-def scrape_pr_headline(ticker):
+def scrape_google_news_rss(ticker, company_name=""):
+    results = []
+
+    queries = [f"{ticker} stock"]
+    if company_name:
+        queries.append(f'"{company_name}" stock')
+
+    for query in queries[:2]:
+        url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+
+        try:
+            r = request_get(url, timeout=5)
+            if r.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(r.text, "xml")
+            items = soup.find_all("item")[:8]
+
+            for item in items:
+                title = normalize_text(item.title.get_text(" ", strip=True) if item.title else "")
+                pub_date = parse_news_datetime(item.pubDate.get_text(strip=True) if item.pubDate else None)
+
+                if not is_fresh_news(pub_date, max_hours=96):
+                    continue
+
+                result = build_news_result(title, "GOOGLE_NEWS", ticker, company_name, pub_date, confidence=0.72)
+                if result:
+                    print(f"[GOOGLE NEWS] {ticker}: {result['headline']} ({result['quality']})", flush=True)
+                    results.append(result)
+
+        except Exception as e:
+            print(f"[GOOGLE NEWS ERROR] {ticker}: {e}", flush=True)
+
+    return results
+
+
+def scrape_pr_headline(ticker, company_name=""):
+    """
+    Searches PRNewswire and GlobeNewswire. Returns best result dict or None.
+    """
     now = time.time()
-    cache_key = ticker.upper()
+    cache_key = f"{ticker.upper()}|{company_name}"
 
     if cache_key in PR_CACHE:
         cached_time, cached_result = PR_CACHE[cache_key]
         if now - cached_time < PR_CACHE_TTL_SECONDS:
             return cached_result
 
-    sources = [
-        f"https://www.prnewswire.com/search/news/?keyword={ticker}",
-        f"https://www.globenewswire.com/search/keyword/{ticker}",
-    ]
+    query_terms = [ticker]
+    if company_name:
+        query_terms.append(company_name)
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    source_urls = []
+    for term in query_terms[:2]:
+        q = quote_plus(term)
+        source_urls.extend([
+            ("PR", f"https://www.prnewswire.com/search/news/?keyword={q}"),
+            ("GLOBE", f"https://www.globenewswire.com/search/keyword/{q}"),
+        ])
 
-    for url in sources:
+    results = []
+
+    for source, url in source_urls:
         try:
-            r = requests.get(url, headers=headers, timeout=3)
+            r = request_get(url, timeout=4)
             if r.status_code != 200:
                 continue
 
-            soup = BeautifulSoup(r.text, "html.parser")
+            candidates = extract_meta_candidates_from_html(r.text)
 
-            for tag in soup.find_all(["a", "h1", "h2", "h3"]):
-                text = tag.get_text(" ", strip=True)
-
-                if not valid_scraped_headline(ticker, text):
+            for text in candidates:
+                if not valid_scraped_headline(ticker, text, company_name, require_symbol_or_company=True):
                     continue
 
-                text = clean_headline(text)
-                quality = classify_news_quality(text)
-
-                if quality in ["STRONG", "WEAK"]:
-                    PR_CACHE[cache_key] = (now, text)
-                    print(f"[PR SCRAPE] {ticker}: {text} ({quality})", flush=True)
-                    return text
+                result = build_news_result(text, source, ticker, company_name, None, confidence=0.76)
+                if result:
+                    results.append(result)
+                    print(f"[PR/GLOBE SCRAPE] {ticker}: {result['headline']} ({result['quality']})", flush=True)
 
         except Exception as e:
-            print(f"[PR SCRAPE ERROR] {ticker}: {e}", flush=True)
+            print(f"[PR/GLOBE SCRAPE ERROR] {ticker}: {e}", flush=True)
 
-    PR_CACHE[cache_key] = (now, "")
-    return ""
-
-def find_real_news_headline(ticker, current_headline=""):
-    now = time.time()
-    ticker = str(ticker or "").upper().strip()
-
-    if ticker in NEWS_CACHE:
-        cached = NEWS_CACHE[ticker]
-        if now - cached["time"] < CACHE_TTL_SECONDS:
-            return cached["data"]
-
-    current_headline = clean_headline(current_headline)
-    quality = classify_news_quality(current_headline)
-
-    if quality in ["STRONG", "WEAK"]:
-        data = (current_headline, quality)
-        NEWS_CACHE[ticker] = {"time": now, "data": data}
-        return data
-
-    try:
-        url = f"https://finance.yahoo.com/quote/{ticker}/news/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=2)
-
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            for link in soup.find_all("a"):
-                raw_text = link.get_text(" ", strip=True)
-
-                if not valid_scraped_headline(ticker, raw_text):
-                    continue
-
-                text = clean_headline(raw_text)
-                scraped_quality = classify_news_quality(text)
-                if scraped_quality in ["STRONG", "WEAK"]:
-                    print(f"[NEWS SCRAPE] {ticker}: {text} ({scraped_quality})", flush=True)
-                    data = (text, scraped_quality)
-                    NEWS_CACHE[ticker] = {"time": now, "data": data}
-                    return data
-
-    except Exception as e:
-        print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
-
-    pr_headline = scrape_pr_headline(ticker)
-    if pr_headline:
-        pr_quality = classify_news_quality(pr_headline)
-        data = (pr_headline, pr_quality)
-        NEWS_CACHE[ticker] = {"time": now, "data": data}
-        return data
-
-    data = ("No fresh catalyst found", "NONE")
-    NEWS_CACHE[ticker] = {"time": now, "data": data}
-    return data
+    best = best_news_result(results)
+    PR_CACHE[cache_key] = (now, best)
+    return best
 
 
 # ============================================================
-# SEC / DILUTION AWARENESS ONLY
+# SEC / DILUTION + SEC CATALYST CONTEXT
 # ============================================================
 
-def check_sec_offering_risk(ticker):
+def fetch_sec_company_record(ticker):
+    headers = {"User-Agent": "scanner-bot contact@example.com"}
+
+    tickers_url = "https://www.sec.gov/files/company_tickers.json"
+    r = requests.get(tickers_url, headers=headers, timeout=10)
+    companies = r.json()
+
+    for item in companies.values():
+        if item.get("ticker", "").upper() == ticker.upper():
+            cik = str(item["cik_str"]).zfill(10)
+            name = normalize_text(item.get("title", ""))
+            return cik, name
+
+    return None, ""
+
+
+def get_recent_sec_filings(ticker):
     now = time.time()
 
-    if ticker in SEC_CACHE:
-        cached = SEC_CACHE[ticker]
-        if now - cached["time"] < CACHE_TTL_SECONDS:
+    cache_key = f"FILINGS:{ticker}"
+    if cache_key in SEC_CACHE:
+        cached = SEC_CACHE[cache_key]
+        if now - cached["time"] < SEC_CACHE_TTL_SECONDS:
             return cached["data"]
 
     try:
-        headers = {"User-Agent": "scanner-bot your-email@example.com"}
-
-        tickers_url = "https://www.sec.gov/files/company_tickers.json"
-        r = requests.get(tickers_url, headers=headers, timeout=10)
-        companies = r.json()
-
-        cik = None
-        for item in companies.values():
-            if item.get("ticker", "").upper() == ticker.upper():
-                cik = str(item["cik_str"]).zfill(10)
-                break
+        headers = {"User-Agent": "scanner-bot contact@example.com"}
+        cik, sec_name = fetch_sec_company_record(ticker)
 
         if not cik:
-            data = (False, "SEC CIK not found")
-            SEC_CACHE[ticker] = {"time": now, "data": data}
+            data = {"cik": None, "company_name": "", "filings": [], "error": "SEC CIK not found"}
+            SEC_CACHE[cache_key] = {"time": now, "data": data}
             return data
 
         filings_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         r = requests.get(filings_url, headers=headers, timeout=10)
         data = r.json()
 
-        forms = data.get("filings", {}).get("recent", {}).get("form", [])
-        dates = data.get("filings", {}).get("recent", {}).get("filingDate", [])
+        recent = data.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        accession_numbers = recent.get("accessionNumber", [])
+        primary_docs = recent.get("primaryDocument", [])
+        descriptions = recent.get("primaryDocDescription", [])
 
-        risky_forms = {"S-1", "S-3", "424B5", "424B3", "F-1", "F-3"}
-        hits = []
+        filings = []
+        for form, date, acc, doc, desc in zip(forms[:30], dates[:30], accession_numbers[:30], primary_docs[:30], descriptions[:30]):
+            filings.append({
+                "form": form,
+                "date": date,
+                "accession": acc,
+                "primary_doc": doc,
+                "description": normalize_text(desc),
+            })
 
-        for form, date in zip(forms[:20], dates[:20]):
-            if form in risky_forms:
-                hits.append(f"{form} filed {date}")
-
-        if hits:
-            data = (True, "; ".join(hits[:5]))
-            SEC_CACHE[ticker] = {"time": now, "data": data}
-            return data
-
-        data = (False, "No recent offering-type SEC forms found")
-        SEC_CACHE[ticker] = {"time": now, "data": data}
-        return data
+        out = {
+            "cik": cik,
+            "company_name": sec_name,
+            "filings": filings,
+            "error": "",
+        }
+        SEC_CACHE[cache_key] = {"time": now, "data": out}
+        return out
 
     except Exception as e:
-        data = (False, f"SEC check error: {e}")
-        SEC_CACHE[ticker] = {"time": now, "data": data}
-        return data
+        out = {"cik": None, "company_name": "", "filings": [], "error": f"SEC check error: {e}"}
+        SEC_CACHE[cache_key] = {"time": now, "data": out}
+        return out
+
+
+def check_sec_offering_risk(ticker):
+    data = get_recent_sec_filings(ticker)
+
+    if data.get("error"):
+        return False, data.get("error")
+
+    risky_forms = {"S-1", "S-3", "424B5", "424B3", "F-1", "F-3"}
+    hits = []
+
+    for filing in data.get("filings", [])[:20]:
+        if filing.get("form") in risky_forms:
+            hits.append(f"{filing.get('form')} filed {filing.get('date')}")
+
+    if hits:
+        return True, "; ".join(hits[:5])
+
+    return False, "No recent offering-type SEC forms found"
+
+
+def sec_filing_context_catalyst(ticker, company_name=""):
+    """
+    Uses recent SEC filing metadata as a catalyst hint.
+    Does not fetch full filing bodies, so it stays fast and safe.
+    """
+    data = get_recent_sec_filings(ticker)
+    if data.get("error"):
+        return None
+
+    filings = data.get("filings", [])[:12]
+    if not filings:
+        return None
+
+    today = datetime.now(ET).date()
+    candidates = []
+
+    catalyst_forms = {"8-K", "6-K", "10-Q", "10-K", "S-1", "S-3", "424B3", "424B5", "F-1", "F-3"}
+
+    for filing in filings:
+        form = filing.get("form", "")
+        date_text = filing.get("date", "")
+        desc = filing.get("description", "")
+        if form not in catalyst_forms:
+            continue
+
+        try:
+            filing_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+            age_days = (today - filing_date).days
+        except Exception:
+            age_days = 999
+
+        if age_days > 5:
+            continue
+
+        raw = f"{form} filed {date_text}"
+        if desc:
+            raw += f" — {desc}"
+
+        lower = raw.lower()
+        quality = "WEAK"
+
+        if any(k in lower for k in STRONG_KEYWORDS):
+            quality = "STRONG"
+        elif form in {"8-K", "6-K"}:
+            quality = "WEAK"
+        elif form in {"424B3", "424B5", "S-1", "S-3", "F-1", "F-3"}:
+            quality = "WEAK"
+
+        bucket = classify_catalyst_bucket(raw)
+        candidates.append({
+            "headline": raw,
+            "quality": quality,
+            "source": "SEC",
+            "bucket": bucket if bucket != "General news" else "SEC filing",
+            "published_at": None,
+            "age_hours": age_days * 24,
+            "confidence": 0.62 if quality == "WEAK" else 0.72,
+        })
+
+    return best_news_result(candidates)
 
 
 def extract_warrant_price(text):
@@ -1039,6 +1501,111 @@ def describe_dilution_risk(risk_text):
     return ""
 
 
+def detect_sympathy_or_technical_context(result, all_results=None):
+    """
+    If no direct catalyst is found, avoid calling every clean no-news runner useless.
+    This creates better context without pretending there is confirmed news.
+    """
+    ticker = result.get("ticker", "")
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    above_vwap = bool(result.get("above_vwap", True))
+
+    if result.get("news_quality") not in ["NONE", "UNKNOWN", "JUNK"]:
+        return result
+
+    if gain >= 35 and volume >= 2_000_000 and recent_vol >= 150_000 and above_vwap:
+        result["catalyst_text"] = "Technical low-float / volume momentum"
+        result["catalyst_type"] = "⚡ Technical momentum"
+        result["news_quality"] = "TECHNICAL"
+        add_unique(result.setdefault("reasons", []), "Technical volume momentum")
+        return result
+
+    # Placeholder for future sector clustering. Keeps current behavior honest.
+    result["catalyst_text"] = "Technical momentum only"
+    return result
+
+
+def find_real_news_headline(ticker, current_headline="", company_name=""):
+    """
+    V20 deep catalyst search:
+    1. Keep valid Finnhub/current headline.
+    2. Search Yahoo headline + meta/snippet text.
+    3. Search Google News RSS by ticker and company name.
+    4. Search PRNewswire / GlobeNewswire by ticker and company name.
+    5. Use recent SEC filing metadata as context.
+    6. Only then return NONE.
+    """
+    now = time.time()
+    ticker = str(ticker or "").upper().strip()
+    company_name = get_company_name(ticker, fallback=company_name)
+
+    cache_key = f"{ticker}|{company_name}|{current_headline}"
+    if cache_key in NEWS_CACHE:
+        cached = NEWS_CACHE[cache_key]
+        if now - cached["time"] < NEWS_CACHE_TTL_SECONDS:
+            return cached["data"]
+
+    results = []
+
+    current_headline = clean_headline(current_headline, allow_aggregator=False)
+    current_result = build_news_result(current_headline, "FINNHUB", ticker, company_name, None, confidence=0.80)
+    if current_result:
+        results.append(current_result)
+
+    # Yahoo deep scrape: title, meta description, og tags, first paragraphs.
+    results.extend(scrape_yahoo_news_deep(ticker, company_name))
+
+    # Google News RSS catches smaller sites, wires, and overnight/foreign mentions.
+    results.extend(scrape_google_news_rss(ticker, company_name))
+
+    # PR wires by ticker and company name.
+    pr_result = scrape_pr_headline(ticker, company_name)
+    if pr_result:
+        results.append(pr_result)
+
+    # SEC recent filing metadata as context, especially 8-K / 6-K.
+    sec_result = sec_filing_context_catalyst(ticker, company_name)
+    if sec_result:
+        print(f"[SEC CONTEXT] {ticker}: {sec_result['headline']} ({sec_result['quality']})", flush=True)
+        results.append(sec_result)
+
+    best = best_news_result(results)
+
+    if best:
+        headline = best["headline"]
+        quality = best["quality"]
+        bucket = best.get("bucket", "General news")
+        source = best.get("source", "NEWS")
+        age = best.get("age_hours")
+
+        display = headline
+        if age is not None and age <= 96:
+            display = f"{headline} ({age:.0f}h old)"
+
+        data = {
+            "headline": display,
+            "quality": quality,
+            "bucket": bucket,
+            "source": source,
+            "confidence": best.get("confidence", 0),
+        }
+        NEWS_CACHE[cache_key] = {"time": now, "data": data}
+        print(f"[NEWS BEST] {ticker}: {display} | {quality} | {bucket} | {source}", flush=True)
+        return data
+
+    data = {
+        "headline": "No fresh catalyst found",
+        "quality": "NONE",
+        "bucket": "No confirmed news",
+        "source": "NONE",
+        "confidence": 0,
+    }
+    NEWS_CACHE[cache_key] = {"time": now, "data": data}
+    return data
+
+
 # ============================================================
 # SCORING / STRUCTURE
 # ============================================================
@@ -1092,10 +1659,12 @@ def score_mover(mover, catalyst_type, catalyst_text):
         reasons.append("Weak catalyst")
     elif news_quality == "JUNK":
         risks.append("⚠️ Aggregator headline only")
+    elif news_quality == "TECHNICAL":
+        reasons.append("Technical momentum context")
     else:
         risks.append("⚠️ No confirmed catalyst / technical momentum only")
 
-    if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech"]:
+    if catalyst_type in ["earnings", "patent", "contract", "legal", "biotech", "FDA / biotech", "Contract / order"]:
         score += 1
         reasons.append(f"Strong catalyst: {catalyst_type}")
 
@@ -1342,7 +1911,7 @@ def compute_momentum_flags(result):
     )
 
     result["massive_no_news_runner"] = bool(
-        result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
+        result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK", "TECHNICAL"]
         and gain >= 35
         and day_vol >= 2_000_000
         and recent_vol >= 150_000
@@ -1350,7 +1919,6 @@ def compute_momentum_flags(result):
         and (has_higher_lows or breakout or result.get("near_high"))
     )
 
-    # Fresh leader ignition: leader starts expanding again after consolidation.
     result["fresh_leader_ignition"] = bool(
         gain >= FRESH_IGNITION_MIN_GAIN
         and (
@@ -1364,7 +1932,6 @@ def compute_momentum_flags(result):
         and not bad_structure
     )
 
-    # Leader reclaim: important name gets back over VWAP after pullback.
     result["leader_reclaim"] = bool(
         gain >= ALERT_MIN_GAIN
         and (
@@ -1378,7 +1945,6 @@ def compute_momentum_flags(result):
         and not bad_structure
     )
 
-    # Midday chop awareness: do not kill leaders, but warn on weak midday tape.
     now_time = datetime.now(ET).time()
     result["midday_chop_risk"] = bool(
         MIDDAY_CHOP_START <= now_time < MIDDAY_CHOP_END
@@ -1389,7 +1955,6 @@ def compute_momentum_flags(result):
     )
 
     return result
-
 
 
 def estimate_relative_volume(result):
@@ -1423,8 +1988,8 @@ def estimate_relative_volume(result):
 def compute_leader_score(result):
     """
     Leader score = how important the ticker is on today's tape.
-    V19 removes entry_score and WATCH completely. Trade guidance comes from tier only:
-    RUNNER / LEADER / WATCH / AVOID.
+    V20 keeps no entry_score. Trade guidance comes from tier only:
+    RUNNER / LEADER / AVOID.
     """
     gain = safe_float(result.get("gain"))
     day_vol = safe_int(result.get("volume"))
@@ -1472,10 +2037,10 @@ def compute_leader_score(result):
 
 def enforce_score_quality_boundaries(result):
     """
-    V19 score discipline:
+    V20 score discipline:
     - 10/10 must be rare and backed by clean structure.
     - Big gain alone cannot create a 10.
-    - No entry_score exists anymore.
+    - No entry_score exists.
     """
     score = safe_int(result.get("score"))
     above_vwap = bool(result.get("above_vwap", True))
@@ -1497,11 +2062,9 @@ def enforce_score_quality_boundaries(result):
         )
     )
 
-    # Make 10s matter. If it is not a clean elite setup, it cannot stay 10.
     if score >= 10 and not clean_elite_structure:
         score = 9
 
-    # Damaged structure can still be important, but it should not look elite.
     if result.get("momentum_decay") or result.get("bad_structure") or result.get("deep_vwap_loss"):
         score = min(score, 8)
 
@@ -1576,7 +2139,6 @@ def passes_master_alert_gate(result):
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
 
-    # V19 hard rule: no phone alerts under 7. Period.
     if score < MIN_ALERT_SCORE:
         return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
 
@@ -1602,7 +2164,7 @@ def passes_master_alert_gate(result):
 
 def classify_alert_tier(result, rank):
     """
-    V19: no WATCH tier.
+    V20: no WATCH tier.
     Phone alerts are only:
     - RUNNER = clean continuation / actionable momentum
     - LEADER = major tape leader / awareness name
@@ -1621,8 +2183,6 @@ def classify_alert_tier(result, rank):
     if score < MIN_ALERT_SCORE:
         return "AVOID"
 
-    # Damaged structure can still be a LEADER awareness alert if it is a major tape name,
-    # but it cannot be a RUNNER.
     if deep_vwap_loss or bad_structure or result.get("momentum_decay"):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
@@ -1642,19 +2202,17 @@ def classify_alert_tier(result, rank):
         or result.get("massive_no_news_runner")
     )
 
-    # RUNNER = clean setup, not just a big mover.
     if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup:
         return "RUNNER"
 
-    # Strong 9+ names can become RUNNER if clean, even without a named setup flag.
     if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
         return "RUNNER"
 
-    # LEADER = important tape name, even if not a clean continuation setup.
     if result.get("market_leader") and score >= MIN_ALERT_SCORE:
         return "LEADER"
 
     return "AVOID"
+
 
 def title_for_tier(result, tier):
     if tier == "AVOID":
@@ -1686,8 +2244,8 @@ def title_for_tier(result, tier):
 
     return "🟢 RUNNER"
 
+
 def setup_tier_context(result):
-    """V19: no WATCH/Entry. Only tier context for internal use."""
     tier = result.get("alert_tier", "AVOID")
 
     if tier == "RUNNER":
@@ -1699,12 +2257,12 @@ def setup_tier_context(result):
 
     return result
 
+
 def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert_setups, now):
     ticker = result["ticker"]
     current_price = safe_float(result.get("price"))
     current_score = safe_int(result.get("score"))
     setup = result.get("title") or result.get("setup_tag") or ""
-    tier = result.get("alert_tier", "")
 
     last_time = alert_history.get(ticker, 0)
     cooldown_done = now - last_time >= ALERT_COOLDOWN_SECONDS
@@ -1717,11 +2275,9 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if last_time == 0:
         return True, "first alert"
 
-    # Absolute anti-spam floor. Nothing re-alerts inside this window.
     if not hard_cooldown_done:
         return False, "hard cooldown active"
 
-    # Major title/category upgrade only.
     major_upgrade = (
         ("LEADER" in last_setup and "RUNNER" in setup)
         or ("RECLAIM" in setup and "RECLAIM" not in last_setup)
@@ -1732,17 +2288,13 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if major_upgrade and last_price and current_price >= last_price * 1.02:
         return True, "major setup upgrade"
 
-    # Strong second-leg continuation can re-alert before full cooldown,
-    # but still needs real price improvement.
     if result.get("true_second_leg") and last_price and current_price >= last_price * 1.04:
         return True, "second leg new high +4%"
 
-    # Reclaim / fresh ignition needs confirmation, not just title flip.
-    if (result.get("leader_reclaim") or result.get("fresh_leader_ignition")):
+    if result.get("leader_reclaim") or result.get("fresh_leader_ignition"):
         if last_price and current_price >= last_price * 1.03:
             return True, "confirmed ignition/reclaim"
 
-    # Outside normal cooldown, allow meaningful continuation only.
     if not cooldown_done:
         return False, "cooldown active"
 
@@ -1769,6 +2321,7 @@ def first_matching_reason(result):
         "Market leader / heavy tape",
         "Volume expanding",
         "RVOL",
+        "Technical volume momentum",
         "Price above VWAP",
         "Higher lows",
     ]
@@ -1809,7 +2362,7 @@ def first_matching_risk(result):
 
 def build_compact_alert(result):
     """
-    V19 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
+    V20 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
     Title + stats + catalyst + setup + risk only.
     """
     result = compact_reasons(result)
@@ -1819,14 +2372,23 @@ def build_compact_alert(result):
 
     news_quality = result.get("news_quality", "UNKNOWN")
     catalyst_line = result.get("catalyst_text") or "No fresh catalyst found"
+    catalyst_bucket = result.get("catalyst_bucket") or classify_catalyst_bucket(catalyst_line)
+    catalyst_source = result.get("catalyst_source", "")
 
     if news_quality in ["NONE", "UNKNOWN", "JUNK"]:
         news_header = "❌ No confirmed news"
         catalyst_line = "Technical momentum only"
+    elif news_quality == "TECHNICAL":
+        news_header = "⚡ Technical momentum"
     elif news_quality == "STRONG":
-        news_header = "⚡ Strong news"
+        news_header = f"⚡ {catalyst_bucket}"
     else:
-        news_header = "⚠️ Weak/unclear news"
+        news_header = f"⚠️ {catalyst_bucket}"
+
+    if catalyst_source and catalyst_source not in ["NONE", ""]:
+        source_note = f" [{catalyst_source}]"
+    else:
+        source_note = ""
 
     tier = result.get("alert_tier", "AVOID")
     title = result.get("title", title_for_tier(result, tier))
@@ -1838,10 +2400,11 @@ def build_compact_alert(result):
         f"{title}\n\n"
         f"{result['ticker']} | {result['score']}/10 | {tier} | "
         f"${safe_float(result.get('price')):.4f} | +{safe_float(result.get('gain')):.1f}% | Float {float_text}\n"
-        f"Catalyst: {news_header} — {catalyst_line}\n\n"
+        f"Catalyst: {news_header}{source_note} — {catalyst_line}\n\n"
         f"Setup: {setup_line}\n"
         f"Risk: {risk_line}"
     )
+
 
 def detect_market_regime(results):
     if not results:
@@ -1934,9 +2497,7 @@ def run_scanner():
                     print(f"[FILTER] {ticker} price ${price:.2f} outside range", flush=True)
                     continue
 
-                # V18 speed/noise filter: do not spend profile/news/candle calls
-                # on weak under-alert-floor names. The screener can stay wide,
-                # but full processing is for 25%+ movers only.
+                # Full processing is for 25%+ movers only.
                 if gain < ALERT_MIN_GAIN:
                     print(f"[FILTER] {ticker} gain under alert floor {gain:.1f}%", flush=True)
                     continue
@@ -1946,6 +2507,7 @@ def run_scanner():
 
                 # Cheap profile filter BEFORE slow news/PR scraping.
                 market_cap, float_shares = get_finnhub_profile(ticker)
+                company_name = get_company_name(ticker, fallback=mover.get("company_name", ""))
 
                 if market_cap and market_cap > MAX_MARKET_CAP:
                     print(f"[FILTER] {ticker} market cap over 1B", flush=True)
@@ -1956,25 +2518,26 @@ def run_scanner():
                     continue
 
                 catalyst_type, catalyst_text = get_news_catalyst(ticker)
-                headline, news_quality = find_real_news_headline(ticker, catalyst_text)
+                news_data = find_real_news_headline(ticker, catalyst_text, company_name=company_name)
 
-                result = score_mover(mover, catalyst_type, headline)
+                headline = news_data.get("headline", "No fresh catalyst found")
+                news_quality = news_data.get("quality", "NONE")
+                catalyst_bucket = news_data.get("bucket", "No confirmed news")
+                catalyst_source = news_data.get("source", "NONE")
+
+                result = score_mover(mover, catalyst_bucket, headline)
                 result["rank"] = raw_rank
                 result["headline"] = headline
                 result["catalyst_text"] = headline
                 result["news_quality"] = news_quality
+                result["catalyst_bucket"] = catalyst_bucket
+                result["catalyst_source"] = catalyst_source
                 result["session"] = session
                 result["market_cap"] = market_cap
                 result["float"] = float_shares
+                result["company_name"] = company_name
 
-                if news_quality == "STRONG":
-                    result["catalyst_type"] = "⚡ STRONG NEWS"
-                elif news_quality == "WEAK":
-                    result["catalyst_type"] = "⚠️ WEAK NEWS"
-                elif news_quality == "JUNK":
-                    result["catalyst_type"] = "🚫 JUNK NEWS"
-                else:
-                    result["catalyst_type"] = "❌ NO NEWS"
+                result["catalyst_type"] = catalyst_display_label(catalyst_bucket, news_quality)
 
                 if not float_shares:
                     add_unique(result.setdefault("risks", []), "⚠️ Float unknown")
@@ -2029,6 +2592,7 @@ def run_scanner():
                     result["trend_builder_alert"] = False
 
                 result = compute_momentum_flags(result)
+                result = detect_sympathy_or_technical_context(result)
                 result = apply_clean_scoring(result)
 
                 sec_risk = False
@@ -2063,7 +2627,6 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
-        # V19: leaders ranked first internally; alerts prioritize RUNNER > LEADER only.
         results.sort(
             key=lambda r: (
                 r.get("market_leader", False),
@@ -2113,7 +2676,6 @@ def run_scanner():
                     flush=True,
                 )
                 continue
-
 
             result["alert_tier"] = tier
             result = setup_tier_context(result)
