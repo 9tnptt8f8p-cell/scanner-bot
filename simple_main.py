@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v12 — market leaders + elite entry engine"
+BOOT_MARKER = "elite scanner rebuild v13 — 25% alerts + leader/entry scores + reclaim engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -36,13 +36,19 @@ SCAN_SLEEP = 90
 # V12 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
 # 2. Still separate elite entry setups from awareness alerts.
-ALERT_MIN_GAIN = 15
+ALERT_MIN_GAIN = 25
 MIN_ALERT_SCORE = 5
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 LEADER_MIN_GAIN = 40
 LEADER_MIN_DAY_VOLUME = 2_000_000
 LEADER_MIN_RECENT_VOLUME = 150_000
+
+# Fresh ignition / reclaim upgrades
+FRESH_IGNITION_MIN_GAIN = 25
+RECLAIM_MAX_DISTANCE_PCT = 2.0
+MIDDAY_CHOP_START = dtime(11, 0)
+MIDDAY_CHOP_END = dtime(14, 0)
 
 # Do not hard-block fading leaders. Downgrade the title/bias instead.
 BLOCK_FADING_WATCH_ALERTS = False
@@ -1232,15 +1238,181 @@ def compute_momentum_flags(result):
         and (has_higher_lows or breakout or result.get("near_high"))
     )
 
+    # Fresh leader ignition: leader starts expanding again after consolidation.
+    result["fresh_leader_ignition"] = bool(
+        gain >= FRESH_IGNITION_MIN_GAIN
+        and (
+            result.get("market_leader")
+            or day_vol >= LEADER_MIN_DAY_VOLUME
+            or recent_vol >= LEADER_MIN_RECENT_VOLUME
+        )
+        and above_vwap
+        and result.get("near_high")
+        and (volume_expanding or recent_vol >= 200_000)
+        and not bad_structure
+    )
+
+    # Leader reclaim: important name gets back over VWAP after pullback.
+    result["leader_reclaim"] = bool(
+        gain >= ALERT_MIN_GAIN
+        and (
+            result.get("market_leader")
+            or day_vol >= LEADER_MIN_DAY_VOLUME
+        )
+        and above_vwap
+        and has_vwap
+        and abs(result.get("vwap_distance", 0)) <= RECLAIM_MAX_DISTANCE_PCT
+        and (has_higher_lows or volume_expanding)
+        and not bad_structure
+    )
+
+    # Midday chop awareness: do not kill leaders, but warn on weak midday tape.
+    now_time = datetime.now(ET).time()
+    result["midday_chop_risk"] = bool(
+        MIDDAY_CHOP_START <= now_time < MIDDAY_CHOP_END
+        and volume_fading
+        and not result.get("fresh_leader_ignition")
+        and not result.get("leader_reclaim")
+        and not result.get("true_second_leg")
+    )
+
+    return result
+
+
+
+def estimate_relative_volume(result):
+    """
+    Lightweight RVOL-style estimate using 5-min candle volume.
+    Not true historical RVOL, but useful for live tape quality.
+    """
+    recent_vol = safe_int(result.get("recent_volume"))
+    prev_vol = safe_int(result.get("prev_volume"))
+
+    if prev_vol <= 0:
+        result["rvol_estimate"] = 0
+        result["rvol_label"] = "RVOL unclear"
+        return result
+
+    rvol = recent_vol / prev_vol if prev_vol else 0
+    result["rvol_estimate"] = round(rvol, 2)
+
+    if rvol >= 2.5:
+        result["rvol_label"] = "🔥 Strong RVOL expansion"
+    elif rvol >= 1.3:
+        result["rvol_label"] = "🟢 RVOL building"
+    elif rvol <= 0.6:
+        result["rvol_label"] = "⚠️ RVOL fading"
+    else:
+        result["rvol_label"] = "🟡 RVOL stable"
+
+    return result
+
+
+def compute_leader_entry_scores(result):
+    """
+    Splits importance from entry quality:
+    - leader_score = how important the ticker is today
+    - entry_score = how clean the current trade location is
+    """
+    gain = safe_float(result.get("gain"))
+    day_vol = safe_int(result.get("volume"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    rvol = safe_float(result.get("rvol_estimate"))
+    score = safe_int(result.get("score"))
+
+    leader_score = 0
+    entry_score = 0
+
+    # Leader score: tape importance
+    if gain >= 100:
+        leader_score += 5
+    elif gain >= 75:
+        leader_score += 4
+    elif gain >= 50:
+        leader_score += 3
+    elif gain >= 40:
+        leader_score += 2
+    elif gain >= 25:
+        leader_score += 1
+
+    if day_vol >= 20_000_000:
+        leader_score += 3
+    elif day_vol >= 10_000_000:
+        leader_score += 2
+    elif day_vol >= 2_000_000:
+        leader_score += 1
+
+    if recent_vol >= 300_000:
+        leader_score += 2
+    elif recent_vol >= 150_000:
+        leader_score += 1
+
+    if rvol >= 2.0:
+        leader_score += 1
+
+    if result.get("market_leader"):
+        leader_score += 1
+
+    # Entry score: tradable location
+    if result.get("above_vwap"):
+        entry_score += 2
+    if result.get("has_higher_lows"):
+        entry_score += 2
+    if result.get("breakout_confirmed"):
+        entry_score += 2
+    if result.get("near_high"):
+        entry_score += 1
+    if result.get("volume_expanding"):
+        entry_score += 1
+    if result.get("true_second_leg"):
+        entry_score += 2
+    if result.get("fresh_high_after_vwap_hold"):
+        entry_score += 1
+    if result.get("leader_reclaim"):
+        entry_score += 2
+    if result.get("fresh_leader_ignition"):
+        entry_score += 2
+
+    if result.get("momentum_decay"):
+        entry_score -= 2
+    if result.get("bad_structure"):
+        entry_score -= 2
+    if result.get("deep_vwap_loss"):
+        entry_score -= 2
+
+    result["leader_score"] = max(0, min(leader_score, 10))
+    result["entry_score"] = max(0, min(entry_score, 10))
+
+    # Add clean display context
+    if result["leader_score"] >= 8:
+        add_unique(result.setdefault("reasons", []), "🔥 Leader Score strong")
+    if result["entry_score"] >= 7:
+        add_unique(result.setdefault("reasons", []), "🟢 Entry Score strong")
+    elif result["leader_score"] >= 7 and result["entry_score"] <= 4:
+        add_unique(result.setdefault("risks", []), "⚠️ Leader strong but entry not clean yet")
+
     return result
 
 
 def apply_clean_scoring(result):
     score = int(result.get("score", 0) or 0)
 
+    result = estimate_relative_volume(result)
+
     if result.get("market_leader"):
         score += 1
         add_unique(result.setdefault("reasons", []), "🔥 Market leader / heavy tape")
+
+    if result.get("fresh_leader_ignition"):
+        score += 2
+        add_unique(result.setdefault("reasons", []), "🚀 Fresh leader ignition")
+
+    if result.get("leader_reclaim"):
+        score += 2
+        add_unique(result.setdefault("reasons", []), "🟢 Leader VWAP reclaim")
+
+    if result.get("rvol_label"):
+        add_unique(result.setdefault("reasons", []), result.get("rvol_label"))
 
     if result.get("clean_trend_runner"):
         score += 2
@@ -1261,10 +1433,17 @@ def apply_clean_scoring(result):
     if result.get("momentum_decay"):
         add_unique(result.setdefault("risks", []), "⚠️ Momentum decay / wait for reclaim")
 
+    if result.get("midday_chop_risk"):
+        add_unique(result.setdefault("risks", []), "⚠️ Midday chop / volume fade risk")
+
     if result.get("above_vwap") is False:
-        add_unique(result.setdefault("risks", []), "Below VWAP")
+        if result.get("vwap_distance", 0) <= -5:
+            add_unique(result.setdefault("risks", []), "Clear below VWAP")
+        else:
+            add_unique(result.setdefault("risks", []), "Below VWAP / reclaim watch")
 
     result["score"] = max(0, min(score, 10))
+    result = compute_leader_entry_scores(result)
     return compact_reasons(result)
 
 
@@ -1322,6 +1501,12 @@ def classify_alert_tier(result, rank):
         ):
             return "AVOID"
 
+    if result.get("fresh_leader_ignition") and score >= 7:
+        return "RUNNER"
+
+    if result.get("leader_reclaim") and score >= 7:
+        return "RUNNER"
+
     if result.get("true_second_leg") and score >= 7:
         return "RUNNER"
 
@@ -1367,6 +1552,10 @@ def title_for_tier(result, tier):
             return "🟡 WATCH — PULLBACK"
         return "🟡 WATCH"
 
+    if result.get("fresh_leader_ignition"):
+        return "🟢 RUNNER — FRESH IGNITION"
+    if result.get("leader_reclaim"):
+        return "🟢 RUNNER — VWAP RECLAIM"
     if result.get("true_second_leg"):
         return "🟢 RUNNER — SECOND LEG"
     if result.get("fresh_high_after_vwap_hold"):
@@ -1388,6 +1577,12 @@ def setup_bias_and_entry(result):
             result["entry_hint"] = "Leader tape — wait for VWAP hold, higher low, or fresh high confirmation"
         else:
             result["entry_hint"] = "Leader below VWAP — wait for reclaim before entry"
+    elif result.get("fresh_leader_ignition"):
+        result["trap_runner"] = "🟢 Fresh leader ignition"
+        result["entry_hint"] = "Fresh ignition — watch pullback hold or clean high break"
+    elif result.get("leader_reclaim"):
+        result["trap_runner"] = "🟢 Leader reclaim watch"
+        result["entry_hint"] = "VWAP reclaim — watch hold above VWAP with volume"
     elif result.get("true_second_leg"):
         result["trap_runner"] = "🟢 Runner watch"
         result["entry_hint"] = "Second leg — watch hold over VWAP/recent high"
@@ -1471,6 +1666,7 @@ def build_compact_alert(result):
     return (
         f"{title}\n\n"
         f"{result['ticker']} | Score: {result['score']}/10 | {tier}\n"
+        f"Leader: {safe_int(result.get('leader_score'))}/10 | Entry: {safe_int(result.get('entry_score'))}/10\n"
         f"Price: ${safe_float(result.get('price')):.4f}\n"
         f"Gain: {safe_float(result.get('gain')):.1f}%\n"
         f"Float: {float_text}\n\n"
@@ -1516,7 +1712,7 @@ def run_scanner():
     print(
         f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
         f"leaders require {LEADER_MIN_GAIN}%+ / heavy tape | "
-        f"alerts require {ALERT_MIN_GAIN}%+ or leader override",
+        f"phone alerts require {ALERT_MIN_GAIN}%+ only | leaders/entries separated",
         flush=True,
     )
 
@@ -1703,7 +1899,9 @@ def run_scanner():
         results.sort(
             key=lambda r: (
                 r.get("market_leader", False),
+                safe_int(r.get("leader_score")),
                 safe_float(r.get("gain")),
+                safe_int(r.get("entry_score")),
                 safe_int(r.get("recent_volume")),
                 safe_int(r.get("score")),
             ),
@@ -1716,7 +1914,7 @@ def run_scanner():
             r["market_regime"] = regime
 
         top_line = " | ".join(
-            f"#{r.get('rank')} {r['ticker']} {r['score']}/10 {r['gain']:.1f}% "
+            f"#{r.get('rank')} {r['ticker']} S{r['score']}/10 L{safe_int(r.get('leader_score'))}/10 E{safe_int(r.get('entry_score'))}/10 {r['gain']:.1f}% "
             f"{'LEADER' if r.get('market_leader') else ''}"
             for r in results[:10]
         )
