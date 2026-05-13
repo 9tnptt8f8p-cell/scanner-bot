@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v8 — softer decay + stronger watch alerts"
+BOOT_MARKER = "elite scanner rebuild v10 — aligned titles + cleaner catalyst quality"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -92,6 +92,33 @@ BAD_NEWS_KEYWORDS = [
     "stocks moving premarket",
     "here are 20 stocks moving",
     "most active stocks",
+]
+
+# Legal-alert/advertising headlines are not real trading catalysts.
+# Keep them from being promoted above weak/unclear news.
+WEAK_NEWS_OVERRIDES = [
+    "investor alert",
+    "class action",
+    "law firm",
+    "rosen law",
+    "pomerantz",
+    "hagens berman",
+    "deadline",
+    "sued for securities",
+    "investigates claims",
+    "encourages investors",
+    "secure counsel",
+    "losses on their investment",
+]
+
+# These can be relevant but are usually not automatic strong catalysts by themselves.
+SOFT_NEWS_PHRASES = [
+    "begins trading",
+    "ticker symbol change",
+    "regains compliance",
+    "announces stock ticker",
+    "reports first quarter",
+    "quarterly results",
 ]
 
 STRONG_KEYWORDS = [
@@ -573,6 +600,16 @@ def classify_news_quality(headline):
 
     if any(word in text for word in BAD_NEWS_KEYWORDS):
         return "JUNK"
+
+    # Lawsuit ads / deadline alerts are not real catalysts even if they contain
+    # words like earnings, results, agreement, or investors.
+    if any(word in text for word in WEAK_NEWS_OVERRIDES):
+        return "WEAK"
+
+    # Compliance/ticker-change/ordinary result headlines are useful context,
+    # but should not be treated like FDA/contract/merger-grade catalysts.
+    if any(word in text for word in SOFT_NEWS_PHRASES):
+        return "WEAK"
 
     if any(word in text for word in STRONG_KEYWORDS):
         return "STRONG"
@@ -1337,6 +1374,8 @@ def classify_alert_tier(result, rank):
     return "AVOID"
 
 def title_for_tier(result, tier):
+    # v10: the visual title must respect the tier first.
+    # This prevents WATCH alerts from showing RUNNER wording.
     if tier == "AVOID":
         if result.get("momentum_decay"):
             return "🔴 AVOID — MOMENTUM FADED"
@@ -1344,6 +1383,19 @@ def title_for_tier(result, tier):
             return "🔴 AVOID — TRAP RISK"
         return "🔴 AVOID"
 
+    if tier == "MAJOR MOVER":
+        return "🟠 MAJOR MOVER — WATCH"
+
+    if tier == "WATCH":
+        if result.get("momentum_decay"):
+            return "🟡 WATCH — PULLBACK / RECLAIM"
+        if result.get("massive_no_news_runner"):
+            return "🟡 WATCH — NO-NEWS VOLUME"
+        if result.get("fresh_high_after_vwap_hold"):
+            return "🟡 WATCH — VWAP HOLD"
+        return "🟡 WATCH"
+
+    # RUNNER tier only.
     if result.get("true_second_leg"):
         return "🟢 RUNNER — SECOND LEG"
     if result.get("fresh_high_after_vwap_hold"):
@@ -1352,12 +1404,8 @@ def title_for_tier(result, tier):
         return "🟢 RUNNER — NO-NEWS VOLUME"
     if result.get("clean_trend_runner"):
         return "🟢 RUNNER — CLEAN TREND"
-    if tier == "RUNNER":
-        return "🟢 RUNNER"
-    if tier == "MAJOR MOVER":
-        return "🟠 MAJOR MOVER — WATCH"
 
-    return "🟡 WATCH"
+    return "🟢 RUNNER"
 
 
 def setup_bias_and_entry(result):
