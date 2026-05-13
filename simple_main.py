@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v18 — fast 25% floor + no-entry clean tiers"
+BOOT_MARKER = "elite scanner rebuild v19 — runner/leader only + hard 7 floor"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -33,11 +33,12 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# V16 ALERT PHILOSOPHY:
+# V19 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
-# 2. Keep phone alerts focused: RUNNER / LEADER / WATCH only.
+# 2. Phone alerts are RUNNER / LEADER only.
+# 3. No WATCH tier. Score 6 and below is ignored.
 ALERT_MIN_GAIN = 25
-MIN_ALERT_SCORE = 6
+MIN_ALERT_SCORE = 7
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 LEADER_MIN_GAIN = 40
@@ -89,6 +90,10 @@ BAD_NEWS_KEYWORDS = [
     "stocks are moving",
     "these stocks are moving",
     "moving in today's session",
+    "today's session",
+    "what's going on",
+    "shares are moving",
+    "session movers",
     "market movers",
     "premarket session",
     "premarket movers",
@@ -1418,7 +1423,7 @@ def estimate_relative_volume(result):
 def compute_leader_score(result):
     """
     Leader score = how important the ticker is on today's tape.
-    V17 removes entry_score completely. Trade guidance comes from tier only:
+    V19 removes entry_score and WATCH completely. Trade guidance comes from tier only:
     RUNNER / LEADER / WATCH / AVOID.
     """
     gain = safe_float(result.get("gain"))
@@ -1467,7 +1472,7 @@ def compute_leader_score(result):
 
 def enforce_score_quality_boundaries(result):
     """
-    V17 score discipline:
+    V19 score discipline:
     - 10/10 must be rare and backed by clean structure.
     - Big gain alone cannot create a 10.
     - No entry_score exists anymore.
@@ -1571,7 +1576,7 @@ def passes_master_alert_gate(result):
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
 
-    # V17 hard rule: no phone alerts under 6. Period.
+    # V19 hard rule: no phone alerts under 7. Period.
     if score < MIN_ALERT_SCORE:
         return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
 
@@ -1596,6 +1601,13 @@ def passes_master_alert_gate(result):
 
 
 def classify_alert_tier(result, rank):
+    """
+    V19: no WATCH tier.
+    Phone alerts are only:
+    - RUNNER = clean continuation / actionable momentum
+    - LEADER = major tape leader / awareness name
+    Everything else is suppressed as AVOID.
+    """
     gate_ok, _ = passes_master_alert_gate(result)
     if not gate_ok:
         return "AVOID"
@@ -1606,8 +1618,12 @@ def classify_alert_tier(result, rank):
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
-    # Damaged structure can only be LEADER awareness, not RUNNER/WATCH.
-    if deep_vwap_loss or bad_structure:
+    if score < MIN_ALERT_SCORE:
+        return "AVOID"
+
+    # Damaged structure can still be a LEADER awareness alert if it is a major tape name,
+    # but it cannot be a RUNNER.
+    if deep_vwap_loss or bad_structure or result.get("momentum_decay"):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
@@ -1627,22 +1643,18 @@ def classify_alert_tier(result, rank):
     )
 
     # RUNNER = clean setup, not just a big mover.
-    if score >= 7 and above_vwap and clean_runner_setup and not result.get("momentum_decay"):
+    if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup:
         return "RUNNER"
 
-    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap and not result.get("momentum_decay"):
+    # Strong 9+ names can become RUNNER if clean, even without a named setup flag.
+    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
         return "RUNNER"
 
-    # LEADER = important tape name, even if not a clean entry setup.
+    # LEADER = important tape name, even if not a clean continuation setup.
     if result.get("market_leader") and score >= MIN_ALERT_SCORE:
         return "LEADER"
 
-    # WATCH = score 6+ but not enough for RUNNER.
-    if score >= MIN_ALERT_SCORE and gain >= ALERT_MIN_GAIN and above_vwap:
-        return "WATCH"
-
     return "AVOID"
-
 
 def title_for_tier(result, tier):
     if tier == "AVOID":
@@ -1659,15 +1671,6 @@ def title_for_tier(result, tier):
             return "🔥 MARKET LEADER"
         return "🔥 MARKET LEADER — RECLAIM WATCH"
 
-    if tier == "WATCH":
-        if result.get("fresh_high_after_vwap_hold"):
-            return "🟡 WATCH — VWAP HOLD"
-        if result.get("massive_no_news_runner"):
-            return "🟡 WATCH — NO-NEWS VOLUME"
-        if result.get("momentum_decay"):
-            return "🟡 WATCH — PULLBACK"
-        return "🟡 WATCH"
-
     if result.get("fresh_leader_ignition"):
         return "🟢 RUNNER — FRESH IGNITION"
     if result.get("leader_reclaim"):
@@ -1683,22 +1686,18 @@ def title_for_tier(result, tier):
 
     return "🟢 RUNNER"
 
-
 def setup_tier_context(result):
-    """V17: no entry hints. Only tier context for internal use."""
-    tier = result.get("alert_tier", "WATCH")
+    """V19: no WATCH/Entry. Only tier context for internal use."""
+    tier = result.get("alert_tier", "AVOID")
 
     if tier == "RUNNER":
         result["tier_context"] = "Clean runner setup"
     elif tier == "LEADER":
         result["tier_context"] = "Market leader awareness"
-    elif tier == "WATCH":
-        result["tier_context"] = "Watchlist only"
     else:
         result["tier_context"] = "Avoid"
 
     return result
-
 
 def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert_setups, now):
     ticker = result["ticker"]
@@ -1724,8 +1723,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 
     # Major title/category upgrade only.
     major_upgrade = (
-        ("WATCH" in last_setup and "RUNNER" in setup)
-        or ("LEADER" in last_setup and "RUNNER" in setup)
+        ("LEADER" in last_setup and "RUNNER" in setup)
         or ("RECLAIM" in setup and "RECLAIM" not in last_setup)
         or ("SECOND LEG" in setup and "SECOND LEG" not in last_setup)
         or ("FRESH IGNITION" in setup and "FRESH IGNITION" not in last_setup)
@@ -1811,7 +1809,7 @@ def first_matching_risk(result):
 
 def build_compact_alert(result):
     """
-    V17 phone alert: no Entry score, no Entry hint, no Bias section.
+    V19 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
     Title + stats + catalyst + setup + risk only.
     """
     result = compact_reasons(result)
@@ -1830,7 +1828,7 @@ def build_compact_alert(result):
     else:
         news_header = "⚠️ Weak/unclear news"
 
-    tier = result.get("alert_tier", "WATCH")
+    tier = result.get("alert_tier", "AVOID")
     title = result.get("title", title_for_tier(result, tier))
 
     setup_line = first_matching_reason(result)
@@ -1878,7 +1876,7 @@ def run_scanner():
     print(
         f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
         f"leaders require {LEADER_MIN_GAIN}%+ / heavy tape | "
-        f"phone alerts require {ALERT_MIN_GAIN}%+ only | no-entry clean tiers",
+        f"phone alerts require {ALERT_MIN_GAIN}%+ and score {MIN_ALERT_SCORE}+ | runner/leader only",
         flush=True,
     )
 
@@ -2036,7 +2034,7 @@ def run_scanner():
                 sec_risk = False
                 sec_note = ""
 
-                if result.get("score", 0) >= 6 or result.get("rank", 99) <= 12 or result.get("market_leader"):
+                if result.get("score", 0) >= MIN_ALERT_SCORE or result.get("rank", 99) <= 12 or result.get("market_leader"):
                     sec_risk, sec_note = check_sec_offering_risk(ticker)
                     result["sec_note"] = sec_note
 
@@ -2065,7 +2063,7 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
-        # V17: leaders ranked first internally; alerts prioritize RUNNER > LEADER > WATCH.
+        # V19: leaders ranked first internally; alerts prioritize RUNNER > LEADER only.
         results.sort(
             key=lambda r: (
                 r.get("market_leader", False),
@@ -2095,7 +2093,7 @@ def run_scanner():
         sent_count = 0
 
         alert_candidates = []
-        tier_priority = {"RUNNER": 3, "LEADER": 2, "WATCH": 1, "AVOID": 0}
+        tier_priority = {"RUNNER": 2, "LEADER": 1, "AVOID": 0}
 
         for result in results[:MAX_GAINERS]:
             ticker = result["ticker"]
