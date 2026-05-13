@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v10 — aligned titles + cleaner catalyst quality"
+BOOT_MARKER = "elite scanner rebuild v11 — strict meaningful alerts only"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -29,11 +29,18 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
+# Scan universe can stay wider so bot still studies names internally.
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
+# HARD PHONE ALERT RULES
+ALERT_MIN_GAIN = 27
+MIN_ALERT_SCORE = 5
+MIN_ALERT_RECENT_VOLUME = 75_000
+BLOCK_FADING_WATCH_ALERTS = True
+
 ALERT_COOLDOWN_SECONDS = 900
-MAX_ALERTS_PER_CYCLE = 6
+MAX_ALERTS_PER_CYCLE = 4
 
 MAX_GAINERS = 60
 MIN_VOLUME = 50_000
@@ -94,8 +101,6 @@ BAD_NEWS_KEYWORDS = [
     "most active stocks",
 ]
 
-# Legal-alert/advertising headlines are not real trading catalysts.
-# Keep them from being promoted above weak/unclear news.
 WEAK_NEWS_OVERRIDES = [
     "investor alert",
     "class action",
@@ -111,7 +116,6 @@ WEAK_NEWS_OVERRIDES = [
     "losses on their investment",
 ]
 
-# These can be relevant but are usually not automatic strong catalysts by themselves.
 SOFT_NEWS_PHRASES = [
     "begins trading",
     "ticker symbol change",
@@ -128,20 +132,15 @@ STRONG_KEYWORDS = [
     "fast track", "breakthrough therapy", "primary endpoint",
     "met primary endpoint", "statistically significant", "pivotal trial",
     "new drug application", "nda", "bla", "de novo", "commercial launch",
-
     "contract", "agreement", "partnership", "collaboration",
     "deal", "order", "purchase order", "supply agreement",
     "distribution agreement", "license agreement", "strategic alliance",
     "definitive agreement", "letter of intent", "mou", "memorandum of understanding",
-
     "financing", "advance financing", "facility", "battery",
     "solid-state battery", "infrastructure", "validation initiative",
-
     "acquisition", "merger", "buyout", "takeover",
-
     "earnings", "revenue", "guidance", "raises guidance",
     "profitability", "record revenue",
-
     "bitcoin", "ethereum", "crypto", "blockchain",
     "artificial intelligence", "ai-powered", "nvidia",
 ]
@@ -177,11 +176,7 @@ def should_scan_now():
     if now.date().isoformat() in MARKET_HOLIDAYS_2026:
         return False
 
-    # Scan 7:30 AM ET to 4:10 PM ET
-    if not (dtime(7, 30) <= now.time() < dtime(16, 10)):
-        return False
-
-    return True
+    return dtime(7, 30) <= now.time() < dtime(16, 10)
 
 
 def get_market_session():
@@ -218,14 +213,18 @@ def is_bad_ticker(ticker):
 
 def safe_float(value, default=0.0):
     try:
-        return float(value or default)
+        if value is None:
+            return default
+        return float(value)
     except Exception:
         return default
 
 
 def safe_int(value, default=0):
     try:
-        return int(float(value or default))
+        if value is None:
+            return default
+        return int(float(value))
     except Exception:
         return default
 
@@ -269,6 +268,7 @@ def dedupe_phrases(items):
         "clean_structure": ["clean structure", "clean trend runner structure", "structure confirmation"],
         "no_news": ["no confirmed catalyst", "technical momentum only"],
         "volume_fade": ["volume fading", "momentum weakening"],
+        "volume_expand": ["volume expanding", "momentum increasing"],
         "dilution": ["dilution", "offering", "warrant", "shelf", "atm"],
     }
 
@@ -309,6 +309,8 @@ def compact_reasons(result):
             continue
         if "fresh news" in low and news_quality in ["NONE", "UNKNOWN", "JUNK"]:
             continue
+        if "15%+ early mover" in low:
+            continue
         reasons.append(r)
 
     for r in result.get("risks", []):
@@ -327,14 +329,12 @@ def compact_reasons(result):
 
 def get_nasdaq_gainers():
     url = "https://api.nasdaq.com/api/screener/stocks"
-
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://www.nasdaq.com",
         "Referer": "https://www.nasdaq.com/",
     }
-
     params = {
         "tableonly": "true",
         "limit": 200,
@@ -399,7 +399,6 @@ def get_percent_gainers():
         try:
             r = requests.get(url, params=params, headers=headers, timeout=10)
             data = r.json()
-
             quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
 
             for q in quotes:
@@ -415,7 +414,6 @@ def get_percent_gainers():
                 if price <= 0 or gain < SCAN_MIN_GAIN or volume < MIN_VOLUME or price > MAX_PRICE:
                     continue
 
-                # Keep highest gain if duplicate appears in multiple Yahoo screeners.
                 old = all_movers.get(ticker)
                 if not old or gain > old.get("gain", 0):
                     all_movers[ticker] = {
@@ -539,7 +537,6 @@ def get_alpaca_candles(ticker):
 
 
 def get_yahoo_candles(ticker):
-    """Robust Yahoo candle fallback. Avoids malformed 'open' parser errors."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     params = {"interval": "5m", "range": "1d"}
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -601,13 +598,9 @@ def classify_news_quality(headline):
     if any(word in text for word in BAD_NEWS_KEYWORDS):
         return "JUNK"
 
-    # Lawsuit ads / deadline alerts are not real catalysts even if they contain
-    # words like earnings, results, agreement, or investors.
     if any(word in text for word in WEAK_NEWS_OVERRIDES):
         return "WEAK"
 
-    # Compliance/ticker-change/ordinary result headlines are useful context,
-    # but should not be treated like FDA/contract/merger-grade catalysts.
     if any(word in text for word in SOFT_NEWS_PHRASES):
         return "WEAK"
 
@@ -702,7 +695,6 @@ def scrape_pr_headline(ticker):
                 if not text or len(text) < 25:
                     continue
 
-                # Strict ticker word match prevents false matches like GLE inside Glecaprevir.
                 if not re.search(rf"\b{re.escape(ticker)}\b", text, re.IGNORECASE):
                     continue
 
@@ -720,7 +712,6 @@ def scrape_pr_headline(ticker):
 
 
 def find_real_news_headline(ticker, current_headline=""):
-    """Find usable catalyst; rejects roundup junk and falls back to Yahoo/PR."""
     now = time.time()
     ticker = str(ticker or "").upper().strip()
 
@@ -737,7 +728,6 @@ def find_real_news_headline(ticker, current_headline=""):
         NEWS_CACHE[ticker] = {"time": now, "data": data}
         return data
 
-    # Yahoo news fallback
     try:
         url = f"https://finance.yahoo.com/quote/{ticker}/news/"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -765,7 +755,6 @@ def find_real_news_headline(ticker, current_headline=""):
     except Exception as e:
         print(f"[YAHOO SCRAPE ERROR] {ticker}: {e}", flush=True)
 
-    # PR fallback
     pr_headline = scrape_pr_headline(ticker)
     if pr_headline:
         pr_quality = classify_news_quality(pr_headline)
@@ -948,12 +937,9 @@ def score_mover(mover, catalyst_type, catalyst_text):
     elif gain >= 50:
         score += 3
         reasons.append("50%+ gainer")
-    elif gain >= 25:
+    elif gain >= 27:
         score += 2
-        reasons.append("25%+ mover")
-    elif gain >= 15:
-        score += 1
-        reasons.append("15%+ early mover")
+        reasons.append("27%+ momentum mover")
 
     if volume >= 20_000_000:
         score += 4
@@ -1150,7 +1136,7 @@ def compute_momentum_flags(result):
     result["recent_high"] = recent_high
     result["near_high"] = price >= recent_high * 0.97 if recent_high else False
 
-    volume_expanding = recent_vol >= max(75_000, prev_vol)
+    volume_expanding = recent_vol >= max(MIN_ALERT_RECENT_VOLUME, prev_vol)
     volume_fading = prev_vol > 0 and recent_vol < prev_vol * 0.60
     lost_vwap = has_vwap and price < vwap
 
@@ -1172,11 +1158,6 @@ def compute_momentum_flags(result):
     result["has_higher_lows"] = has_higher_lows
     result["breakout_confirmed"] = breakout
 
-    # Softer decay model:
-    # - Volume fading alone is NOT dead momentum.
-    # - A small VWAP slip alone is NOT dead momentum.
-    # - Decay should require combined weakness unless structure is truly bad.
-    # This prevents strong movers above VWAP / near highs from being hidden as AVOID.
     shallow_vwap_slip = bool(lost_vwap and result.get("vwap_distance", 0) > -5.0)
     deep_vwap_loss = bool(lost_vwap and result.get("vwap_distance", 0) <= -5.0)
 
@@ -1184,7 +1165,7 @@ def compute_momentum_flags(result):
     result["deep_vwap_loss"] = deep_vwap_loss
 
     healthy_pullback = bool(
-        gain >= 15
+        gain >= ALERT_MIN_GAIN
         and (above_vwap or shallow_vwap_slip)
         and (has_higher_lows or result.get("near_high") or breakout)
     )
@@ -1197,7 +1178,7 @@ def compute_momentum_flags(result):
     )
 
     result["clean_trend_runner"] = bool(
-        gain >= 20
+        gain >= ALERT_MIN_GAIN
         and above_vwap
         and not bad_structure
         and recent_vol >= 100_000
@@ -1205,7 +1186,7 @@ def compute_momentum_flags(result):
     )
 
     result["true_second_leg"] = bool(
-        gain >= 25
+        gain >= ALERT_MIN_GAIN
         and above_vwap
         and not bad_structure
         and recent_vol >= 150_000
@@ -1214,7 +1195,7 @@ def compute_momentum_flags(result):
     )
 
     result["fresh_high_after_vwap_hold"] = bool(
-        gain >= 20
+        gain >= ALERT_MIN_GAIN
         and above_vwap
         and has_higher_lows
         and result.get("near_high")
@@ -1234,7 +1215,6 @@ def compute_momentum_flags(result):
 
 
 def apply_clean_scoring(result):
-    """Final score tune. Dilution/SEC risks are never score penalties."""
     score = int(result.get("score", 0) or 0)
 
     if result.get("clean_trend_runner"):
@@ -1253,7 +1233,6 @@ def apply_clean_scoring(result):
         score += 1
         add_unique(result.setdefault("reasons", []), "No-news volume runner")
 
-    # Structure confidence penalties only. Dilution never penalizes score.
     if result.get("momentum_decay"):
         score -= 1
         add_unique(result.setdefault("risks", []), "⚠️ Momentum decay / wait for reclaim")
@@ -1270,55 +1249,57 @@ def apply_clean_scoring(result):
 # ALERT TIERS
 # ============================================================
 
-def classify_alert_tier(result, rank):
-    """
-    v9 behavior layer:
-    RUNNER = trade-quality structure.
-    MAJOR MOVER = huge mover awareness even if not a perfect entry.
-    WATCH = developing / pullback / VWAP reclaim watch.
-    AVOID = only truly broken, deep below VWAP, or too weak.
-
-    Important: CHOP/MIXED/HOT regime is awareness only. It should never globally
-    disable alerts, because strong momentum names can appear even in mixed tape.
-    """
+def passes_master_alert_gate(result):
+    ticker = result.get("ticker", "UNKNOWN")
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
-    above_vwap = bool(result.get("above_vwap", True))
-    high_rank = rank <= 15
-    no_news = result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK"]
-    momentum_decay = bool(result.get("momentum_decay"))
-    deep_vwap_loss = bool(result.get("deep_vwap_loss"))
+    volume_fading = bool(result.get("volume_fading"))
 
-    active_volume = recent_vol >= 50_000 or day_vol >= 500_000
-    strong_active_mover = gain >= 25 and active_volume
-    monster_mover = high_rank and gain >= 50 and day_vol >= 500_000
-    big_ranked_mover = high_rank and gain >= 25 and day_vol >= 300_000
-    tradable_watch_mover = gain >= 15 and active_volume and score >= 3
+    active_volume = recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000
 
-    # Hard avoid should only catch truly broken setups. Do NOT hard-block a major
-    # top gainer only because structure text contains one warning or decay=True.
-    hard_bad_structure = bool(result.get("bad_structure")) and not (
-        result.get("true_second_leg")
-        or result.get("clean_trend_runner")
-        or result.get("fresh_high_after_vwap_hold")
-        or monster_mover
-        or (strong_active_mover and score >= 5)
-        or (big_ranked_mover and score >= 4)
-    )
+    if gain < ALERT_MIN_GAIN:
+        return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
 
-    hard_lost_vwap = deep_vwap_loss and not (
-        monster_mover
-        or (strong_active_mover and score >= 5)
-        or (big_ranked_mover and score >= 4)
-    )
+    if score < MIN_ALERT_SCORE:
+        return False, f"score {score}/10 under {MIN_ALERT_SCORE}/10 floor"
 
-    if hard_bad_structure or hard_lost_vwap:
+    if not active_volume:
+        return False, "not enough active volume"
+
+    if BLOCK_FADING_WATCH_ALERTS and volume_fading:
+        if not (
+            result.get("true_second_leg")
+            or result.get("clean_trend_runner")
+            or result.get("fresh_high_after_vwap_hold")
+            or score >= 8
+        ):
+            return False, "volume fading — weak watch blocked"
+
+    return True, "passed"
+
+
+def classify_alert_tier(result, rank):
+    gate_ok, _ = passes_master_alert_gate(result)
+    if not gate_ok:
         return "AVOID"
 
-    # Trade-quality alerts.
-    if result.get("true_second_leg"):
+    gain = safe_float(result.get("gain"))
+    score = safe_int(result.get("score"))
+    above_vwap = bool(result.get("above_vwap", True))
+    deep_vwap_loss = bool(result.get("deep_vwap_loss"))
+    bad_structure = bool(result.get("bad_structure"))
+
+    if deep_vwap_loss or bad_structure:
+        if not (
+            result.get("true_second_leg")
+            or result.get("clean_trend_runner")
+            or score >= 8
+        ):
+            return "AVOID"
+
+    if result.get("true_second_leg") and score >= 7:
         return "RUNNER"
 
     if result.get("clean_trend_runner") and score >= 7:
@@ -1327,55 +1308,19 @@ def classify_alert_tier(result, rank):
     if result.get("massive_no_news_runner") and score >= 7:
         return "RUNNER"
 
-    if score >= 8 and gain >= 20 and above_vwap and active_volume:
+    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
         return "RUNNER"
 
-    # Major mover awareness: top gainers should not disappear just because they
-    # are not clean entries yet. This is an awareness/watchlist alert, not a buy call.
-    if monster_mover and score >= 4:
+    if score >= 7 and gain >= 30:
         return "MAJOR MOVER"
 
-    if high_rank and gain >= 75 and score >= 3 and day_vol >= 300_000:
-        return "MAJOR MOVER"
-
-    if gain >= 50 and score >= 4 and day_vol >= 500_000:
-        return "MAJOR MOVER"
-
-    if score >= 7 and gain >= 30 and day_vol >= 300_000:
-        return "MAJOR MOVER"
-
-    # Decay no longer hides strong names. It downgrades them to WATCH.
-    if momentum_decay and strong_active_mover:
+    if score >= 5 and gain >= ALERT_MIN_GAIN and above_vwap:
         return "WATCH"
-
-    if momentum_decay and above_vwap and gain >= 15 and score >= 3 and active_volume:
-        return "WATCH"
-
-    # Watch tier: developing names / pullback names / reclaim-watch names.
-    if big_ranked_mover and score >= 4:
-        return "WATCH"
-
-    if gain >= 25 and score >= 4 and active_volume:
-        return "WATCH"
-
-    if gain >= 20 and above_vwap and score >= 3 and active_volume:
-        return "WATCH"
-
-    if tradable_watch_mover and above_vwap:
-        return "WATCH"
-
-    if score >= 6 and gain >= 25:
-        return "WATCH"
-
-    # Weak/no-news low-score names stay quiet.
-    if no_news and score < 4 and gain < 25:
-        return "AVOID"
 
     return "AVOID"
 
+
 def title_for_tier(result, tier):
-    # v10: the visual title must respect the tier first.
-    # This prevents WATCH alerts from showing RUNNER wording.
     if tier == "AVOID":
         if result.get("momentum_decay"):
             return "🔴 AVOID — MOMENTUM FADED"
@@ -1387,15 +1332,12 @@ def title_for_tier(result, tier):
         return "🟠 MAJOR MOVER — WATCH"
 
     if tier == "WATCH":
-        if result.get("momentum_decay"):
-            return "🟡 WATCH — PULLBACK / RECLAIM"
-        if result.get("massive_no_news_runner"):
-            return "🟡 WATCH — NO-NEWS VOLUME"
         if result.get("fresh_high_after_vwap_hold"):
             return "🟡 WATCH — VWAP HOLD"
+        if result.get("massive_no_news_runner"):
+            return "🟡 WATCH — NO-NEWS VOLUME"
         return "🟡 WATCH"
 
-    # RUNNER tier only.
     if result.get("true_second_leg"):
         return "🟢 RUNNER — SECOND LEG"
     if result.get("fresh_high_after_vwap_hold"):
@@ -1420,12 +1362,9 @@ def setup_bias_and_entry(result):
     elif result.get("clean_trend_runner") or result.get("fresh_high_after_vwap_hold"):
         result["trap_runner"] = "🟢 Runner lean"
         result["entry_hint"] = "Clean trend — watch breakout/hold or VWAP dip"
-    elif result.get("momentum_decay") and tier in ["WATCH", "MAJOR MOVER"]:
+    elif result.get("momentum_decay"):
         result["trap_runner"] = "🟡 Pullback watch / not an entry yet"
         result["entry_hint"] = "Wait for VWAP reclaim, higher low, or volume return"
-    elif result.get("momentum_decay"):
-        result["trap_runner"] = "🔴 Avoid / faded"
-        result["entry_hint"] = "Wait for VWAP reclaim + volume to return"
     elif result.get("bad_structure"):
         result["trap_runner"] = "🔴 Avoid / trap risk"
         result["entry_hint"] = "Avoid chase — needs clean reclaim"
@@ -1510,16 +1449,12 @@ def build_compact_alert(result):
 
 
 def detect_market_regime(results):
-    """
-    v9 regime detector based on actual live movers, not just internal score.
-    Regime is an awareness label only; it should not suppress alerts.
-    """
     if not results:
         return "UNKNOWN"
 
     top = results[:20]
 
-    big_runners = sum(1 for r in top if safe_float(r.get("gain")) >= 25)
+    big_runners = sum(1 for r in top if safe_float(r.get("gain")) >= ALERT_MIN_GAIN)
     active_runners = sum(
         1 for r in top
         if safe_float(r.get("gain")) >= 15
@@ -1542,7 +1477,7 @@ def detect_market_regime(results):
 
 def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
-    print(f"[BOOT] Scanning fresh {SCAN_MIN_GAIN}%+ gainers | RUNNER / WATCH / AVOID", flush=True)
+    print(f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | alerts require {ALERT_MIN_GAIN}%+ and {MIN_ALERT_SCORE}/10+", flush=True)
 
     alert_history = {}
     runner_prices = {}
@@ -1561,7 +1496,6 @@ def run_scanner():
 
         session = get_market_session()
         movers = get_percent_gainers()
-
         movers = sorted(movers, key=lambda x: safe_float(x.get("gain")), reverse=True)[:MAX_GAINERS]
 
         print(
@@ -1664,10 +1598,7 @@ def run_scanner():
 
                     first_close = safe_float(candles[0].get("close"))
                     last_close = safe_float(candles[-1].get("close"))
-                    if first_close:
-                        result["candle_session_gain"] = ((last_close - first_close) / first_close) * 100
-                    else:
-                        result["candle_session_gain"] = 0
+                    result["candle_session_gain"] = ((last_close - first_close) / first_close) * 100 if first_close else 0
 
                 structure = analyze_structure(ticker, candles or [])
 
@@ -1695,7 +1626,6 @@ def run_scanner():
                 result = compute_momentum_flags(result)
                 result = apply_clean_scoring(result)
 
-                # SEC / dilution check only for real candidates. Awareness only.
                 sec_risk = False
                 sec_note = ""
 
@@ -1762,14 +1692,24 @@ def run_scanner():
             if sent_count >= MAX_ALERTS_PER_CYCLE:
                 break
 
+            gate_ok, gate_reason = passes_master_alert_gate(result)
+            if not gate_ok:
+                print(f"[NO ALERT] {ticker} {gate_reason}", flush=True)
+                continue
+
             tier = classify_alert_tier(result, safe_int(result.get("rank", 99)))
 
             if tier == "AVOID":
-                print(f"[NO ALERT] {ticker} avoided — tier filter score={result.get('score')} gain={safe_float(result.get('gain')):.1f}% above_vwap={result.get('above_vwap')} decay={result.get('momentum_decay')}", flush=True)
+                print(
+                    f"[NO ALERT] {ticker} avoided — tier filter score={result.get('score')} "
+                    f"gain={safe_float(result.get('gain')):.1f}% above_vwap={result.get('above_vwap')} "
+                    f"decay={result.get('momentum_decay')}",
+                    flush=True,
+                )
                 continue
 
-            result = setup_bias_and_entry(result)
             result["alert_tier"] = tier
+            result = setup_bias_and_entry(result)
             result["title"] = title_for_tier(result, tier)
             result["setup_tag"] = result["title"]
 
@@ -1789,7 +1729,7 @@ def run_scanner():
             msg = build_compact_alert(result)
 
             print(
-                f"[SEND] {ticker} tier={tier} score={result['score']} reason={reason}",
+                f"[SEND] {ticker} tier={tier} score={result['score']} gain={safe_float(result.get('gain')):.1f}% reason={reason}",
                 flush=True,
             )
 
