@@ -20,7 +20,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v17 — no-entry clean tiers + strict 6+ alerts"
+BOOT_MARKER = "elite scanner rebuild v18 — fast 25% floor + no-entry clean tiers"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -35,7 +35,7 @@ SCAN_SLEEP = 90
 
 # V16 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
-# 2. Still separate elite entry setups from awareness alerts.
+# 2. Keep phone alerts focused: RUNNER / LEADER / WATCH only.
 ALERT_MIN_GAIN = 25
 MIN_ALERT_SCORE = 6
 MIN_ALERT_RECENT_VOLUME = 75_000
@@ -1878,7 +1878,7 @@ def run_scanner():
     print(
         f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
         f"leaders require {LEADER_MIN_GAIN}%+ / heavy tape | "
-        f"phone alerts require {ALERT_MIN_GAIN}%+ only | leaders/entries separated",
+        f"phone alerts require {ALERT_MIN_GAIN}%+ only | no-entry clean tiers",
         flush=True,
     )
 
@@ -1936,8 +1936,11 @@ def run_scanner():
                     print(f"[FILTER] {ticker} price ${price:.2f} outside range", flush=True)
                     continue
 
-                if gain < 5:
-                    print(f"[FILTER] {ticker} live gain too weak {gain:.1f}%", flush=True)
+                # V18 speed/noise filter: do not spend profile/news/candle calls
+                # on weak under-alert-floor names. The screener can stay wide,
+                # but full processing is for 25%+ movers only.
+                if gain < ALERT_MIN_GAIN:
+                    print(f"[FILTER] {ticker} gain under alert floor {gain:.1f}%", flush=True)
                     continue
 
                 if volume <= 0:
