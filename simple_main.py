@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v20 — deep catalyst engine + runner/leader only"
+BOOT_MARKER = "elite scanner rebuild v21 — clean ten runner/leader engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -41,7 +41,7 @@ SCAN_SLEEP = 90
 # V20 ALERT PHILOSOPHY:
 # 1. Surface true market leaders.
 # 2. Phone alerts are RUNNER / LEADER only.
-# 3. No WATCH tier.
+# 3. No WATCH tier/wording.
 # 4. Score 6 and below is ignored.
 # 5. Catalyst engine digs deeper before saying no confirmed news.
 ALERT_MIN_GAIN = 25
@@ -59,11 +59,11 @@ MIDDAY_CHOP_START = dtime(11, 0)
 MIDDAY_CHOP_END = dtime(14, 0)
 
 # Do not hard-block fading leaders. Downgrade title/bias instead.
-BLOCK_FADING_WATCH_ALERTS = False
+BLOCK_FADING_LEADER_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
 MIN_RE_ALERT_SECONDS = 300
-MAX_ALERTS_PER_CYCLE = 4
+MAX_ALERTS_PER_CYCLE = 3
 
 MAX_GAINERS = 70
 MIN_VOLUME = 50_000
@@ -71,6 +71,10 @@ MAX_PRICE = 100
 MIN_PRICE = 0.50
 MAX_MARKET_CAP = 1_000_000_000
 MAX_FLOAT_SHARES = 50_000_000
+
+# V21 cleanliness knobs: keep phone alerts trader-grade and non-contradictory.
+MAX_ALERT_REASONS = 4
+MAX_ALERT_RISKS = 4
 
 TREND_BUILDER_MIN_GAIN = 12
 
@@ -471,28 +475,79 @@ def dedupe_phrases(items):
 
 
 def compact_reasons(result):
+    """
+    Final cleanup pass for alert readability.
+    Keeps phone alerts short, removes duplicate structure language, and prevents
+    stale WATCH/unclear wording from leaking into the final message.
+    """
     reasons = []
     risks = []
 
     news_quality = result.get("news_quality", "UNKNOWN")
 
+    banned_reason_bits = [
+        "market cap",
+        "fresh daily",
+        "daily breakout",
+        "session",
+        "15%+ early mover",
+        "watchlist",
+    ]
+
     for r in result.get("reasons", []):
-        low = str(r).lower()
-        if "market cap" in low:
+        low = str(r).lower().strip()
+        if not low:
+            continue
+        if any(bit in low for bit in banned_reason_bits):
             continue
         if "fresh news" in low and news_quality in ["NONE", "UNKNOWN", "JUNK"]:
             continue
-        if "15%+ early mover" in low:
-            continue
-        reasons.append(r)
+        reasons.append(str(r).strip())
 
     for r in result.get("risks", []):
-        if str(r).strip().lower() in ["none", "n/a", ""]:
+        text = str(r).strip()
+        low = text.lower()
+        if low in ["none", "n/a", "", "null"]:
             continue
-        risks.append(r)
+        # Do not show vague duplicate caution when a stronger dilution/offering
+        # label already exists.
+        if "sec filings present" in low and any("dilution" in str(x).lower() or "offering" in str(x).lower() for x in risks):
+            continue
+        risks.append(text)
 
-    result["reasons"] = dedupe_phrases(reasons)[:6]
-    result["risks"] = dedupe_phrases(risks)[:5]
+    result["reasons"] = dedupe_phrases(reasons)[:MAX_ALERT_REASONS]
+    result["risks"] = dedupe_phrases(risks)[:MAX_ALERT_RISKS]
+    return result
+
+
+def clean_alert_consistency(result):
+    """
+    Contradiction cleaner. The bot can internally score many signals, but the
+    final alert must say one thing clearly: RUNNER, LEADER, or AVOID.
+    """
+    tier = result.get("alert_tier")
+    title = str(result.get("title", ""))
+
+    # User preference: no WATCH tier/wording in final phone alerts.
+    title = title.replace(" — PULLBACK WATCH", " — PULLBACK")
+    title = title.replace(" — RECLAIM WATCH", " — RECLAIM NEEDED")
+    title = title.replace("WATCH", "")
+    title = " ".join(title.split()).strip()
+
+    if tier == "RUNNER":
+        if result.get("momentum_decay") or result.get("bad_structure") or result.get("deep_vwap_loss"):
+            # Runner cannot coexist with clear decay/trap language. Demote to leader
+            # only if it is still an important tape name; otherwise avoid.
+            result["alert_tier"] = "LEADER" if result.get("market_leader") else "AVOID"
+            tier = result["alert_tier"]
+
+    if tier == "LEADER" and title.startswith("🟢 RUNNER"):
+        title = "🔥 MARKET LEADER"
+    elif tier == "AVOID" and not title.startswith("🔴 AVOID"):
+        title = "🔴 AVOID — STRUCTURE FAILED"
+
+    result["title"] = title
+    result = compact_reasons(result)
     return result
 
 
@@ -2121,7 +2176,7 @@ def apply_clean_scoring(result):
         if result.get("vwap_distance", 0) <= -5:
             add_unique(result.setdefault("risks", []), "Clear below VWAP")
         else:
-            add_unique(result.setdefault("risks", []), "Below VWAP / reclaim watch")
+            add_unique(result.setdefault("risks", []), "Below VWAP / reclaim needed")
 
     result["score"] = max(0, min(score, 10))
     result = compute_leader_score(result)
@@ -2164,7 +2219,7 @@ def passes_master_alert_gate(result):
 
 def classify_alert_tier(result, rank):
     """
-    V20: no WATCH tier.
+    V21: no WATCH tier.
     Phone alerts are only:
     - RUNNER = clean continuation / actionable momentum
     - LEADER = major tape leader / awareness name
@@ -2184,6 +2239,11 @@ def classify_alert_tier(result, rank):
         return "AVOID"
 
     if deep_vwap_loss or bad_structure or result.get("momentum_decay"):
+        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+            return "LEADER"
+        return "AVOID"
+
+    if result.get("midday_chop_risk") and not (result.get("true_second_leg") or result.get("fresh_leader_ignition") or result.get("leader_reclaim")):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
@@ -2223,11 +2283,13 @@ def title_for_tier(result, tier):
         return "🔴 AVOID"
 
     if tier == "LEADER":
+        # Important awareness name, but not necessarily a clean entry.
+        # No WATCH wording in final alerts.
         if result.get("momentum_decay"):
-            return "🔥 MARKET LEADER — PULLBACK WATCH"
+            return "🔥 MARKET LEADER — PULLBACK"
         if result.get("above_vwap"):
             return "🔥 MARKET LEADER"
-        return "🔥 MARKET LEADER — RECLAIM WATCH"
+        return "🔥 MARKET LEADER — RECLAIM NEEDED"
 
     if result.get("fresh_leader_ignition"):
         return "🟢 RUNNER — FRESH IGNITION"
@@ -2238,7 +2300,7 @@ def title_for_tier(result, tier):
     if result.get("fresh_high_after_vwap_hold"):
         return "🟢 RUNNER — VWAP HOLD"
     if result.get("massive_no_news_runner"):
-        return "🟢 RUNNER — NO-NEWS VOLUME"
+        return "🟢 RUNNER — VOLUME RUNNER"
     if result.get("clean_trend_runner"):
         return "🟢 RUNNER — CLEAN TREND"
 
@@ -2332,7 +2394,7 @@ def first_matching_reason(result):
             if pref.lower() in str(reason).lower():
                 return str(reason).replace("🔥 ", "").replace("🟢 ", "").replace("📈 ", "").strip()
 
-    return str(reasons[0]).strip() if reasons else "Momentum watch"
+    return str(reasons[0]).strip() if reasons else "Momentum setup"
 
 
 def first_matching_risk(result):
@@ -2362,10 +2424,10 @@ def first_matching_risk(result):
 
 def build_compact_alert(result):
     """
-    V20 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
+    V21 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
     Title + stats + catalyst + setup + risk only.
     """
-    result = compact_reasons(result)
+    result = clean_alert_consistency(result)
 
     float_shares = safe_float(result.get("float"))
     float_text = f"{float_shares/1_000_000:.1f}M" if float_shares else "Unknown"
@@ -2681,6 +2743,11 @@ def run_scanner():
             result = setup_tier_context(result)
             result["title"] = title_for_tier(result, tier)
             result["setup_tag"] = result["title"]
+            result = clean_alert_consistency(result)
+
+            if result.get("alert_tier") == "AVOID":
+                print(f"[NO ALERT] {ticker} avoided after consistency cleanup", flush=True)
+                continue
 
             alert_candidates.append(result)
 
