@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v22 — main leader + momentum moment + junk gate"
+BOOT_MARKER = "elite scanner rebuild v23 — early leader + live action engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -45,7 +45,9 @@ SCAN_SLEEP = 90
 # 4. Score 6 and below ignored.
 # 5. Junk/news spam gate must pass before phone alert.
 ALERT_MIN_GAIN = 25
+EARLY_LEADER_MIN_GAIN = 18
 MIN_ALERT_SCORE = 7
+MIN_LIVE_ACTION_SCORE = 8
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 PREMARKET_ALERTS_ENABLED = False
@@ -2299,6 +2301,8 @@ def apply_clean_scoring(result):
     result = compute_setup_score(result)
     result = compute_risk_score(result)
     result = enforce_score_quality_boundaries(result)
+    result = compute_live_action_score(result)
+    result = detect_early_leader(result)
     return compact_reasons(result)
 
 
@@ -2397,6 +2401,131 @@ def classify_momentum_moment(result):
     return result
 
 
+
+def compute_live_action_score(result):
+    """Ranks what matters most right now: fresh action + clean structure.
+    Internal only. We do NOT print noisy sub-scores in the phone alert.
+    """
+    score = 0
+    gain = safe_float(result.get("gain"))
+    day_vol = safe_int(result.get("volume"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    prev_vol = safe_int(result.get("prev_volume"))
+    rvol = safe_float(result.get("rvol_estimate"))
+
+    if gain >= 50:
+        score += 2
+    elif gain >= 30:
+        score += 1
+    elif gain >= EARLY_LEADER_MIN_GAIN:
+        score += 1
+
+    if recent_vol >= 300_000:
+        score += 3
+    elif recent_vol >= 150_000:
+        score += 2
+    elif recent_vol >= MIN_ALERT_RECENT_VOLUME:
+        score += 1
+
+    if prev_vol > 0 and recent_vol >= prev_vol * 1.75:
+        score += 2
+    elif prev_vol > 0 and recent_vol >= prev_vol * 1.15:
+        score += 1
+    elif rvol >= 2.0:
+        score += 2
+    elif rvol >= 1.25:
+        score += 1
+
+    if result.get("above_vwap"):
+        score += 2
+    if result.get("near_high"):
+        score += 2
+    elif result.get("near_high_95"):
+        score += 1
+    if result.get("has_higher_lows"):
+        score += 1
+    if result.get("breakout_confirmed"):
+        score += 1
+    if result.get("trend_builder_alert"):
+        score += 1
+    if result.get("clean_trend_runner"):
+        score += 1
+    if result.get("fresh_leader_ignition"):
+        score += 2
+    if result.get("true_second_leg"):
+        score += 2
+    if result.get("market_leader"):
+        score += 1
+    if day_vol >= 2_000_000:
+        score += 1
+
+    if result.get("news_quality") == "STRONG":
+        score += 1
+
+    if result.get("volume_fading"):
+        score -= 2
+    if result.get("momentum_decay"):
+        score -= 3
+    if result.get("bad_structure"):
+        score -= 4
+    if result.get("deep_vwap_loss"):
+        score -= 4
+    if result.get("midday_chop_risk"):
+        score -= 2
+    if result.get("bad_print_risk"):
+        score -= 4
+
+    result["live_action_score"] = max(0, min(score, 10))
+    return result
+
+
+def detect_early_leader(result):
+    """Catches the PIII-at-$6 style phase: clean, active, near-high leadership before late confirmation."""
+    gain = safe_float(result.get("gain"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    day_vol = safe_int(result.get("volume"))
+    prev_vol = safe_int(result.get("prev_volume"))
+
+    volume_now = bool(
+        recent_vol >= MIN_ALERT_RECENT_VOLUME
+        and (
+            prev_vol <= 0
+            or recent_vol >= prev_vol * 1.10
+            or result.get("volume_expanding")
+            or safe_float(result.get("rvol_estimate")) >= 1.25
+        )
+    )
+
+    clean_now = bool(
+        result.get("above_vwap")
+        and (result.get("near_high") or result.get("near_high_95"))
+        and not result.get("bad_structure")
+        and not result.get("deep_vwap_loss")
+        and not result.get("momentum_decay")
+        and not result.get("bad_print_risk")
+    )
+
+    structure_now = bool(
+        result.get("has_higher_lows")
+        or result.get("breakout_confirmed")
+        or result.get("trend_builder_alert")
+        or result.get("clean_trend_runner")
+    )
+
+    result["early_leader"] = bool(
+        gain >= EARLY_LEADER_MIN_GAIN
+        and clean_now
+        and volume_now
+        and structure_now
+        and (day_vol >= 500_000 or recent_vol >= 150_000)
+        and safe_int(result.get("live_action_score")) >= MIN_LIVE_ACTION_SCORE
+    )
+
+    if result.get("early_leader"):
+        add_unique(result.setdefault("reasons", []), "Early leader: live action now")
+
+    return result
+
 # ============================================================
 # ALERT GATES / TIERS
 # ============================================================
@@ -2404,11 +2533,15 @@ def classify_momentum_moment(result):
 def passes_master_alert_gate(result):
     gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
+    live_action = safe_int(result.get("live_action_score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
 
-    if score < MIN_ALERT_SCORE:
-        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
+    early_override = bool(
+        result.get("early_leader")
+        and live_action >= MIN_LIVE_ACTION_SCORE
+        and gain >= EARLY_LEADER_MIN_GAIN
+    )
 
     leader_override = bool(
         score >= MIN_ALERT_SCORE
@@ -2419,16 +2552,21 @@ def passes_master_alert_gate(result):
         )
     )
 
+    if score < MIN_ALERT_SCORE and not early_override:
+        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
+
+    if live_action < MIN_LIVE_ACTION_SCORE and not leader_override:
+        return False, f"live action {live_action}/10 under {MIN_LIVE_ACTION_SCORE}/10 floor"
+
     active_volume = recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000
 
-    if gain < ALERT_MIN_GAIN and not leader_override:
+    if gain < ALERT_MIN_GAIN and not early_override and not leader_override:
         return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
 
     if not active_volume and not leader_override:
         return False, "not enough active volume"
 
     return True, "passed"
-
 
 def junk_spam_gate(result):
     confirmations = sum([
@@ -2448,13 +2586,13 @@ def junk_spam_gate(result):
     if result.get("news_quality") in ["JUNK"] and confirmations < 3:
         return False, "junk headline without strong structure"
 
-    if result.get("news_quality") in ["NONE", "UNKNOWN"] and not result.get("massive_no_news_runner") and not result.get("main_leader"):
-        return False, "no-news move not elite enough"
+    if result.get("news_quality") in ["NONE", "UNKNOWN"] and not (result.get("massive_no_news_runner") or result.get("early_leader") or result.get("main_leader")):
+        return False, "no-news move not active enough"
 
     if confirmations < 2 and not result.get("main_leader"):
         return False, "not enough setup confirmation"
 
-    if safe_int(result.get("setup_score")) < 6 and not result.get("main_leader"):
+    if safe_int(result.get("setup_score")) < 6 and not (result.get("early_leader") or result.get("main_leader")):
         return False, "setup score too weak"
 
     if safe_int(result.get("risk_score")) >= 7 and not result.get("main_leader"):
@@ -2482,24 +2620,25 @@ def classify_alert_tier(result, rank):
         return "AVOID"
 
     score = safe_int(result.get("score"))
+    live_action = safe_int(result.get("live_action_score"))
     above_vwap = bool(result.get("above_vwap", True))
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
-    if score < MIN_ALERT_SCORE:
-        return "AVOID"
-
-    if result.get("main_leader"):
-        if deep_vwap_loss or bad_structure:
-            return "LEADER"
-        return "MAIN_LEADER"
-
-    if deep_vwap_loss or bad_structure or result.get("momentum_decay"):
+    if deep_vwap_loss or bad_structure or result.get("bad_print_risk"):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
 
-    if result.get("midday_chop_risk") and not (result.get("true_second_leg") or result.get("fresh_leader_ignition") or result.get("leader_reclaim")):
+    if result.get("main_leader"):
+        return "MAIN_LEADER"
+
+    if result.get("momentum_decay"):
+        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+            return "LEADER"
+        return "AVOID"
+
+    if result.get("midday_chop_risk") and not (result.get("true_second_leg") or result.get("fresh_leader_ignition") or result.get("leader_reclaim") or result.get("early_leader")):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
@@ -2508,6 +2647,9 @@ def classify_alert_tier(result, rank):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
+
+    if result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE:
+        return "RUNNER"
 
     clean_runner_setup = bool(
         result.get("fresh_leader_ignition")
@@ -2518,17 +2660,16 @@ def classify_alert_tier(result, rank):
         or result.get("massive_no_news_runner")
     )
 
-    if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup:
+    if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup and live_action >= MIN_LIVE_ACTION_SCORE:
         return "RUNNER"
 
-    if score >= 9 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN and above_vwap:
+    if score >= 9 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN and above_vwap and live_action >= MIN_LIVE_ACTION_SCORE:
         return "RUNNER"
 
     if result.get("market_leader") and score >= MIN_ALERT_SCORE:
         return "LEADER"
 
     return "AVOID"
-
 
 def title_for_tier(result, tier):
     moment = result.get("momentum_moment", "NONE")
@@ -2554,6 +2695,9 @@ def title_for_tier(result, tier):
             return "🔥 MARKET LEADER"
         return "🔥 MARKET LEADER — RECLAIM NEEDED"
 
+    if result.get("early_leader"):
+        return "🚀 EARLY LEADER"
+
     if moment != "NONE":
         return moment
 
@@ -2578,6 +2722,8 @@ def setup_tier_context(result):
 
     if tier == "MAIN_LEADER":
         result["tier_context"] = "Main leader of tape"
+    elif tier == "RUNNER" and result.get("early_leader"):
+        result["tier_context"] = "Early leader / live action now"
     elif tier == "RUNNER":
         result["tier_context"] = "Clean runner setup"
     elif tier == "LEADER":
@@ -2592,6 +2738,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     ticker = result["ticker"]
     current_price = safe_float(result.get("price"))
     current_score = safe_int(result.get("score"))
+    current_live_action = safe_int(result.get("live_action_score"))
     setup = result.get("title") or result.get("setup_tag") or ""
 
     last_time = alert_history.get(ticker, 0)
@@ -2618,6 +2765,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
         or ("SECOND LEG" in setup and "SECOND LEG" not in last_setup)
         or ("IGNITION" in setup and "IGNITION" not in last_setup)
         or ("MOMENT" in setup and "MOMENT" not in last_setup)
+        or ("EARLY LEADER" in setup and "EARLY LEADER" not in last_setup)
     )
 
     if major_upgrade and last_price and current_price >= last_price * 1.02:
@@ -2625,6 +2773,9 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 
     if result.get("true_second_leg") and last_price and current_price >= last_price * 1.04:
         return True, "second leg new high +4%"
+
+    if result.get("early_leader") and last_price and current_price >= last_price * 1.025:
+        return True, "early leader new high +2.5%"
 
     if result.get("leader_reclaim") or result.get("fresh_leader_ignition"):
         if last_price and current_price >= last_price * 1.03:
@@ -2635,6 +2786,9 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 
     if last_price and current_price >= last_price * 1.05:
         return True, "new high +5%"
+
+    if current_live_action >= 9 and current_score >= last_score + 1:
+        return True, "live action improved"
 
     if current_score >= last_score + 2:
         return True, "score improved +2"
@@ -2651,6 +2805,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 def first_matching_reason(result):
     preferred = [
         "Main leader of tape",
+        "Early leader: live action now",
         "Fresh leader ignition",
         "Leader VWAP reclaim",
         "Second leg continuation",
@@ -2722,10 +2877,7 @@ def build_compact_alert(result):
     else:
         news_header = f"⚠️ {catalyst_bucket}"
 
-    if catalyst_source and catalyst_source not in ["NONE", ""]:
-        source_note = f" [{catalyst_source}]"
-    else:
-        source_note = ""
+    source_note = f" [{catalyst_source}]" if catalyst_source and catalyst_source not in ["NONE", ""] else ""
 
     tier = result.get("alert_tier", "AVOID")
     title = result.get("title", title_for_tier(result, tier))
@@ -2735,14 +2887,12 @@ def build_compact_alert(result):
 
     return (
         f"{title}\n\n"
-        f"{result['ticker']} | {result['score']}/10 | {tier} | "
-        f"L{safe_int(result.get('leader_score'))}/10 S{safe_int(result.get('setup_score'))}/10 R{safe_int(result.get('risk_score'))}/10 | "
-        f"${safe_float(result.get('price')):.4f} | +{safe_float(result.get('gain')):.1f}% | Float {float_text}\n"
+        f"{result['ticker']} | {tier} | ${safe_float(result.get('price')):.4f} | "
+        f"+{safe_float(result.get('gain')):.1f}% | Float {float_text}\n"
         f"Catalyst: {news_header}{source_note} — {catalyst_line}\n\n"
         f"Setup: {setup_line}\n"
         f"Risk: {risk_line}"
     )
-
 
 def detect_market_regime(results):
     if not results:
@@ -2837,8 +2987,9 @@ def run_scanner():
                     print(f"[FILTER] {ticker} price ${price:.2f} outside range", flush=True)
                     continue
 
-                if gain < ALERT_MIN_GAIN:
-                    print(f"[FILTER] {ticker} gain under alert floor {gain:.1f}%", flush=True)
+                # Keep the scan wide enough to catch early leaders before the obvious 25%+ phase.
+                if gain < EARLY_LEADER_MIN_GAIN:
+                    print(f"[FILTER] {ticker} gain under early leader floor {gain:.1f}%", flush=True)
                     continue
 
                 if volume <= 0:
@@ -2966,6 +3117,8 @@ def run_scanner():
                     result.setdefault("risks", []).insert(0, dilution_label)
 
                 result = compute_risk_score(result)
+                result = compute_live_action_score(result)
+                result = detect_early_leader(result)
                 result = compact_reasons(result)
                 results.append(result)
 
@@ -2980,13 +3133,14 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
-        # First sort for tape reading.
+        # First sort for tape reading: hottest clean action NOW first.
         results.sort(
             key=lambda r: (
                 bool(r.get("main_leader")),
+                bool(r.get("early_leader")),
+                safe_int(r.get("live_action_score")),
                 safe_int(r.get("leader_score")),
                 safe_int(r.get("score")),
-                safe_int(r.get("setup_score")),
                 safe_float(r.get("gain")),
                 safe_int(r.get("recent_volume")),
             ),
@@ -3001,9 +3155,8 @@ def run_scanner():
             r["bot_mode"] = bot_mode
 
         top_line = " | ".join(
-            f"#{r.get('rank')} {r['ticker']} S{r['score']}/10 L{safe_int(r.get('leader_score'))}/10 "
-            f"E{safe_int(r.get('setup_score'))}/10 R{safe_int(r.get('risk_score'))}/10 {r['gain']:.1f}% "
-            f"{'MAIN' if r.get('main_leader') else ('LEADER' if r.get('market_leader') else '')}"
+            f"#{r.get('rank')} {r['ticker']} {safe_int(r.get('live_action_score'))}/10 ACTION "
+            f"{r['gain']:.1f}% {'EARLY' if r.get('early_leader') else ('MAIN' if r.get('main_leader') else ('LEADER' if r.get('market_leader') else ''))}"
             for r in results[:10]
         )
 
@@ -3023,8 +3176,8 @@ def run_scanner():
                 print(f"[PREMARKET] {ticker} radar only — no phone alert", flush=True)
                 continue
 
-            if bot_mode == "STRICT" and safe_int(result.get("score")) < 8 and not result.get("main_leader"):
-                print(f"[STRICT] {ticker} suppressed — score under 8 in chop mode", flush=True)
+            if bot_mode == "STRICT" and safe_int(result.get("live_action_score")) < 8 and not (result.get("early_leader") or result.get("main_leader")):
+                print(f"[STRICT] {ticker} suppressed — live action under 8 in chop mode", flush=True)
                 continue
 
             open_ok, open_reason = opening_protection_gate(result, session)
@@ -3068,8 +3221,9 @@ def run_scanner():
         alert_candidates.sort(
             key=lambda r: (
                 tier_priority.get(r.get("alert_tier", "AVOID"), 0),
+                bool(r.get("early_leader")),
+                safe_int(r.get("live_action_score")),
                 safe_int(r.get("score")),
-                safe_int(r.get("setup_score")),
                 safe_int(r.get("leader_score")),
                 safe_int(r.get("recent_volume")),
                 safe_float(r.get("gain")),
@@ -3102,9 +3256,8 @@ def run_scanner():
             msg = build_compact_alert(result)
 
             print(
-                f"[SEND] {ticker} tier={result.get('alert_tier')} score={result['score']} "
-                f"setup={safe_int(result.get('setup_score'))} risk={safe_int(result.get('risk_score'))} "
-                f"gain={safe_float(result.get('gain')):.1f}% reason={reason}",
+                f"[SEND] {ticker} tier={result.get('alert_tier')} action={safe_int(result.get('live_action_score'))}/10 "
+                f"score={result['score']} gain={safe_float(result.get('gain')):.1f}% reason={reason}",
                 flush=True,
             )
 
