@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v26 — strict ticker match + live action priority"
+BOOT_MARKER = "elite scanner rebuild v27 — trust leaders + soft risk gates"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -47,7 +47,7 @@ SCAN_SLEEP = 90
 ALERT_MIN_GAIN = 25
 EARLY_LEADER_MIN_GAIN = 15
 MIN_ALERT_SCORE = 6
-MIN_LIVE_ACTION_SCORE = 8
+MIN_LIVE_ACTION_SCORE = 5
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 PREMARKET_ALERTS_ENABLED = False
@@ -2142,18 +2142,26 @@ def update_vwap_state(result):
 
 
 def detect_quote_candle_mismatch(result):
+    """Warn on quote/candle mismatch, but do NOT kill true leaders.
+    PIII-style names can have delayed candles while live quotes are ripping.
+    """
     candles = result.get("candles", []) or []
     price = safe_float(result.get("price"))
 
+    result["bad_print_risk"] = False
+    result["quote_candle_warning"] = False
+
     if candles and price > 0:
         last_close = safe_float(candles[-1].get("close"))
-        if last_close and abs(price - last_close) / last_close > 0.12:
-            add_unique(result.setdefault("risks", []), "⚠️ Quote/candle mismatch — possible bad print")
-            result["bad_print_risk"] = True
-        else:
-            result["bad_print_risk"] = False
-    else:
-        result["bad_print_risk"] = False
+        if last_close:
+            diff = abs(price - last_close) / last_close
+            result["quote_candle_diff"] = round(diff * 100, 1)
+            if diff > 0.12:
+                add_unique(result.setdefault("risks", []), "⚠️ Quote/candle mismatch — use live chart confirmation")
+                result["quote_candle_warning"] = True
+                # Only treat as a true bad print if the move is weak/thin. Big active leaders get warning-only.
+                if safe_float(result.get("gain")) < 40 and safe_int(result.get("recent_volume")) < MIN_ALERT_RECENT_VOLUME:
+                    result["bad_print_risk"] = True
 
     return result
 
@@ -2303,6 +2311,20 @@ def compute_momentum_flags(result):
         and not result.get("leader_reclaim")
         and not result.get("true_second_leg")
     )
+
+    result["momentum_override"] = bool(
+        gain >= 100
+        and (day_vol >= 1_000_000 or recent_vol >= 100_000)
+        and not deep_vwap_loss
+    )
+    result["leader_attention_override"] = bool(
+        gain >= 50
+        and (day_vol >= 1_000_000 or recent_vol >= 100_000)
+        and (above_vwap or shallow_vwap_slip)
+    )
+
+    if result.get("momentum_override"):
+        add_unique(result.setdefault("reasons", []), "🔥 Momentum override — major active leader")
 
     return result
 
@@ -2720,16 +2742,28 @@ def compute_live_action_score(result):
     if result.get("midday_chop_risk"):
         score -= 2
     if result.get("bad_print_risk"):
-        score -= 4
+        score -= 1
+
+    # Fresh action / HOD pressure bonuses. This helps catch the stock traders are attacking now.
+    if result.get("fresh_high_after_vwap_hold"):
+        score += 2
+    if result.get("leader_reclaim"):
+        score += 2
+    if prev_vol > 0 and recent_vol >= prev_vol * 2:
+        score += 1
+
+    # Trust major leaders: do not let structure/noise math print impossible 0/10 action on 100%+ runners.
+    if result.get("momentum_override"):
+        score = max(score, 6)
+    elif result.get("leader_attention_override"):
+        score = max(score, 5)
 
     result["live_action_score"] = max(0, min(score, 10))
     result["action_now"] = bool(
         result["live_action_score"] >= MIN_LIVE_ACTION_SCORE
-        and recent_vol >= MIN_ALERT_RECENT_VOLUME
-        and (result.get("near_high_95") or result.get("breakout_confirmed") or result.get("fresh_leader_ignition"))
-        and not result.get("bad_structure")
+        and (recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000)
+        and (result.get("near_high_95") or result.get("breakout_confirmed") or result.get("fresh_leader_ignition") or result.get("momentum_override"))
         and not result.get("deep_vwap_loss")
-        and not result.get("bad_print_risk")
     )
     return result
 
@@ -2756,7 +2790,6 @@ def detect_early_leader(result):
         and not result.get("bad_structure")
         and not result.get("deep_vwap_loss")
         and not result.get("momentum_decay")
-        and not result.get("bad_print_risk")
     )
 
     structure_now = bool(
@@ -2790,72 +2823,95 @@ def passes_master_alert_gate(result):
     live_action = safe_int(result.get("live_action_score"))
     recent_vol = safe_int(result.get("recent_volume"))
     day_vol = safe_int(result.get("volume"))
-
-    early_override = bool(
-        gain >= EARLY_LEADER_MIN_GAIN
-        and (
-            (result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE)
-            or live_action >= 9
-        )
-    )
-
-    leader_override = bool(
-        score >= MIN_ALERT_SCORE
-        and gain >= LEADER_MIN_GAIN
-        and (
-            day_vol >= LEADER_MIN_DAY_VOLUME
-            or recent_vol >= LEADER_MIN_RECENT_VOLUME
-        )
-    )
-
-    if score < MIN_ALERT_SCORE and not early_override:
-        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
-
-    if live_action < MIN_LIVE_ACTION_SCORE and not leader_override:
-        return False, f"live action {live_action}/10 under {MIN_LIVE_ACTION_SCORE}/10 floor"
+    above_vwap = bool(result.get("above_vwap", True))
 
     active_volume = recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000
 
-    if gain < ALERT_MIN_GAIN and not early_override and not leader_override:
+    early_override = bool(
+        gain >= EARLY_LEADER_MIN_GAIN
+        and active_volume
+        and above_vwap
+        and (result.get("early_leader") or live_action >= 7 or result.get("leader_attention_override"))
+    )
+
+    leader_override = bool(
+        gain >= LEADER_MIN_GAIN
+        and active_volume
+        and (above_vwap or result.get("leader_attention_override") or result.get("momentum_override"))
+    )
+
+    live_override = bool(
+        live_action >= 8
+        and gain >= EARLY_LEADER_MIN_GAIN
+        and active_volume
+        and above_vwap
+    )
+
+    momentum_override = bool(result.get("momentum_override") and active_volume)
+
+    if score < MIN_ALERT_SCORE and not (early_override or leader_override or live_override or momentum_override):
+        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
+
+    if live_action < MIN_LIVE_ACTION_SCORE and not (leader_override or momentum_override):
+        return False, f"live action {live_action}/10 under {MIN_LIVE_ACTION_SCORE}/10 floor"
+
+    if gain < ALERT_MIN_GAIN and not (early_override or leader_override or live_override):
         return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
 
-    if not active_volume and not leader_override:
+    if not active_volume and not (leader_override or momentum_override):
         return False, "not enough active volume"
 
     return True, "passed"
 
 def junk_spam_gate(result):
+    """Soft gate: block true junk, but do not kill active leaders.
+    Bad structure / mismatch become risk labels when momentum is obvious.
+    """
     confirmations = sum([
         bool(result.get("above_vwap")),
-        bool(result.get("near_high")),
-        bool(result.get("volume_expanding")),
-        bool(result.get("has_higher_lows")),
+        bool(result.get("near_high") or result.get("near_high_95")),
+        bool(result.get("volume_expanding") or safe_int(result.get("recent_volume")) >= MIN_ALERT_RECENT_VOLUME),
+        bool(result.get("has_higher_lows") or result.get("breakout_confirmed") or result.get("clean_trend_runner")),
     ])
 
-    if result.get("bad_print_risk"):
-        return False, "quote/candle mismatch"
+    live_action = safe_int(result.get("live_action_score"))
+    gain = safe_float(result.get("gain"))
+    active_leader = bool(
+        result.get("momentum_override")
+        or result.get("leader_attention_override")
+        or result.get("early_leader")
+        or result.get("main_leader")
+        or (gain >= LEADER_MIN_GAIN and live_action >= MIN_LIVE_ACTION_SCORE)
+        or (live_action >= 8 and gain >= EARLY_LEADER_MIN_GAIN)
+    )
+
+    if result.get("bad_print_risk") and not active_leader:
+        return False, "possible bad print"
 
     if result.get("bad_structure") or result.get("deep_vwap_loss"):
-        if not result.get("main_leader"):
+        if active_leader:
+            add_unique(result.setdefault("risks", []), "⚠️ Structure warning — manage tighter")
+        else:
             return False, "bad structure"
 
-    if result.get("news_quality") in ["JUNK"] and confirmations < 3:
+    if result.get("news_quality") in ["JUNK", "TRASH"] and confirmations < 3 and not active_leader:
         return False, "junk headline without strong structure"
 
-    if result.get("news_quality") in ["NONE", "UNKNOWN"] and not (result.get("massive_no_news_runner") or result.get("early_leader") or result.get("main_leader")):
+    if result.get("news_quality") in ["NONE", "UNKNOWN"] and not (
+        result.get("massive_no_news_runner") or active_leader
+    ):
         return False, "no-news move not active enough"
 
-    if confirmations < 2 and not result.get("main_leader"):
+    if confirmations < 2 and not active_leader:
         return False, "not enough setup confirmation"
 
-    if safe_int(result.get("setup_score")) < 6 and not (result.get("early_leader") or result.get("main_leader")):
+    if safe_int(result.get("setup_score")) < 5 and not active_leader:
         return False, "setup score too weak"
 
-    if safe_int(result.get("risk_score")) >= 7 and not result.get("main_leader"):
+    if safe_int(result.get("risk_score")) >= 8 and not active_leader:
         return False, "risk score too high"
 
     return True, "passed"
-
 
 def opening_protection_gate(result, session):
     if not OPENING_5_MIN_PROTECTION:
@@ -2881,7 +2937,9 @@ def classify_alert_tier(result, rank):
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
 
-    if deep_vwap_loss or bad_structure or result.get("bad_print_risk"):
+    if deep_vwap_loss or bad_structure:
+        if result.get("momentum_override") or result.get("leader_attention_override"):
+            return "LEADER"
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
             return "LEADER"
         return "AVOID"
@@ -2905,6 +2963,9 @@ def classify_alert_tier(result, rank):
         return "AVOID"
 
     if result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE:
+        return "RUNNER"
+
+    if result.get("momentum_override") and live_action >= MIN_LIVE_ACTION_SCORE and above_vwap:
         return "RUNNER"
 
     clean_runner_setup = bool(
@@ -3432,7 +3493,7 @@ def run_scanner():
                 print(f"[PREMARKET] {ticker} radar only — no phone alert", flush=True)
                 continue
 
-            if bot_mode == "STRICT" and safe_int(result.get("live_action_score")) < 8 and not (result.get("early_leader") or result.get("main_leader")):
+            if bot_mode == "STRICT" and safe_int(result.get("live_action_score")) < 6 and not (result.get("early_leader") or result.get("main_leader")):
                 print(f"[STRICT] {ticker} suppressed — live action under 8 in chop mode", flush=True)
                 continue
 
