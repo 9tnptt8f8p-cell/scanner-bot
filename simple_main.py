@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v23 — early leader + live action engine"
+BOOT_MARKER = "elite scanner rebuild v24 — live action elite + hard news cleanup"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -139,6 +139,51 @@ BAD_NEWS_KEYWORDS = [
     "stocks moving premarket",
     "here are 20 stocks moving",
     "most active stocks",
+]
+
+# Hard rejects: these are Yahoo/PR page furniture, not catalysts.
+# They should never enter scoring, logs, or confidence selection.
+HARD_REJECT_NEWS = [
+    "stock quote",
+    "quote & history",
+    "latest stock news",
+    "latest news & headlines",
+    "latest stock news & headlines",
+    "stock price, news",
+    "stock price",
+    "find the latest",
+    "get the latest",
+    "performance overview",
+    "company profile",
+    "company overview",
+    "overview advertising agencies",
+    "overview biotechnology",
+    "overview chemicals",
+    "more about",
+    "latest quote",
+]
+
+# Weak items that are usually not clean momentum catalysts.
+# Keep them out of scoring; dilution/reverse split risk is handled separately.
+TRASH_WEAK_NEWS = [
+    "reverse split",
+    "regains compliance",
+    "minimum bid price",
+    "nasdaq notification",
+    "lock-up",
+    "lock up",
+    "partial waiver",
+    "adjournment",
+    "lack of quorum",
+    "shareholder vote",
+    "vote in support",
+    "annual meeting",
+    "pricing of",
+    "announces pricing",
+    "registered direct offering",
+    "follow-on offering",
+    "warrant inducement",
+    "at-the-market under nasdaq rules",
 ]
 
 BAD_PR_MATCH_PHRASES = [
@@ -872,6 +917,12 @@ def classify_news_quality(headline):
     if text in ["none", "no fresh catalyst found", "news check failed", "missing finnhub key", "technical momentum only"]:
         return "NONE"
 
+    if any(word in text for word in HARD_REJECT_NEWS):
+        return "TRASH"
+
+    if any(word in text for word in TRASH_WEAK_NEWS):
+        return "TRASH"
+
     if any(word in text for word in WEAK_NEWS_OVERRIDES):
         return "WEAK"
 
@@ -887,7 +938,6 @@ def classify_news_quality(headline):
         return "STRONG"
 
     return "WEAK"
-
 
 def classify_catalyst_bucket(text):
     lower = f" {normalize_text(text).lower()} "
@@ -916,7 +966,14 @@ def clean_headline(text, allow_aggregator=False):
 
     lower = text.lower()
 
+    if any(x in lower for x in HARD_REJECT_NEWS):
+        return ""
+
     if any(x in lower for x in BAD_PR_MATCH_PHRASES):
+        return ""
+
+    # Trash weak items are risk/background, not catalysts. Do not let them become the main catalyst line.
+    if any(x in lower for x in TRASH_WEAK_NEWS):
         return ""
 
     has_real_keyword = any(k in lower for k in STRONG_KEYWORDS)
@@ -927,7 +984,6 @@ def clean_headline(text, allow_aggregator=False):
     text = re.sub(r"\s+\|\s+(Yahoo Finance|Benzinga|StockTitan|MarketWatch).*$", "", text, flags=re.I)
 
     return text[:280].strip()
-
 
 def parse_news_datetime(raw):
     if raw is None:
@@ -1104,24 +1160,48 @@ def build_news_result(text, source, ticker, company_name="", published_at=None, 
     }
 
 
+def dedupe_news_results(results):
+    cleaned = []
+    seen = set()
+
+    for item in results or []:
+        headline = normalize_text(item.get("headline", ""))
+        if not headline:
+            continue
+
+        key = re.sub(r"\s+", " ", headline.lower()).strip()
+        key = re.sub(r"\s*\(\d+h old\)$", "", key)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        cleaned.append(item)
+
+    return cleaned
+
+
 def best_news_result(results):
+    results = dedupe_news_results(results)
     if not results:
         return None
 
     def score_item(item):
-        quality_score = 2 if item.get("quality") == "STRONG" else 1
+        quality_score = 3 if item.get("quality") == "STRONG" else 1
         source_score = {
             "FINNHUB": 4,
             "PR": 4,
             "GLOBE": 4,
             "GOOGLE_NEWS": 3,
-            "YAHOO": 3,
+            "YAHOO": 2,
             "SEC": 3,
         }.get(item.get("source"), 1)
         age = item.get("age_hours")
         freshness = 3
         if age is not None:
-            if age <= 24:
+            if age <= 12:
+                freshness = 5
+            elif age <= 24:
                 freshness = 4
             elif age <= 48:
                 freshness = 3
@@ -1131,7 +1211,6 @@ def best_news_result(results):
         return (quality_score, source_score, freshness, bucket_bonus, item.get("confidence", 0))
 
     return sorted(results, key=score_item, reverse=True)[0]
-
 
 def get_news_catalyst(ticker):
     if not FINNHUB_API_KEY:
@@ -1217,7 +1296,10 @@ def scrape_google_news_rss(ticker, company_name=""):
             if r.status_code != 200:
                 continue
 
-            soup = BeautifulSoup(r.text, "xml")
+            try:
+                soup = BeautifulSoup(r.text, "xml")
+            except Exception:
+                soup = BeautifulSoup(r.text, "html.parser")
             items = soup.find_all("item")[:8]
 
             for item in items:
@@ -1342,6 +1424,7 @@ def find_real_news_headline(ticker, current_headline="", company_name=""):
         print(f"[SEC CONTEXT] {ticker}: {sec_result['headline']} ({sec_result['quality']})", flush=True)
         results.append(sec_result)
 
+    results = dedupe_news_results(results)
     best = best_news_result(results)
 
     if best:
@@ -2403,8 +2486,9 @@ def classify_momentum_moment(result):
 
 
 def compute_live_action_score(result):
-    """Ranks what matters most right now: fresh action + clean structure.
-    Internal only. We do NOT print noisy sub-scores in the phone alert.
+    """Ranks the hottest CLEAN action right now.
+    This is the key PIII fix: current tape > total percent gain.
+    Internal only; do not display noisy sub-scores in alerts.
     """
     score = 0
     gain = safe_float(result.get("gain"))
@@ -2413,29 +2497,41 @@ def compute_live_action_score(result):
     prev_vol = safe_int(result.get("prev_volume"))
     rvol = safe_float(result.get("rvol_estimate"))
 
-    if gain >= 50:
+    # Enough move to matter, but do not wait for the whole run.
+    if gain >= 100:
         score += 2
-    elif gain >= 30:
+    elif gain >= 50:
+        score += 2
+    elif gain >= 25:
         score += 1
     elif gain >= EARLY_LEADER_MIN_GAIN:
         score += 1
 
-    if recent_vol >= 300_000:
+    # Most important: fresh recent volume.
+    if recent_vol >= 500_000:
+        score += 4
+    elif recent_vol >= 300_000:
         score += 3
     elif recent_vol >= 150_000:
         score += 2
     elif recent_vol >= MIN_ALERT_RECENT_VOLUME:
         score += 1
 
-    if prev_vol > 0 and recent_vol >= prev_vol * 1.75:
+    # Current acceleration: last candles waking up now.
+    if prev_vol > 0 and recent_vol >= prev_vol * 2.5:
+        score += 3
+    elif prev_vol > 0 and recent_vol >= prev_vol * 1.75:
         score += 2
     elif prev_vol > 0 and recent_vol >= prev_vol * 1.15:
         score += 1
-    elif rvol >= 2.0:
+    elif rvol >= 2.5:
+        score += 3
+    elif rvol >= 1.75:
         score += 2
     elif rvol >= 1.25:
         score += 1
 
+    # Clean action structure.
     if result.get("above_vwap"):
         score += 2
     if result.get("near_high"):
@@ -2462,6 +2558,7 @@ def compute_live_action_score(result):
     if result.get("news_quality") == "STRONG":
         score += 1
 
+    # Trap filters matter more than hype.
     if result.get("volume_fading"):
         score -= 2
     if result.get("momentum_decay"):
@@ -2476,8 +2573,15 @@ def compute_live_action_score(result):
         score -= 4
 
     result["live_action_score"] = max(0, min(score, 10))
+    result["action_now"] = bool(
+        result["live_action_score"] >= MIN_LIVE_ACTION_SCORE
+        and recent_vol >= MIN_ALERT_RECENT_VOLUME
+        and (result.get("near_high_95") or result.get("breakout_confirmed") or result.get("fresh_leader_ignition"))
+        and not result.get("bad_structure")
+        and not result.get("deep_vwap_loss")
+        and not result.get("bad_print_risk")
+    )
     return result
-
 
 def detect_early_leader(result):
     """Catches the PIII-at-$6 style phase: clean, active, near-high leadership before late confirmation."""
