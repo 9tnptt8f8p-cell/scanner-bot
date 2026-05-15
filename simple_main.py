@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v31 — momentum first / dilution awareness engine"
+BOOT_MARKER = "elite scanner rebuild v31.1 — risk awareness variable fix"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -212,6 +212,42 @@ NEGATIVE_NEWS = [
     "offers up to",
     "stock sale",
     "scraps planned",
+]
+
+# v31.1: admin/dilution/reverse-split headlines are risk awareness only.
+# They should not be used as positive catalysts, and they should not crash candidate processing.
+RISK_AWARENESS_NEWS = [
+    "offering",
+    "registered direct",
+    "private placement",
+    "warrants",
+    "warrant inducement",
+    "reverse split",
+    "share consolidation",
+    "equity facility",
+    "share sale",
+    "resale registration",
+    "selling stockholder",
+    "shelf registration",
+    "files to sell",
+    "offers up to",
+    "stock sale",
+    "at-the-market",
+    "atm offering",
+    "late form",
+    "late filing",
+    "nasdaq notice",
+    "nasdaq notification",
+    "minimum bid price",
+    "regains compliance",
+    "compliance with nasdaq",
+    "lock-up",
+    "lock up",
+    "partial waiver",
+    "adjournment",
+    "lack of quorum",
+    "shareholder vote",
+    "annual meeting",
 ]
 
 TRASH_WEAK_NEWS = [
