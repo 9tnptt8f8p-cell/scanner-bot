@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v254 — live action priority + clean news gate"
+BOOT_MARKER = "elite scanner rebuild v26 — strict ticker match + live action priority"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -45,7 +45,7 @@ SCAN_SLEEP = 90
 # 4. Score 6 and below ignored.
 # 5. Junk/news spam gate must pass before phone alert.
 ALERT_MIN_GAIN = 25
-EARLY_LEADER_MIN_GAIN = 18
+EARLY_LEADER_MIN_GAIN = 15
 MIN_ALERT_SCORE = 6
 MIN_LIVE_ACTION_SCORE = 8
 MIN_ALERT_RECENT_VOLUME = 75_000
@@ -87,6 +87,7 @@ NEWS_CACHE_TTL_SECONDS = 60 * 20
 PR_CACHE_TTL_SECONDS = 60 * 30
 SEC_CACHE_TTL_SECONDS = 60 * 30
 SEC_BODY_CACHE_TTL_SECONDS = 60 * 60
+MAX_NEWS_AGE_DAYS = 14
 
 PROFILE_CACHE = {}
 NEWS_CACHE = {}
@@ -166,10 +167,39 @@ HARD_REJECT_NEWS = [
     "headquartered in",
     "business segments",
     "through its subsidiaries",
+    "business technology overview",
+    "consumer technology overview",
+    "view all business technology",
+    "view all consumer technology",
+    "technology and telecom news",
+    "healthcare providers news",
+    "business technology news",
+    "consumer technology news",
+    "view all",
 ]
 
 # Weak items that are usually not clean momentum catalysts.
 # Keep them out of scoring; dilution/reverse split risk is handled separately.
+NEGATIVE_NEWS = [
+    "offering",
+    "registered direct",
+    "private placement",
+    "warrants",
+    "warrant inducement",
+    "reverse split",
+    "late form",
+    "late filing",
+    "nasdaq notice",
+    "nasdaq notification",
+    "minimum bid price",
+    "regains compliance",
+    "compliance with nasdaq",
+    "lock-up",
+    "lock up",
+    "shareholder alert",
+    "investigation",
+]
+
 TRASH_WEAK_NEWS = [
     "reverse split",
     "regains compliance",
@@ -192,6 +222,19 @@ TRASH_WEAK_NEWS = [
 ]
 
 # Law-firm/legal solicitation headlines are not momentum catalysts.
+TICKER_COLLISION_PHRASES = {
+    "TRT": [
+        "testosterone replacement therapy",
+        "trt management",
+        "trt treatment",
+        "trt alternative",
+        "trt uk",
+        "testosterone",
+    ],
+}
+
+STRICT_COMPANY_CONTEXT_TICKERS = {"AI", "CAN", "ON", "FOR", "TRT", "SLE", "RVI", "STIM"}
+
 LAW_FIRM_PHRASES = [
     "investigation",
     "investigating",
@@ -227,6 +270,14 @@ BAD_PR_MATCH_PHRASES = [
     "accesswire",
     "benzinga.com",
     "newsfile corp",
+    "business technology overview",
+    "consumer technology overview",
+    "view all business technology",
+    "view all consumer technology",
+    "technology and telecom news",
+    "healthcare providers news",
+    "view all",
+    "stem (science, tech, engineering, math)",
     "privacy policy",
     "terms of use",
     "cookie",
@@ -943,6 +994,9 @@ def classify_news_quality(headline):
     if any(word in text for word in HARD_REJECT_NEWS):
         return "TRASH"
 
+    if any(word in text for word in NEGATIVE_NEWS):
+        return "NEGATIVE"
+
     if any(word in text for word in TRASH_WEAK_NEWS):
         return "TRASH"
 
@@ -998,6 +1052,10 @@ def clean_headline(text, allow_aggregator=False):
     if any(x in lower for x in BAD_PR_MATCH_PHRASES):
         return ""
 
+    # Negative/admin/dilution items are risk/background, not clean catalysts.
+    if any(x in lower for x in NEGATIVE_NEWS):
+        return ""
+
     # Trash weak items are risk/background, not catalysts. Do not let them become the main catalyst line.
     if any(x in lower for x in TRASH_WEAK_NEWS):
         return ""
@@ -1048,6 +1106,32 @@ def is_fresh_news(dt, max_hours=96):
     return news_age_hours(dt) <= max_hours
 
 
+def extract_date_from_news_text(text):
+    """Extract common PR/news dates embedded in scraped text, e.g. 'May 12, 2026'."""
+    text = normalize_text(text)
+    patterns = [
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}",
+        r"\d{4}-\d{2}-\d{2}",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.I)
+        if not m:
+            continue
+        raw = m.group(0)
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw.replace("Sept", "Sep"), fmt).replace(tzinfo=ET)
+            except Exception:
+                pass
+    return None
+
+
+def is_recent_enough_news_dt(dt, max_days=MAX_NEWS_AGE_DAYS):
+    if not dt:
+        return True
+    return news_age_hours(dt) <= max_days * 24
+
+
 def looks_like_stale_pr(text):
     lower = str(text or "").lower()
     this_year = str(datetime.now(ET).year)
@@ -1081,15 +1165,36 @@ def company_tokens(company_name):
 
 
 def headline_matches_ticker_or_company(ticker, text, company_name=""):
+    """Strict relevance gate for scraped headlines.
+    Fixes ticker-collision pollution like TRT = testosterone replacement therapy.
+    For ambiguous/short tickers, require real company-token evidence, not just the ticker letters.
+    """
     ticker = str(ticker or "").upper().strip()
     text = normalize_text(text)
     lower = text.lower()
 
+    if not ticker or not text:
+        return False
+
+    # Hard reject known acronym collisions.
+    for phrase in TICKER_COLLISION_PHRASES.get(ticker, []):
+        if phrase in lower:
+            return False
+
+    tokens = company_tokens(company_name)
+    company_match = bool(tokens and any(tok in lower for tok in tokens[:3]))
+
+    # Short/ambiguous symbols need company context. Ticker alone is not enough.
+    if ticker in STRICT_COMPANY_CONTEXT_TICKERS or len(ticker) <= 3:
+        if company_match:
+            return True
+        # Allow high-confidence exchange style: "Company Name (TICKER)" only if a company token appears too.
+        return False
+
     if ticker_token_present(ticker, text):
         return True
 
-    tokens = company_tokens(company_name)
-    if tokens and any(tok in lower for tok in tokens[:3]):
+    if company_match:
         return True
 
     return False
@@ -1158,6 +1263,11 @@ def build_news_result(text, source, ticker, company_name="", published_at=None, 
     if not clean:
         return None
 
+    # If scraper text embeds a PR date, use it so old recycled PRs decay properly.
+    embedded_dt = extract_date_from_news_text(clean)
+    if published_at is None and embedded_dt is not None:
+        published_at = embedded_dt
+
     quality = classify_news_quality(clean)
     if quality not in ["STRONG", "WEAK"]:
         return None
@@ -1168,8 +1278,12 @@ def build_news_result(text, source, ticker, company_name="", published_at=None, 
     age = news_age_hours(published_at)
     bucket = classify_catalyst_bucket(clean)
 
-    if age is not None and age > 96:
+    if age is not None and age > MAX_NEWS_AGE_DAYS * 24:
         return None
+
+    # Scraped items without dates can be useful, but do not let them overpower fresh dated sources.
+    if published_at is None and source in ["PR", "GLOBE", "YAHOO"]:
+        confidence -= 0.08
 
     if quality == "STRONG":
         confidence += 0.15
@@ -1234,8 +1348,12 @@ def best_news_result(results):
                 freshness = 4
             elif age <= 48:
                 freshness = 3
-            elif age <= 96:
+            elif age <= MAX_NEWS_AGE_DAYS * 24:
                 freshness = 1
+            else:
+                freshness = -5
+        elif item.get("source") in ["PR", "GLOBE", "YAHOO"]:
+            freshness = 0
         bucket_bonus = 1 if item.get("bucket") != "General news" else 0
         return (quality_score, source_score, freshness, bucket_bonus, item.get("confidence", 0))
 
@@ -1338,7 +1456,7 @@ def scrape_google_news_rss(ticker, company_name=""):
                 title = normalize_text(item.title.get_text(" ", strip=True) if item.title else "")
                 pub_date = parse_news_datetime(item.pubDate.get_text(strip=True) if item.pubDate else None)
 
-                if not is_fresh_news(pub_date, max_hours=96):
+                if not is_fresh_news(pub_date, max_hours=MAX_NEWS_AGE_DAYS * 24):
                     continue
 
                 result = build_news_result(title, "GOOGLE_NEWS", ticker, company_name, pub_date, confidence=0.72)
@@ -1431,7 +1549,7 @@ def find_real_news_headline(ticker, current_headline="", company_name=""):
     ticker = str(ticker or "").upper().strip()
     company_name = get_company_name(ticker, fallback=company_name)
 
-    cache_key = f"{ticker}|{company_name}|{current_headline}"
+    cache_key = f"v26|{ticker}|{company_name}|{current_headline}"
     if cache_key in NEWS_CACHE:
         cached = NEWS_CACHE[cache_key]
         if now - cached["time"] < NEWS_CACHE_TTL_SECONDS:
@@ -1467,7 +1585,7 @@ def find_real_news_headline(ticker, current_headline="", company_name=""):
         age = best.get("age_hours")
 
         display = headline
-        if age is not None and age <= 96:
+        if age is not None and age <= MAX_NEWS_AGE_DAYS * 24:
             display = f"{headline} ({age:.0f}h old)"
 
         data = {
