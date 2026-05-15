@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v27 — trust leaders + soft risk gates"
+BOOT_MARKER = "elite scanner rebuild v29 — relevance trust + dynamic emergence"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -45,7 +45,7 @@ SCAN_SLEEP = 90
 # 4. Score 6 and below ignored.
 # 5. Junk/news spam gate must pass before phone alert.
 ALERT_MIN_GAIN = 25
-EARLY_LEADER_MIN_GAIN = 15
+EARLY_LEADER_MIN_GAIN = 12
 MIN_ALERT_SCORE = 6
 MIN_LIVE_ACTION_SCORE = 5
 MIN_ALERT_RECENT_VOLUME = 75_000
@@ -199,6 +199,15 @@ NEGATIVE_NEWS = [
     "lock up",
     "shareholder alert",
     "investigation",
+    "equity facility",
+    "share sale",
+    "resale registration",
+    "selling stockholder",
+    "shelf registration",
+    "files to sell",
+    "offers up to",
+    "stock sale",
+    "scraps planned",
 ]
 
 TRASH_WEAK_NEWS = [
@@ -245,7 +254,35 @@ TICKER_COLLISION_PHRASES = {
     ],
 }
 
-STRICT_COMPANY_CONTEXT_TICKERS = {"AI", "CAN", "ON", "FOR", "TRT", "SLE", "RVI", "STIM", "LEE", "LOBO"}
+STRICT_COMPANY_CONTEXT_TICKERS = {"AI", "CAN", "ON", "FOR", "TRT", "SLE", "RVI", "STIM", "LEE", "LOBO", "TOPS", "STAK", "ERNA"}
+
+LOW_QUALITY_PUBLISHERS = [
+    "stockstotrade",
+    "timothysykes",
+    "stocktwits",
+    "msn",
+    "simplywall",
+    "quiver quantitative",
+    "marketbeat",
+    "guru focus",
+    "gurufocus",
+    "intellectia",
+]
+
+MOMENTUM_CHATTER_PHRASES = [
+    "stock explodes",
+    "stock rockets",
+    "stock jumps",
+    "stock spikes",
+    "stock surges",
+    "traders pile",
+    "volatility grips",
+    "market shifts",
+    "why is",
+    "why did",
+    "what is going on",
+    "should i buy",
+]
 
 LAW_FIRM_PHRASES = [
     "investigation",
@@ -1191,8 +1228,9 @@ def seen_news_headline(ticker, headline):
 
 
 def strong_company_context_match(ticker, text, company_name=""):
-    """Require real company context for collision-prone tickers.
-    This blocks false matches like LOBO-Marte, Tom Lee, TRT therapy articles.
+    """Require real company context for scraped news.
+    This blocks false matches like TOPS = “tops”, LOBO-Marte, Tom Lee, TRT therapy articles,
+    and random PRs where the ticker letters appear in unrelated text.
     """
     ticker = str(ticker or "").upper().strip()
     text = normalize_text(text)
@@ -1205,12 +1243,13 @@ def strong_company_context_match(ticker, text, company_name=""):
     if len(tokens) >= 2:
         adjacent = " ".join(tokens[:2]) in lower
         spread = all(tok in lower for tok in tokens[:2])
+        # For company context, prefer actual company words. Exchange/ticker alone is useful but not enough
+        # to rescue broad momentum chatter from low quality sources.
         return adjacent or spread or ((exchange_ticker or paren_ticker) and tokens[0] in lower)
 
     if len(tokens) == 1:
         token = tokens[0]
-        # One-token company names are risky; require ticker + exchange/company suffix or exact brand-style context.
-        suffix_context = any(x in lower for x in [" inc", " corp", " ltd", " limited", " technologies", " enterprise", " partners"])
+        suffix_context = any(x in lower for x in [" inc", " corp", " ltd", " limited", " technologies", " enterprise", " enterprises", " partners", " ships", " therapeutics", " holdings"])
         return token in lower and (exchange_ticker or paren_ticker or suffix_context)
 
     return exchange_ticker or paren_ticker
@@ -1235,10 +1274,12 @@ def headline_matches_ticker_or_company(ticker, text, company_name=""):
     ticker_present = ticker_token_present(ticker, text)
     company_context = strong_company_context_match(ticker, text, company_name)
 
+    # Common-word/collision-prone tickers must have true company context.
     if ticker in STRICT_COMPANY_CONTEXT_TICKERS or len(ticker) <= 3:
         return bool(company_context)
 
-    return bool(ticker_present or company_context)
+    # For all other tickers, ticker token is allowed, but low-quality generic headlines are handled later.
+    return bool(company_context or ticker_present)
 
 
 def valid_scraped_headline(ticker, text, company_name="", require_symbol_or_company=True):
@@ -1319,6 +1360,21 @@ def build_news_result(text, source, ticker, company_name="", published_at=None, 
     if not valid_scraped_headline(ticker, clean, company_name, require_symbol_or_company=True):
         return None
 
+    lower_clean = clean.lower()
+    low_quality_source = any(src in lower_clean for src in LOW_QUALITY_PUBLISHERS)
+    generic_momentum_chatter = any(p in lower_clean for p in MOMENTUM_CHATTER_PHRASES)
+
+    # Low-quality momentum/news chatter can explain attention, but it must not be the best catalyst
+    # unless there is real company context and a real catalyst phrase.
+    if low_quality_source or generic_momentum_chatter:
+        real_company_context = strong_company_context_match(ticker, clean, company_name)
+        has_real_keyword = any(k in lower_clean for k in STRONG_KEYWORDS)
+        if not real_company_context:
+            return None
+        if quality == "STRONG" and (not has_real_keyword or generic_momentum_chatter):
+            quality = "WEAK"
+        confidence -= 0.18
+
     age = news_age_hours(published_at)
     bucket = classify_catalyst_bucket(clean)
 
@@ -1398,8 +1454,25 @@ def best_news_result(results):
                 freshness = -5
         elif item.get("source") in ["PR", "GLOBE", "YAHOO"]:
             freshness = 0
-        bucket_bonus = 1 if item.get("bucket") != "General news" else 0
-        return (quality_score, source_score, freshness, bucket_bonus, item.get("confidence", 0))
+        bucket = item.get("bucket", "General news")
+        bucket_rank = {
+            "FDA / biotech": 5,
+            "Contract / order": 5,
+            "Partnership / MOU": 5,
+            "Earnings / guidance": 4,
+            "AI / Nvidia": 4,
+            "Battery / EV / energy": 4,
+            "Merger / acquisition": 4,
+            "Defense / government": 4,
+            "Patent / IP": 3,
+            "Crypto / blockchain": 2,
+            "SEC filing": 1,
+            "General news": 0,
+        }.get(bucket, 0)
+        headline = item.get("headline", "").lower()
+        low_quality_penalty = -2 if any(src in headline for src in LOW_QUALITY_PUBLISHERS) else 0
+        chatter_penalty = -2 if any(p in headline for p in MOMENTUM_CHATTER_PHRASES) else 0
+        return (quality_score, source_score, freshness, bucket_rank, low_quality_penalty, chatter_penalty, item.get("confidence", 0))
 
     return sorted(results, key=score_item, reverse=True)[0]
 
