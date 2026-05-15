@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v29 — relevance trust + dynamic emergence"
+BOOT_MARKER = "elite scanner rebuild v30 — dynamic momentum intelligence engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -48,6 +48,10 @@ ALERT_MIN_GAIN = 25
 EARLY_LEADER_MIN_GAIN = 12
 MIN_ALERT_SCORE = 6
 MIN_LIVE_ACTION_SCORE = 5
+HOT_MIN_ALERT_SCORE = 5
+HOT_MIN_LIVE_ACTION_SCORE = 4
+STRICT_MIN_ALERT_SCORE = 7
+STRICT_MIN_LIVE_ACTION_SCORE = 6
 MIN_ALERT_RECENT_VOLUME = 75_000
 
 PREMARKET_ALERTS_ENABLED = False
@@ -299,6 +303,12 @@ LAW_FIRM_PHRASES = [
     "pomerantz",
     "wolf haldenstein",
     "kuehn law",
+]
+
+
+PERSON_NAME_COLLISIONS = [
+    "patrick reed", "kasim reed", "tom lee", "jay y. lee",
+    "testosterone replacement therapy", "lobo-marte",
 ]
 
 BAD_PR_MATCH_PHRASES = [
@@ -2620,6 +2630,43 @@ def enforce_score_quality_boundaries(result):
     return result
 
 
+
+def rebalance_score_with_live_action(result):
+    """v30: merge score engine with live-action engine.
+    If live action is excellent, the final score cannot stay buried at 2-4.
+    """
+    base = safe_int(result.get("score"))
+    setup = safe_int(result.get("setup_score"))
+    live = safe_int(result.get("live_action_score"))
+    risk = safe_int(result.get("risk_score"))
+    catalyst_bonus = 2 if result.get("news_quality") == "STRONG" else 0
+    continuation_bonus = 1 if (result.get("early_leader") or result.get("fresh_leader_ignition") or result.get("leader_reclaim") or result.get("true_second_leg")) else 0
+
+    blended = int(round((base * 0.45) + (setup * 0.25) + (live * 0.80) + catalyst_bonus + continuation_bonus - max(0, risk - 6)))
+
+    # Never let strong live action get rejected by stale base score math.
+    if live >= 9:
+        blended = max(blended, 7)
+    elif live >= 8:
+        blended = max(blended, 6)
+    elif live >= 6 and safe_float(result.get("gain")) >= 40:
+        blended = max(blended, 6)
+    elif live >= 5 and safe_float(result.get("gain")) >= 25 and result.get("above_vwap"):
+        blended = max(blended, 5)
+
+    # In HOT markets, clean live tape earns more trust.
+    if str(result.get("bot_mode") or "").upper() == "HOT" or str(result.get("market_regime") or "").upper() == "HOT":
+        if live >= 8 and safe_float(result.get("gain")) >= EARLY_LEADER_MIN_GAIN:
+            blended = max(blended, 6)
+        elif live >= 5 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN:
+            blended = max(blended, 5)
+
+    if result.get("deep_vwap_loss") or (result.get("bad_structure") and not result.get("momentum_override")):
+        blended = min(blended, 7)
+
+    result["score"] = max(0, min(blended, 10))
+    return result
+
 def apply_clean_scoring(result):
     score = int(result.get("score", 0) or 0)
 
@@ -2675,6 +2722,7 @@ def apply_clean_scoring(result):
     result = enforce_score_quality_boundaries(result)
     result = compute_live_action_score(result)
     result = detect_early_leader(result)
+    result = rebalance_score_with_live_action(result)
     return compact_reasons(result)
 
 
@@ -2774,10 +2822,28 @@ def classify_momentum_moment(result):
 
 
 
+
+def get_dynamic_alert_floors(result):
+    """Adapt gates to the tape.
+    HOT market = trust live momentum earlier.
+    STRICT/CHOP = demand cleaner confirmation.
+    """
+    mode = str(result.get("bot_mode") or "REGULAR").upper()
+    regime = str(result.get("market_regime") or "").upper()
+
+    if mode == "HOT" or regime == "HOT":
+        return HOT_MIN_ALERT_SCORE, HOT_MIN_LIVE_ACTION_SCORE
+
+    if mode == "STRICT" or regime == "CHOP":
+        return STRICT_MIN_ALERT_SCORE, STRICT_MIN_LIVE_ACTION_SCORE
+
+    return MIN_ALERT_SCORE, MIN_LIVE_ACTION_SCORE
+
 def compute_live_action_score(result):
     """Ranks the hottest CLEAN action right now.
-    This is the key PIII fix: current tape > total percent gain.
-    Internal only; do not display noisy sub-scores in alerts.
+    v30 fix: live-action is allowed to recognize real trader attention even when
+    structure is imperfect. This prevents real movers from printing impossible
+    0/10 action just because one structure flag is missing.
     """
     score = 0
     gain = safe_float(result.get("gain"))
@@ -2785,6 +2851,19 @@ def compute_live_action_score(result):
     recent_vol = safe_int(result.get("recent_volume"))
     prev_vol = safe_int(result.get("prev_volume"))
     rvol = safe_float(result.get("rvol_estimate"))
+    min_score, min_action = get_dynamic_alert_floors(result)
+
+    # Momentum baseline: active movers must never show 0/10 action.
+    if gain >= 100:
+        score = max(score, 7)
+    elif gain >= 50:
+        score = max(score, 6)
+    elif gain >= 25:
+        score = max(score, 5)
+    elif gain >= 15:
+        score = max(score, 3)
+    elif gain >= EARLY_LEADER_MIN_GAIN:
+        score = max(score, 2)
 
     # Enough move to matter, but do not wait for the whole run.
     if gain >= 100:
@@ -2813,11 +2892,15 @@ def compute_live_action_score(result):
         score += 2
     elif prev_vol > 0 and recent_vol >= prev_vol * 1.15:
         score += 1
-    elif rvol >= 2.5:
+
+    # RVOL must matter. This is trader participation, not just structure.
+    if rvol >= 10:
         score += 3
-    elif rvol >= 1.75:
+    elif rvol >= 5:
         score += 2
-    elif rvol >= 1.25:
+    elif rvol >= 2.5:
+        score += 2
+    elif rvol >= 1.5:
         score += 1
 
     # Clean action structure.
@@ -2844,24 +2927,13 @@ def compute_live_action_score(result):
     if day_vol >= 2_000_000:
         score += 1
 
+    # Strong catalyst feeds trader attention probability.
     if result.get("news_quality") == "STRONG":
-        score += 1
+        score += 2
+    elif result.get("news_quality") == "SEC_ONLY":
+        score += 0
 
-    # Trap filters matter more than hype.
-    if result.get("volume_fading"):
-        score -= 2
-    if result.get("momentum_decay"):
-        score -= 3
-    if result.get("bad_structure"):
-        score -= 4
-    if result.get("deep_vwap_loss"):
-        score -= 4
-    if result.get("midday_chop_risk"):
-        score -= 2
-    if result.get("bad_print_risk"):
-        score -= 1
-
-    # Fresh action / HOD pressure bonuses. This helps catch the stock traders are attacking now.
+    # Fresh action / HOD pressure bonuses. This catches the stock traders are attacking now.
     if result.get("fresh_high_after_vwap_hold"):
         score += 2
     if result.get("leader_reclaim"):
@@ -2871,27 +2943,66 @@ def compute_live_action_score(result):
 
     # Dynamic momentum floors: static structure math must not print 0/10 on real tape leaders.
     active_liquidity = (day_vol >= 1_000_000 or recent_vol >= MIN_ALERT_RECENT_VOLUME)
-    if gain >= 150 and active_liquidity:
-        score = max(score, 7)
-    elif gain >= 75 and active_liquidity:
-        score = max(score, 6)
-    elif gain >= 35 and active_liquidity:
-        score = max(score, 5)
+    if active_liquidity:
+        if gain >= 150:
+            score = max(score, 7)
+        elif gain >= 100:
+            score = max(score, 7)
+        elif gain >= 75:
+            score = max(score, 6)
+        elif gain >= 50:
+            score = max(score, 6)
+        elif gain >= 35:
+            score = max(score, 5)
+        elif gain >= 25:
+            score = max(score, 5)
+        elif gain >= 15:
+            score = max(score, 3)
 
-    # Trust major leaders: do not let structure/noise math print impossible 0/10 action on 100%+ runners.
+    # Trust major leaders: do not let structure/noise math print impossible low action.
     if result.get("momentum_override"):
         score = max(score, 6)
     elif result.get("leader_attention_override"):
         score = max(score, 5)
 
-    result["live_action_score"] = max(0, min(score, 10))
+    # Trap filters matter, but they should not fully erase major participation.
+    if result.get("volume_fading"):
+        score -= 2
+    if result.get("momentum_decay"):
+        score -= 2
+    if result.get("bad_structure"):
+        score -= 3
+    if result.get("deep_vwap_loss"):
+        score -= 4
+    if result.get("midday_chop_risk"):
+        score -= 2
+    if result.get("bad_print_risk"):
+        score -= 1
+
+    # Re-apply minimums after penalties for true leader tape, unless deep VWAP loss exists.
+    if not result.get("deep_vwap_loss") and active_liquidity:
+        if gain >= 100:
+            score = max(score, 6)
+        elif gain >= 50:
+            score = max(score, 5)
+        elif gain >= 25 and result.get("above_vwap"):
+            score = max(score, 4)
+
+    result["live_action_score"] = max(0, min(int(score), 10))
     result["action_now"] = bool(
-        result["live_action_score"] >= MIN_LIVE_ACTION_SCORE
+        result["live_action_score"] >= min_action
         and (recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000)
-        and (result.get("near_high_95") or result.get("breakout_confirmed") or result.get("fresh_leader_ignition") or result.get("momentum_override"))
+        and (
+            result.get("near_high_95")
+            or result.get("breakout_confirmed")
+            or result.get("fresh_leader_ignition")
+            or result.get("momentum_override")
+            or gain >= 25
+        )
         and not result.get("deep_vwap_loss")
     )
     return result
+
 
 def detect_early_leader(result):
     """Catches the PIII-at-$6 style phase: clean, active, near-high leadership before late confirmation."""
@@ -2925,13 +3036,14 @@ def detect_early_leader(result):
         or result.get("clean_trend_runner")
     )
 
+    _, min_live_action = get_dynamic_alert_floors(result)
     result["early_leader"] = bool(
         gain >= EARLY_LEADER_MIN_GAIN
         and clean_now
         and volume_now
         and structure_now
         and (day_vol >= 500_000 or recent_vol >= 150_000)
-        and safe_int(result.get("live_action_score")) >= MIN_LIVE_ACTION_SCORE
+        and safe_int(result.get("live_action_score")) >= min_live_action
     )
 
     if result.get("early_leader"):
@@ -2952,6 +3064,7 @@ def passes_master_alert_gate(result):
     above_vwap = bool(result.get("above_vwap", True))
 
     active_volume = recent_vol >= MIN_ALERT_RECENT_VOLUME or day_vol >= 500_000
+    min_score, min_live_action = get_dynamic_alert_floors(result)
 
     early_override = bool(
         gain >= EARLY_LEADER_MIN_GAIN
@@ -2975,11 +3088,11 @@ def passes_master_alert_gate(result):
 
     momentum_override = bool(result.get("momentum_override") and active_volume)
 
-    if score < MIN_ALERT_SCORE and not (early_override or leader_override or live_override or momentum_override):
-        return False, f"score {score}/10 under hard {MIN_ALERT_SCORE}/10 floor"
+    if score < min_score and not (early_override or leader_override or live_override or momentum_override):
+        return False, f"score {score}/10 under dynamic {min_score}/10 floor"
 
-    if live_action < MIN_LIVE_ACTION_SCORE and not (leader_override or momentum_override):
-        return False, f"live action {live_action}/10 under {MIN_LIVE_ACTION_SCORE}/10 floor"
+    if live_action < min_live_action and not (leader_override or momentum_override):
+        return False, f"live action {live_action}/10 under dynamic {min_live_action}/10 floor"
 
     if gain < ALERT_MIN_GAIN and not (early_override or leader_override or live_override):
         return False, f"gain {gain:.1f}% under {ALERT_MIN_GAIN}% floor"
@@ -3059,6 +3172,7 @@ def classify_alert_tier(result, rank):
 
     score = safe_int(result.get("score"))
     live_action = safe_int(result.get("live_action_score"))
+    min_score, min_live_action = get_dynamic_alert_floors(result)
     above_vwap = bool(result.get("above_vwap", True))
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
     bad_structure = bool(result.get("bad_structure"))
@@ -3066,7 +3180,7 @@ def classify_alert_tier(result, rank):
     if deep_vwap_loss or bad_structure:
         if result.get("momentum_override") or result.get("leader_attention_override"):
             return "LEADER"
-        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+        if result.get("market_leader") and score >= min_score:
             return "LEADER"
         return "AVOID"
 
@@ -3074,28 +3188,28 @@ def classify_alert_tier(result, rank):
         return "MAIN_LEADER"
 
     if result.get("momentum_decay"):
-        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+        if result.get("market_leader") and score >= min_score:
             return "LEADER"
         return "AVOID"
 
     if result.get("midday_chop_risk") and not (result.get("true_second_leg") or result.get("fresh_leader_ignition") or result.get("leader_reclaim") or result.get("early_leader")):
-        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+        if result.get("market_leader") and score >= min_score:
             return "LEADER"
         return "AVOID"
 
     if not above_vwap and not result.get("leader_reclaim"):
-        if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+        if result.get("market_leader") and score >= min_score:
             return "LEADER"
         return "AVOID"
 
-    if result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE:
+    if result.get("early_leader") and live_action >= min_live_action:
         return "RUNNER"
 
     # Pure live-action override: if the tape is 8-10/10, do not reject just because base score is imperfect.
     if live_action >= 8 and above_vwap and safe_float(result.get("gain")) >= EARLY_LEADER_MIN_GAIN:
         return "RUNNER"
 
-    if result.get("momentum_override") and live_action >= MIN_LIVE_ACTION_SCORE and above_vwap:
+    if result.get("momentum_override") and live_action >= min_live_action and above_vwap:
         return "RUNNER"
 
     clean_runner_setup = bool(
@@ -3107,13 +3221,13 @@ def classify_alert_tier(result, rank):
         or result.get("massive_no_news_runner")
     )
 
-    if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup and live_action >= MIN_LIVE_ACTION_SCORE:
+    if score >= min_score and above_vwap and clean_runner_setup and live_action >= min_live_action:
         return "RUNNER"
 
-    if score >= 9 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN and above_vwap and live_action >= MIN_LIVE_ACTION_SCORE:
+    if score >= 9 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN and above_vwap and live_action >= min_live_action:
         return "RUNNER"
 
-    if result.get("market_leader") and score >= MIN_ALERT_SCORE:
+    if result.get("market_leader") and score >= min_score:
         return "LEADER"
 
     return "AVOID"
