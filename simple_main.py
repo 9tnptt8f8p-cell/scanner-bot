@@ -91,6 +91,7 @@ MAX_NEWS_AGE_DAYS = 14
 
 PROFILE_CACHE = {}
 NEWS_CACHE = {}
+GLOBAL_NEWS_SEEN = set()
 SEC_CACHE = {}
 SEC_BODY_CACHE = {}
 PR_CACHE = {}
@@ -231,9 +232,20 @@ TICKER_COLLISION_PHRASES = {
         "trt uk",
         "testosterone",
     ],
+    "LOBO": [
+        "lobo-marte",
+        "mari lobo",
+        "ethan lee",
+    ],
+    "LEE": [
+        "tom lee",
+        "samsung chairman lee",
+        "jay y. lee",
+        "shannon lee",
+    ],
 }
 
-STRICT_COMPANY_CONTEXT_TICKERS = {"AI", "CAN", "ON", "FOR", "TRT", "SLE", "RVI", "STIM"}
+STRICT_COMPANY_CONTEXT_TICKERS = {"AI", "CAN", "ON", "FOR", "TRT", "SLE", "RVI", "STIM", "LEE", "LOBO"}
 
 LAW_FIRM_PHRASES = [
     "investigation",
@@ -1164,10 +1176,50 @@ def company_tokens(company_name):
     return tokens[:4]
 
 
+def seen_news_headline(ticker, headline):
+    """Global per-ticker headline dedupe across Yahoo/Google/PR/Finnhub."""
+    ticker = str(ticker or "").upper().strip()
+    headline = normalize_text(headline).lower()
+    headline = re.sub(r"[^a-z0-9]+", " ", headline).strip()
+    key = f"{ticker}|{headline[:180]}"
+    if not ticker or not headline:
+        return True
+    if key in GLOBAL_NEWS_SEEN:
+        return True
+    GLOBAL_NEWS_SEEN.add(key)
+    return False
+
+
+def strong_company_context_match(ticker, text, company_name=""):
+    """Require real company context for collision-prone tickers.
+    This blocks false matches like LOBO-Marte, Tom Lee, TRT therapy articles.
+    """
+    ticker = str(ticker or "").upper().strip()
+    text = normalize_text(text)
+    lower = text.lower()
+    tokens = company_tokens(company_name)
+
+    exchange_ticker = bool(re.search(rf"\b(nasdaq|nyse|amex)\s*[:/ -]?\s*{re.escape(ticker)}\b", lower, re.I))
+    paren_ticker = bool(re.search(rf"\({re.escape(ticker)}\)", text, re.I))
+
+    if len(tokens) >= 2:
+        adjacent = " ".join(tokens[:2]) in lower
+        spread = all(tok in lower for tok in tokens[:2])
+        return adjacent or spread or ((exchange_ticker or paren_ticker) and tokens[0] in lower)
+
+    if len(tokens) == 1:
+        token = tokens[0]
+        # One-token company names are risky; require ticker + exchange/company suffix or exact brand-style context.
+        suffix_context = any(x in lower for x in [" inc", " corp", " ltd", " limited", " technologies", " enterprise", " partners"])
+        return token in lower and (exchange_ticker or paren_ticker or suffix_context)
+
+    return exchange_ticker or paren_ticker
+
+
 def headline_matches_ticker_or_company(ticker, text, company_name=""):
     """Strict relevance gate for scraped headlines.
-    Fixes ticker-collision pollution like TRT = testosterone replacement therapy.
-    For ambiguous/short tickers, require real company-token evidence, not just the ticker letters.
+    Fixes ticker-collision pollution like TRT = testosterone replacement therapy,
+    LOBO-Marte, Tom Lee, and other common-word ticker collisions.
     """
     ticker = str(ticker or "").upper().strip()
     text = normalize_text(text)
@@ -1176,28 +1228,17 @@ def headline_matches_ticker_or_company(ticker, text, company_name=""):
     if not ticker or not text:
         return False
 
-    # Hard reject known acronym collisions.
     for phrase in TICKER_COLLISION_PHRASES.get(ticker, []):
         if phrase in lower:
             return False
 
-    tokens = company_tokens(company_name)
-    company_match = bool(tokens and any(tok in lower for tok in tokens[:3]))
+    ticker_present = ticker_token_present(ticker, text)
+    company_context = strong_company_context_match(ticker, text, company_name)
 
-    # Short/ambiguous symbols need company context. Ticker alone is not enough.
     if ticker in STRICT_COMPANY_CONTEXT_TICKERS or len(ticker) <= 3:
-        if company_match:
-            return True
-        # Allow high-confidence exchange style: "Company Name (TICKER)" only if a company token appears too.
-        return False
+        return bool(company_context)
 
-    if ticker_token_present(ticker, text):
-        return True
-
-    if company_match:
-        return True
-
-    return False
+    return bool(ticker_present or company_context)
 
 
 def valid_scraped_headline(ticker, text, company_name="", require_symbol_or_company=True):
@@ -1261,6 +1302,9 @@ def build_news_result(text, source, ticker, company_name="", published_at=None, 
     clean = clean_headline(text, allow_aggregator=False)
 
     if not clean:
+        return None
+
+    if seen_news_headline(ticker, clean):
         return None
 
     # If scraper text embeds a PR date, use it so old recycled PRs decay properly.
@@ -2752,6 +2796,15 @@ def compute_live_action_score(result):
     if prev_vol > 0 and recent_vol >= prev_vol * 2:
         score += 1
 
+    # Dynamic momentum floors: static structure math must not print 0/10 on real tape leaders.
+    active_liquidity = (day_vol >= 1_000_000 or recent_vol >= MIN_ALERT_RECENT_VOLUME)
+    if gain >= 150 and active_liquidity:
+        score = max(score, 7)
+    elif gain >= 75 and active_liquidity:
+        score = max(score, 6)
+    elif gain >= 35 and active_liquidity:
+        score = max(score, 5)
+
     # Trust major leaders: do not let structure/noise math print impossible 0/10 action on 100%+ runners.
     if result.get("momentum_override"):
         score = max(score, 6)
@@ -2965,6 +3018,10 @@ def classify_alert_tier(result, rank):
     if result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE:
         return "RUNNER"
 
+    # Pure live-action override: if the tape is 8-10/10, do not reject just because base score is imperfect.
+    if live_action >= 8 and above_vwap and safe_float(result.get("gain")) >= EARLY_LEADER_MIN_GAIN:
+        return "RUNNER"
+
     if result.get("momentum_override") and live_action >= MIN_LIVE_ACTION_SCORE and above_vwap:
         return "RUNNER"
 
@@ -3006,10 +3063,10 @@ def title_for_tier(result, tier):
     if tier == "LEADER":
         if result.get("leader_state") == "⚠️ FORMER LEADER — RECLAIM NEEDED":
             return "🔥 MARKET LEADER — RECLAIM NEEDED"
-        if result.get("momentum_decay"):
+        if result.get("momentum_decay") and not result.get("above_vwap"):
             return "🔥 MARKET LEADER — PULLBACK"
         if result.get("above_vwap"):
-            return "🔥 MARKET LEADER"
+            return "🔥 MARKET LEADER — ACTIVE"
         return "🔥 MARKET LEADER — RECLAIM NEEDED"
 
     if result.get("early_leader"):
