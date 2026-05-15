@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v24 — live action elite + hard news cleanup"
+BOOT_MARKER = "elite scanner rebuild v254 — live action priority + clean news gate"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -46,7 +46,7 @@ SCAN_SLEEP = 90
 # 5. Junk/news spam gate must pass before phone alert.
 ALERT_MIN_GAIN = 25
 EARLY_LEADER_MIN_GAIN = 18
-MIN_ALERT_SCORE = 7
+MIN_ALERT_SCORE = 6
 MIN_LIVE_ACTION_SCORE = 8
 MIN_ALERT_RECENT_VOLUME = 75_000
 
@@ -161,6 +161,11 @@ HARD_REJECT_NEWS = [
     "overview chemicals",
     "more about",
     "latest quote",
+    "was founded in",
+    "operates as",
+    "headquartered in",
+    "business segments",
+    "through its subsidiaries",
 ]
 
 # Weak items that are usually not clean momentum catalysts.
@@ -184,6 +189,24 @@ TRASH_WEAK_NEWS = [
     "follow-on offering",
     "warrant inducement",
     "at-the-market under nasdaq rules",
+]
+
+# Law-firm/legal solicitation headlines are not momentum catalysts.
+LAW_FIRM_PHRASES = [
+    "investigation",
+    "investigating",
+    "shareholder alert",
+    "class action",
+    "law firm",
+    "encourages investors",
+    "investors of",
+    "contact law firm",
+    "lead plaintiff",
+    "securities fraud",
+    "rosen law",
+    "pomerantz",
+    "wolf haldenstein",
+    "kuehn law",
 ]
 
 BAD_PR_MATCH_PHRASES = [
@@ -923,6 +946,9 @@ def classify_news_quality(headline):
     if any(word in text for word in TRASH_WEAK_NEWS):
         return "TRASH"
 
+    if any(word in text for word in LAW_FIRM_PHRASES):
+        return "TRASH"
+
     if any(word in text for word in WEAK_NEWS_OVERRIDES):
         return "WEAK"
 
@@ -974,6 +1000,9 @@ def clean_headline(text, allow_aggregator=False):
 
     # Trash weak items are risk/background, not catalysts. Do not let them become the main catalyst line.
     if any(x in lower for x in TRASH_WEAK_NEWS):
+        return ""
+
+    if any(x in lower for x in LAW_FIRM_PHRASES):
         return ""
 
     has_real_keyword = any(k in lower for k in STRONG_KEYWORDS)
@@ -1297,9 +1326,12 @@ def scrape_google_news_rss(ticker, company_name=""):
                 continue
 
             try:
-                soup = BeautifulSoup(r.text, "xml")
+                soup = BeautifulSoup(r.text, "lxml-xml")
             except Exception:
-                soup = BeautifulSoup(r.text, "html.parser")
+                try:
+                    soup = BeautifulSoup(r.text, "xml")
+                except Exception:
+                    soup = BeautifulSoup(r.text, "html.parser")
             items = soup.find_all("item")[:8]
 
             for item in items:
@@ -2642,9 +2674,11 @@ def passes_master_alert_gate(result):
     day_vol = safe_int(result.get("volume"))
 
     early_override = bool(
-        result.get("early_leader")
-        and live_action >= MIN_LIVE_ACTION_SCORE
-        and gain >= EARLY_LEADER_MIN_GAIN
+        gain >= EARLY_LEADER_MIN_GAIN
+        and (
+            (result.get("early_leader") and live_action >= MIN_LIVE_ACTION_SCORE)
+            or live_action >= 9
+        )
     )
 
     leader_override = bool(
@@ -3032,7 +3066,7 @@ def run_scanner():
     print(
         f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
         f"premarket alerts={'ON' if PREMARKET_ALERTS_ENABLED else 'OFF'} | "
-        f"phone alerts require {ALERT_MIN_GAIN}%+ and score {MIN_ALERT_SCORE}+ | "
+        f"phone alerts require {ALERT_MIN_GAIN}%+ or live-action override | "
         f"main leader / momentum moment / junk gate enabled",
         flush=True,
     )
