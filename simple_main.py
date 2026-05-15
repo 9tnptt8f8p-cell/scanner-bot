@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v21 — clean ten runner/leader engine"
+BOOT_MARKER = "elite scanner rebuild v22 — main leader + momentum moment + junk gate"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -34,31 +34,34 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
-# Scan universe can stay wider so bot still studies names internally.
+# Scanner universe
 SCAN_MIN_GAIN = 12
 SCAN_SLEEP = 90
 
-# V20 ALERT PHILOSOPHY:
-# 1. Surface true market leaders.
-# 2. Phone alerts are RUNNER / LEADER only.
-# 3. No WATCH tier/wording.
-# 4. Score 6 and below is ignored.
-# 5. Catalyst engine digs deeper before saying no confirmed news.
+# Alert philosophy:
+# 1. Premarket = radar only by default.
+# 2. Phone alerts are RUNNER / MAIN LEADER / LEADER only.
+# 3. No WATCH wording.
+# 4. Score 6 and below ignored.
+# 5. Junk/news spam gate must pass before phone alert.
 ALERT_MIN_GAIN = 25
 MIN_ALERT_SCORE = 7
 MIN_ALERT_RECENT_VOLUME = 75_000
+
+PREMARKET_ALERTS_ENABLED = False
+OPENING_5_MIN_PROTECTION = True
 
 LEADER_MIN_GAIN = 40
 LEADER_MIN_DAY_VOLUME = 2_000_000
 LEADER_MIN_RECENT_VOLUME = 150_000
 
-# Fresh ignition / reclaim upgrades.
+MAIN_LEADER_MIN_RECENT_VOLUME = 250_000
+
 FRESH_IGNITION_MIN_GAIN = 25
 RECLAIM_MAX_DISTANCE_PCT = 2.0
 MIDDAY_CHOP_START = dtime(11, 0)
 MIDDAY_CHOP_END = dtime(14, 0)
 
-# Do not hard-block fading leaders. Downgrade title/bias instead.
 BLOCK_FADING_LEADER_ALERTS = False
 
 ALERT_COOLDOWN_SECONDS = 900
@@ -72,7 +75,6 @@ MIN_PRICE = 0.50
 MAX_MARKET_CAP = 1_000_000_000
 MAX_FLOAT_SHARES = 50_000_000
 
-# V21 cleanliness knobs: keep phone alerts trader-grade and non-contradictory.
 MAX_ALERT_REASONS = 4
 MAX_ALERT_RISKS = 4
 
@@ -82,10 +84,12 @@ CACHE_TTL_SECONDS = 60 * 30
 NEWS_CACHE_TTL_SECONDS = 60 * 20
 PR_CACHE_TTL_SECONDS = 60 * 30
 SEC_CACHE_TTL_SECONDS = 60 * 30
+SEC_BODY_CACHE_TTL_SECONDS = 60 * 60
 
 PROFILE_CACHE = {}
 NEWS_CACHE = {}
 SEC_CACHE = {}
+SEC_BODY_CACHE = {}
 PR_CACHE = {}
 COMPANY_CACHE = {}
 
@@ -135,7 +139,6 @@ BAD_NEWS_KEYWORDS = [
     "most active stocks",
 ]
 
-# Bad PR/page fragments that commonly create false catalysts.
 BAD_PR_MATCH_PHRASES = [
     "market global forecast",
     "global forecast",
@@ -162,7 +165,6 @@ BAD_PR_MATCH_PHRASES = [
 ]
 
 AMBIGUOUS_TICKERS_REQUIRE_COMPANY = {
-    # These symbols can also be common words/acronyms in unrelated PRs.
     "BESS": ["bess", "battery", "storage"],
     "GUTS": ["guts"],
     "STIM": ["stim", "non-stim", "stimulation"],
@@ -273,14 +275,6 @@ CATALYST_BUCKETS = {
     ],
 }
 
-SECTOR_HINTS = {
-    "biotech": ["FDA / biotech", "clinical", "trial", "phase", "drug", "therapy"],
-    "ai": ["AI / Nvidia", "artificial intelligence", "nvidia", "gpu", "data center"],
-    "crypto": ["Crypto / blockchain", "bitcoin", "crypto", "blockchain"],
-    "battery": ["Battery / EV / energy", "battery", "ev", "lithium", "energy storage"],
-    "defense": ["Defense / government", "dod", "defense", "government", "army"],
-}
-
 app = Flask(__name__)
 
 
@@ -332,6 +326,16 @@ def get_market_session():
     return "CLOSED"
 
 
+def get_bot_mode(regime, session):
+    if session == "PREMARKET":
+        return "PREMARKET"
+    if regime == "CHOP":
+        return "STRICT"
+    if regime == "HOT":
+        return "HOT"
+    return "REGULAR"
+
+
 # ============================================================
 # BASIC HELPERS
 # ============================================================
@@ -378,7 +382,7 @@ def is_above_vwap(price, vwap):
 
 def request_get(url, headers=None, params=None, timeout=8):
     base_headers = {
-        "User-Agent": "Mozilla/5.0 scanner-bot/1.0",
+        "User-Agent": "Mozilla/5.0 scanner-bot/1.0 contact@example.com",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     if headers:
@@ -401,11 +405,6 @@ def ticker_token_present(ticker, text):
 
 
 def detect_bad_structure(structure_text):
-    """
-    Hard bad structure only.
-    Soft warnings like 'below VWAP / reclaim watch' should not automatically
-    poison the ticker into AVOID.
-    """
     hard_bad_keywords = [
         "upper wick",
         "trap",
@@ -424,11 +423,7 @@ def detect_bad_structure(structure_text):
 
 
 def detect_soft_structure_warning(structure_text):
-    soft_keywords = [
-        "below vwap",
-        "reclaim watch",
-        "slightly below vwap",
-    ]
+    soft_keywords = ["below vwap", "reclaim watch", "slightly below vwap"]
     text = str(structure_text or "").lower()
     return any(k in text for k in soft_keywords)
 
@@ -446,6 +441,8 @@ def dedupe_phrases(items):
         "volume_expand": ["volume expanding", "momentum increasing"],
         "dilution": ["dilution", "offering", "warrant", "shelf", "atm"],
         "leader": ["market leader", "leaderboard"],
+        "main_leader": ["main leader"],
+        "momentum_moment": ["momentum moment", "ignition moment", "second leg moment"],
         "rvol": ["rvol"],
     }
 
@@ -475,11 +472,6 @@ def dedupe_phrases(items):
 
 
 def compact_reasons(result):
-    """
-    Final cleanup pass for alert readability.
-    Keeps phone alerts short, removes duplicate structure language, and prevents
-    stale WATCH/unclear wording from leaking into the final message.
-    """
     reasons = []
     risks = []
 
@@ -509,8 +501,6 @@ def compact_reasons(result):
         low = text.lower()
         if low in ["none", "n/a", "", "null"]:
             continue
-        # Do not show vague duplicate caution when a stronger dilution/offering
-        # label already exists.
         if "sec filings present" in low and any("dilution" in str(x).lower() or "offering" in str(x).lower() for x in risks):
             continue
         risks.append(text)
@@ -521,14 +511,9 @@ def compact_reasons(result):
 
 
 def clean_alert_consistency(result):
-    """
-    Contradiction cleaner. The bot can internally score many signals, but the
-    final alert must say one thing clearly: RUNNER, LEADER, or AVOID.
-    """
     tier = result.get("alert_tier")
     title = str(result.get("title", ""))
 
-    # User preference: no WATCH tier/wording in final phone alerts.
     title = title.replace(" — PULLBACK WATCH", " — PULLBACK")
     title = title.replace(" — RECLAIM WATCH", " — RECLAIM NEEDED")
     title = title.replace("WATCH", "")
@@ -536,13 +521,13 @@ def clean_alert_consistency(result):
 
     if tier == "RUNNER":
         if result.get("momentum_decay") or result.get("bad_structure") or result.get("deep_vwap_loss"):
-            # Runner cannot coexist with clear decay/trap language. Demote to leader
-            # only if it is still an important tape name; otherwise avoid.
             result["alert_tier"] = "LEADER" if result.get("market_leader") else "AVOID"
             tier = result["alert_tier"]
 
     if tier == "LEADER" and title.startswith("🟢 RUNNER"):
         title = "🔥 MARKET LEADER"
+    elif tier == "MAIN_LEADER" and not title.startswith("👑"):
+        title = "👑 MAIN LEADER"
     elif tier == "AVOID" and not title.startswith("🔴 AVOID"):
         title = "🔴 AVOID — STRUCTURE FAILED"
 
@@ -608,7 +593,6 @@ def get_nasdaq_gainers():
 
 
 def dedupe_movers(movers):
-    """Keep one row per ticker before expensive quote/news/profile calls."""
     deduped = {}
 
     for mover in movers or []:
@@ -874,7 +858,7 @@ def get_yahoo_candles(ticker):
 
 
 # ============================================================
-# DEEP NEWS / CATALYST ENGINE
+# NEWS / CATALYST ENGINE
 # ============================================================
 
 def classify_news_quality(headline):
@@ -889,8 +873,8 @@ def classify_news_quality(headline):
     if any(word in text for word in WEAK_NEWS_OVERRIDES):
         return "WEAK"
 
-    # Aggregator titles are junk only if they contain no real catalyst keywords.
     has_strong_keyword = any(word in text for word in STRONG_KEYWORDS)
+
     if any(word in text for word in BAD_NEWS_KEYWORDS) and not has_strong_keyword:
         return "JUNK"
 
@@ -933,13 +917,10 @@ def clean_headline(text, allow_aggregator=False):
     if any(x in lower for x in BAD_PR_MATCH_PHRASES):
         return ""
 
-    # Reject pure aggregator headlines, but do not delete real catalyst titles
-    # just because they include "shares higher after announcing..."
     has_real_keyword = any(k in lower for k in STRONG_KEYWORDS)
     if not allow_aggregator and any(x in lower for x in BAD_NEWS_KEYWORDS) and not has_real_keyword:
         return ""
 
-    # Remove common duplicated source/publisher tails.
     text = re.sub(r"^\s*(PR Newswire|GlobeNewswire|Accesswire)\s*[-:]\s*", "", text, flags=re.I)
     text = re.sub(r"\s+\|\s+(Yahoo Finance|Benzinga|StockTitan|MarketWatch).*$", "", text, flags=re.I)
 
@@ -976,13 +957,11 @@ def news_age_hours(dt):
 
 def is_fresh_news(dt, max_hours=96):
     if not dt:
-        # Unknown freshness is allowed, but lower confidence.
         return True
     return news_age_hours(dt) <= max_hours
 
 
 def looks_like_stale_pr(text):
-    """Reject old PR dates when scrape pages surface stale results."""
     lower = str(text or "").lower()
     this_year = str(datetime.now(ET).year)
     stale_years = [str(y) for y in range(2020, datetime.now(ET).year)]
@@ -1038,7 +1017,6 @@ def valid_scraped_headline(ticker, text, company_name="", require_symbol_or_comp
 
     lower = text.lower()
 
-    # Reject page fragments.
     if lower in {ticker.lower(), f"{ticker.lower()} stock", f"{ticker.lower()} news"}:
         return False
 
@@ -1048,7 +1026,6 @@ def valid_scraped_headline(ticker, text, company_name="", require_symbol_or_comp
     if require_symbol_or_company and not headline_matches_ticker_or_company(ticker, text, company_name):
         return False
 
-    # Symbols that are also generic words/acronyms need stronger evidence.
     if ticker in AMBIGUOUS_TICKERS_REQUIRE_COMPANY:
         words = AMBIGUOUS_TICKERS_REQUIRE_COMPANY[ticker]
         if any(w in lower for w in words):
@@ -1155,9 +1132,6 @@ def best_news_result(results):
 
 
 def get_news_catalyst(ticker):
-    """
-    Finnhub same-day check. V20 still uses it, but it is no longer the only truth.
-    """
     if not FINNHUB_API_KEY:
         return "none", "Missing Finnhub key"
 
@@ -1263,9 +1237,6 @@ def scrape_google_news_rss(ticker, company_name=""):
 
 
 def scrape_pr_headline(ticker, company_name=""):
-    """
-    Searches PRNewswire and GlobeNewswire. Returns best result dict or None.
-    """
     now = time.time()
     cache_key = f"{ticker.upper()}|{company_name}"
 
@@ -1313,8 +1284,101 @@ def scrape_pr_headline(ticker, company_name=""):
     return best
 
 
+def score_news_confidence(news_data, all_results=None):
+    quality = news_data.get("quality", "NONE")
+    source = news_data.get("source", "NONE")
+    confidence = safe_float(news_data.get("confidence", 0))
+
+    score = 0
+    if quality == "STRONG":
+        score += 4
+    elif quality == "WEAK":
+        score += 2
+    elif quality == "JUNK":
+        score -= 3
+
+    if source in ["FINNHUB", "PR", "GLOBE", "SEC"]:
+        score += 2
+    elif source in ["GOOGLE_NEWS", "YAHOO"]:
+        score += 1
+
+    if confidence >= 0.85:
+        score += 2
+    elif confidence >= 0.70:
+        score += 1
+
+    return max(0, min(score, 10))
+
+
+def find_real_news_headline(ticker, current_headline="", company_name=""):
+    now = time.time()
+    ticker = str(ticker or "").upper().strip()
+    company_name = get_company_name(ticker, fallback=company_name)
+
+    cache_key = f"{ticker}|{company_name}|{current_headline}"
+    if cache_key in NEWS_CACHE:
+        cached = NEWS_CACHE[cache_key]
+        if now - cached["time"] < NEWS_CACHE_TTL_SECONDS:
+            return cached["data"]
+
+    results = []
+
+    current_headline = clean_headline(current_headline, allow_aggregator=False)
+    current_result = build_news_result(current_headline, "FINNHUB", ticker, company_name, None, confidence=0.80)
+    if current_result:
+        results.append(current_result)
+
+    results.extend(scrape_yahoo_news_deep(ticker, company_name))
+    results.extend(scrape_google_news_rss(ticker, company_name))
+
+    pr_result = scrape_pr_headline(ticker, company_name)
+    if pr_result:
+        results.append(pr_result)
+
+    sec_result = sec_filing_context_catalyst(ticker, company_name)
+    if sec_result:
+        print(f"[SEC CONTEXT] {ticker}: {sec_result['headline']} ({sec_result['quality']})", flush=True)
+        results.append(sec_result)
+
+    best = best_news_result(results)
+
+    if best:
+        headline = best["headline"]
+        quality = best["quality"]
+        bucket = best.get("bucket", "General news")
+        source = best.get("source", "NEWS")
+        age = best.get("age_hours")
+
+        display = headline
+        if age is not None and age <= 96:
+            display = f"{headline} ({age:.0f}h old)"
+
+        data = {
+            "headline": display,
+            "quality": quality,
+            "bucket": bucket,
+            "source": source,
+            "confidence": best.get("confidence", 0),
+            "news_confidence_score": score_news_confidence(best),
+        }
+        NEWS_CACHE[cache_key] = {"time": now, "data": data}
+        print(f"[NEWS BEST] {ticker}: {display} | {quality} | {bucket} | {source}", flush=True)
+        return data
+
+    data = {
+        "headline": "No fresh catalyst found",
+        "quality": "NONE",
+        "bucket": "No confirmed news",
+        "source": "NONE",
+        "confidence": 0,
+        "news_confidence_score": 0,
+    }
+    NEWS_CACHE[cache_key] = {"time": now, "data": data}
+    return data
+
+
 # ============================================================
-# SEC / DILUTION + SEC CATALYST CONTEXT
+# SEC / DILUTION ENGINE
 # ============================================================
 
 def fetch_sec_company_record(ticker):
@@ -1387,6 +1451,48 @@ def get_recent_sec_filings(ticker):
         return out
 
 
+def sec_document_url(cik, accession, primary_doc):
+    if not cik or not accession or not primary_doc:
+        return ""
+    cik_num = str(int(cik))
+    acc_clean = str(accession).replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{acc_clean}/{primary_doc}"
+
+
+def fetch_sec_filing_text(ticker, filing):
+    data = get_recent_sec_filings(ticker)
+    cik = data.get("cik")
+    accession = filing.get("accession")
+    primary_doc = filing.get("primary_doc")
+
+    cache_key = f"BODY:{ticker}:{accession}:{primary_doc}"
+    now = time.time()
+
+    if cache_key in SEC_BODY_CACHE:
+        cached = SEC_BODY_CACHE[cache_key]
+        if now - cached["time"] < SEC_BODY_CACHE_TTL_SECONDS:
+            return cached["data"]
+
+    url = sec_document_url(cik, accession, primary_doc)
+    if not url:
+        return ""
+
+    try:
+        headers = {"User-Agent": "scanner-bot contact@example.com"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return ""
+
+        text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
+        text = normalize_text(text)[:120_000]
+        SEC_BODY_CACHE[cache_key] = {"time": now, "data": text}
+        return text
+
+    except Exception as e:
+        print(f"[SEC BODY ERROR] {ticker}: {e}", flush=True)
+        return ""
+
+
 def check_sec_offering_risk(ticker):
     data = get_recent_sec_filings(ticker)
 
@@ -1407,10 +1513,6 @@ def check_sec_offering_risk(ticker):
 
 
 def sec_filing_context_catalyst(ticker, company_name=""):
-    """
-    Uses recent SEC filing metadata as a catalyst hint.
-    Does not fetch full filing bodies, so it stays fast and safe.
-    """
     data = get_recent_sec_filings(ticker)
     if data.get("error"):
         return None
@@ -1513,8 +1615,11 @@ def detect_offering_risk(text, price=0):
     if "shelf registration" in t or "form s-3" in t or "form f-3" in t:
         risks.append("⚠️ Shelf registration — future dilution possible")
 
-    if "resale" in t or "resale prospectus" in t:
+    if "resale" in t or "resale prospectus" in t or "selling stockholder" in t:
         risks.append("⚠️ Resale registration — shares may unlock for selling")
+
+    if "equity line" in t:
+        risks.append("🚨 Equity line financing — dilution risk")
 
     if "convertible" in t:
         risks.append("🚨 Convertible financing — can convert into shares")
@@ -1532,6 +1637,49 @@ def detect_offering_risk(text, price=0):
     return risks
 
 
+def scan_recent_sec_bodies_for_dilution(ticker, price=0, max_filings=4):
+    data = get_recent_sec_filings(ticker)
+    if data.get("error"):
+        return []
+
+    today = datetime.now(ET).date()
+    risks = []
+
+    important_forms = {"8-K", "6-K", "S-1", "S-3", "F-1", "F-3", "424B3", "424B5"}
+
+    for filing in data.get("filings", [])[:max_filings]:
+        form = filing.get("form", "")
+        date_text = filing.get("date", "")
+
+        if form not in important_forms:
+            continue
+
+        try:
+            filing_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+            age_days = (today - filing_date).days
+        except Exception:
+            age_days = 999
+
+        if age_days > 10:
+            continue
+
+        text = fetch_sec_filing_text(ticker, filing)
+        if not text:
+            continue
+
+        body_risks = detect_offering_risk(text, price=price)
+        if body_risks:
+            if age_days == 0:
+                add_unique(risks, f"🚨 OFFERING LANGUAGE FILED TODAY: {form} {date_text}")
+            elif age_days <= 2:
+                add_unique(risks, f"🚨 Recent offering language: {form} {date_text}")
+
+        for risk in body_risks[:3]:
+            add_unique(risks, risk)
+
+    return risks
+
+
 def describe_dilution_risk(risk_text):
     text = (risk_text or "").lower()
 
@@ -1539,7 +1687,7 @@ def describe_dilution_risk(risk_text):
         "registered direct", "private placement", "securities purchase agreement",
         "atm offering", "at-the-market", "equity distribution agreement",
         "sales agreement", "warrant", "convertible", "equity line",
-        "resale", "selling stockholder",
+        "resale", "selling stockholder", "offering language",
     ]
 
     medium_words = ["s-3", "f-3", "shelf", "prospectus", "424b5", "424b3"]
@@ -1554,111 +1702,6 @@ def describe_dilution_risk(risk_text):
         return "🟡 SEC FILINGS PRESENT: recent filings found"
 
     return ""
-
-
-def detect_sympathy_or_technical_context(result, all_results=None):
-    """
-    If no direct catalyst is found, avoid calling every clean no-news runner useless.
-    This creates better context without pretending there is confirmed news.
-    """
-    ticker = result.get("ticker", "")
-    gain = safe_float(result.get("gain"))
-    volume = safe_int(result.get("volume"))
-    recent_vol = safe_int(result.get("recent_volume"))
-    above_vwap = bool(result.get("above_vwap", True))
-
-    if result.get("news_quality") not in ["NONE", "UNKNOWN", "JUNK"]:
-        return result
-
-    if gain >= 35 and volume >= 2_000_000 and recent_vol >= 150_000 and above_vwap:
-        result["catalyst_text"] = "Technical low-float / volume momentum"
-        result["catalyst_type"] = "⚡ Technical momentum"
-        result["news_quality"] = "TECHNICAL"
-        add_unique(result.setdefault("reasons", []), "Technical volume momentum")
-        return result
-
-    # Placeholder for future sector clustering. Keeps current behavior honest.
-    result["catalyst_text"] = "Technical momentum only"
-    return result
-
-
-def find_real_news_headline(ticker, current_headline="", company_name=""):
-    """
-    V20 deep catalyst search:
-    1. Keep valid Finnhub/current headline.
-    2. Search Yahoo headline + meta/snippet text.
-    3. Search Google News RSS by ticker and company name.
-    4. Search PRNewswire / GlobeNewswire by ticker and company name.
-    5. Use recent SEC filing metadata as context.
-    6. Only then return NONE.
-    """
-    now = time.time()
-    ticker = str(ticker or "").upper().strip()
-    company_name = get_company_name(ticker, fallback=company_name)
-
-    cache_key = f"{ticker}|{company_name}|{current_headline}"
-    if cache_key in NEWS_CACHE:
-        cached = NEWS_CACHE[cache_key]
-        if now - cached["time"] < NEWS_CACHE_TTL_SECONDS:
-            return cached["data"]
-
-    results = []
-
-    current_headline = clean_headline(current_headline, allow_aggregator=False)
-    current_result = build_news_result(current_headline, "FINNHUB", ticker, company_name, None, confidence=0.80)
-    if current_result:
-        results.append(current_result)
-
-    # Yahoo deep scrape: title, meta description, og tags, first paragraphs.
-    results.extend(scrape_yahoo_news_deep(ticker, company_name))
-
-    # Google News RSS catches smaller sites, wires, and overnight/foreign mentions.
-    results.extend(scrape_google_news_rss(ticker, company_name))
-
-    # PR wires by ticker and company name.
-    pr_result = scrape_pr_headline(ticker, company_name)
-    if pr_result:
-        results.append(pr_result)
-
-    # SEC recent filing metadata as context, especially 8-K / 6-K.
-    sec_result = sec_filing_context_catalyst(ticker, company_name)
-    if sec_result:
-        print(f"[SEC CONTEXT] {ticker}: {sec_result['headline']} ({sec_result['quality']})", flush=True)
-        results.append(sec_result)
-
-    best = best_news_result(results)
-
-    if best:
-        headline = best["headline"]
-        quality = best["quality"]
-        bucket = best.get("bucket", "General news")
-        source = best.get("source", "NEWS")
-        age = best.get("age_hours")
-
-        display = headline
-        if age is not None and age <= 96:
-            display = f"{headline} ({age:.0f}h old)"
-
-        data = {
-            "headline": display,
-            "quality": quality,
-            "bucket": bucket,
-            "source": source,
-            "confidence": best.get("confidence", 0),
-        }
-        NEWS_CACHE[cache_key] = {"time": now, "data": data}
-        print(f"[NEWS BEST] {ticker}: {display} | {quality} | {bucket} | {source}", flush=True)
-        return data
-
-    data = {
-        "headline": "No fresh catalyst found",
-        "quality": "NONE",
-        "bucket": "No confirmed news",
-        "source": "NONE",
-        "confidence": 0,
-    }
-    NEWS_CACHE[cache_key] = {"time": now, "data": data}
-    return data
 
 
 # ============================================================
@@ -1714,8 +1757,6 @@ def score_mover(mover, catalyst_type, catalyst_text):
         reasons.append("Weak catalyst")
     elif news_quality == "JUNK":
         risks.append("⚠️ Aggregator headline only")
-    elif news_quality == "TECHNICAL":
-        reasons.append("Technical momentum context")
     else:
         risks.append("⚠️ No confirmed catalyst / technical momentum only")
 
@@ -1865,6 +1906,23 @@ def update_vwap_state(result):
     return result
 
 
+def detect_quote_candle_mismatch(result):
+    candles = result.get("candles", []) or []
+    price = safe_float(result.get("price"))
+
+    if candles and price > 0:
+        last_close = safe_float(candles[-1].get("close"))
+        if last_close and abs(price - last_close) / last_close > 0.12:
+            add_unique(result.setdefault("risks", []), "⚠️ Quote/candle mismatch — possible bad print")
+            result["bad_print_risk"] = True
+        else:
+            result["bad_print_risk"] = False
+    else:
+        result["bad_print_risk"] = False
+
+    return result
+
+
 def compute_momentum_flags(result):
     price = safe_float(result.get("price_float", result.get("price")))
     vwap = safe_float(result.get("vwap_float", result.get("vwap")))
@@ -1888,6 +1946,7 @@ def compute_momentum_flags(result):
 
     result["recent_high"] = recent_high
     result["near_high"] = price >= recent_high * 0.97 if recent_high else False
+    result["near_high_95"] = price >= recent_high * 0.95 if recent_high else False
 
     volume_expanding = recent_vol >= max(MIN_ALERT_RECENT_VOLUME, prev_vol)
     volume_fading = prev_vol > 0 and recent_vol < prev_vol * 0.60
@@ -1965,13 +2024,14 @@ def compute_momentum_flags(result):
         and recent_vol >= 100_000
     )
 
+    # Stricter no-news runner: must be near high or breakout, not just drifting.
     result["massive_no_news_runner"] = bool(
         result.get("news_quality") in ["NONE", "UNKNOWN", "JUNK", "TECHNICAL"]
         and gain >= 35
         and day_vol >= 2_000_000
         and recent_vol >= 150_000
         and above_vwap
-        and (has_higher_lows or breakout or result.get("near_high"))
+        and (breakout or result.get("near_high"))
     )
 
     result["fresh_leader_ignition"] = bool(
@@ -2013,10 +2073,6 @@ def compute_momentum_flags(result):
 
 
 def estimate_relative_volume(result):
-    """
-    Lightweight RVOL-style estimate using 5-min candle volume.
-    Not true historical RVOL, but useful for live tape quality.
-    """
     recent_vol = safe_int(result.get("recent_volume"))
     prev_vol = safe_int(result.get("prev_volume"))
 
@@ -2041,11 +2097,6 @@ def estimate_relative_volume(result):
 
 
 def compute_leader_score(result):
-    """
-    Leader score = how important the ticker is on today's tape.
-    V20 keeps no entry_score. Trade guidance comes from tier only:
-    RUNNER / LEADER / AVOID.
-    """
     gain = safe_float(result.get("gain"))
     day_vol = safe_int(result.get("volume"))
     recent_vol = safe_int(result.get("recent_volume"))
@@ -2090,13 +2141,72 @@ def compute_leader_score(result):
     return result
 
 
+def compute_setup_score(result):
+    score = 0
+
+    if result.get("above_vwap"):
+        score += 2
+    if result.get("near_high"):
+        score += 2
+    elif result.get("near_high_95"):
+        score += 1
+    if result.get("volume_expanding"):
+        score += 2
+    if result.get("has_higher_lows"):
+        score += 1
+    if result.get("breakout_confirmed"):
+        score += 1
+    if result.get("true_second_leg"):
+        score += 2
+    if result.get("leader_reclaim") or result.get("fresh_leader_ignition"):
+        score += 2
+    if result.get("clean_trend_runner"):
+        score += 1
+
+    if result.get("momentum_decay"):
+        score -= 3
+    if result.get("bad_structure"):
+        score -= 4
+    if result.get("deep_vwap_loss"):
+        score -= 4
+    if result.get("midday_chop_risk"):
+        score -= 2
+    if result.get("bad_print_risk"):
+        score -= 2
+
+    result["setup_score"] = max(0, min(score, 10))
+    return result
+
+
+def compute_risk_score(result):
+    risk = 0
+    news_quality = result.get("news_quality", "NONE")
+    risk_text = " ".join(result.get("risks", [])).lower()
+
+    if news_quality == "JUNK":
+        risk += 3
+    if news_quality in ["NONE", "UNKNOWN"] and safe_float(result.get("gain")) < 40:
+        risk += 2
+    if result.get("volume_fading"):
+        risk += 2
+    if not result.get("above_vwap", True):
+        risk += 3
+    if result.get("bad_structure"):
+        risk += 4
+    if result.get("deep_vwap_loss"):
+        risk += 4
+    if result.get("midday_chop_risk"):
+        risk += 2
+    if result.get("bad_print_risk"):
+        risk += 3
+    if "dilution" in risk_text or "offering" in risk_text or "warrant" in risk_text:
+        risk += 2
+
+    result["risk_score"] = max(0, min(risk, 10))
+    return result
+
+
 def enforce_score_quality_boundaries(result):
-    """
-    V20 score discipline:
-    - 10/10 must be rare and backed by clean structure.
-    - Big gain alone cannot create a 10.
-    - No entry_score exists.
-    """
     score = safe_int(result.get("score"))
     above_vwap = bool(result.get("above_vwap", True))
 
@@ -2124,6 +2234,12 @@ def enforce_score_quality_boundaries(result):
         score = min(score, 8)
 
     if not above_vwap:
+        score = min(score, 7)
+
+    if score >= 7 and safe_int(result.get("setup_score")) < 6 and not result.get("main_leader"):
+        score = 6
+
+    if safe_int(result.get("risk_score")) >= 7:
         score = min(score, 7)
 
     result["score"] = max(0, min(score, 10))
@@ -2180,12 +2296,109 @@ def apply_clean_scoring(result):
 
     result["score"] = max(0, min(score, 10))
     result = compute_leader_score(result)
+    result = compute_setup_score(result)
+    result = compute_risk_score(result)
     result = enforce_score_quality_boundaries(result)
     return compact_reasons(result)
 
 
+def detect_sympathy_or_technical_context(result, all_results=None):
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    above_vwap = bool(result.get("above_vwap", True))
+
+    if result.get("news_quality") not in ["NONE", "UNKNOWN", "JUNK"]:
+        return result
+
+    if gain >= 35 and volume >= 2_000_000 and recent_vol >= 150_000 and above_vwap:
+        result["catalyst_text"] = "Technical low-float / volume momentum"
+        result["catalyst_type"] = "⚡ Technical momentum"
+        result["news_quality"] = "TECHNICAL"
+        add_unique(result.setdefault("reasons", []), "Technical volume momentum")
+        return result
+
+    result["catalyst_text"] = "Technical momentum only"
+    return result
+
+
 # ============================================================
-# ALERT TIERS
+# MAIN LEADER + MOMENTUM MOMENT ENGINE
+# ============================================================
+
+def classify_main_leader(result):
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    recent_vol = safe_int(result.get("recent_volume"))
+    rank = safe_int(result.get("rank", 99))
+
+    above_vwap = bool(result.get("above_vwap", True))
+    near_high = bool(result.get("near_high") or result.get("near_high_95"))
+    bad_structure = bool(result.get("bad_structure"))
+    deep_vwap_loss = bool(result.get("deep_vwap_loss"))
+    momentum_decay = bool(result.get("momentum_decay"))
+
+    tape_dominance = (
+        (gain >= 50 and volume >= 5_000_000)
+        or (gain >= 35 and volume >= 10_000_000)
+        or (gain >= 75 and volume >= 2_000_000)
+    )
+
+    active_now = recent_vol >= MAIN_LEADER_MIN_RECENT_VOLUME
+    top_of_tape = rank <= 5 or safe_int(result.get("leader_score")) >= 8
+
+    result["main_leader"] = False
+    result["leader_state"] = "NONE"
+
+    if tape_dominance and active_now and top_of_tape and above_vwap and near_high and not bad_structure and not momentum_decay:
+        result["main_leader"] = True
+        result["leader_state"] = "👑 MAIN LEADER"
+        add_unique(result.setdefault("reasons", []), "Main leader of tape")
+        return result
+
+    if tape_dominance and top_of_tape and above_vwap and not deep_vwap_loss:
+        result["leader_state"] = "🔥 LEADER"
+        return result
+
+    if tape_dominance and not above_vwap:
+        result["leader_state"] = "⚠️ FORMER LEADER — RECLAIM NEEDED"
+        add_unique(result.setdefault("risks", []), "Former leader — reclaim needed")
+        return result
+
+    return result
+
+
+def classify_momentum_moment(result):
+    if result.get("momentum_decay") or result.get("bad_structure") or result.get("deep_vwap_loss"):
+        result["momentum_moment"] = "NONE"
+        return result
+
+    if result.get("fresh_leader_ignition"):
+        result["momentum_moment"] = "🚀 IGNITION MOMENT"
+    elif result.get("true_second_leg"):
+        result["momentum_moment"] = "🟢 SECOND LEG MOMENT"
+    elif result.get("leader_reclaim"):
+        result["momentum_moment"] = "🟢 VWAP RECLAIM MOMENT"
+    elif result.get("fresh_high_after_vwap_hold"):
+        result["momentum_moment"] = "📈 FRESH HIGH MOMENT"
+    elif (
+        result.get("above_vwap")
+        and result.get("near_high")
+        and result.get("volume_expanding")
+        and safe_int(result.get("recent_volume")) >= 250_000
+    ):
+        result["momentum_moment"] = "🔥 LIVE MOMENTUM MOMENT"
+    else:
+        result["momentum_moment"] = "NONE"
+
+    if result.get("momentum_moment") != "NONE":
+        add_unique(result.setdefault("reasons", []), result["momentum_moment"])
+
+    return result
+
+
+# ============================================================
+# ALERT GATES / TIERS
 # ============================================================
 
 def passes_master_alert_gate(result):
@@ -2217,19 +2430,57 @@ def passes_master_alert_gate(result):
     return True, "passed"
 
 
+def junk_spam_gate(result):
+    confirmations = sum([
+        bool(result.get("above_vwap")),
+        bool(result.get("near_high")),
+        bool(result.get("volume_expanding")),
+        bool(result.get("has_higher_lows")),
+    ])
+
+    if result.get("bad_print_risk"):
+        return False, "quote/candle mismatch"
+
+    if result.get("bad_structure") or result.get("deep_vwap_loss"):
+        if not result.get("main_leader"):
+            return False, "bad structure"
+
+    if result.get("news_quality") in ["JUNK"] and confirmations < 3:
+        return False, "junk headline without strong structure"
+
+    if result.get("news_quality") in ["NONE", "UNKNOWN"] and not result.get("massive_no_news_runner") and not result.get("main_leader"):
+        return False, "no-news move not elite enough"
+
+    if confirmations < 2 and not result.get("main_leader"):
+        return False, "not enough setup confirmation"
+
+    if safe_int(result.get("setup_score")) < 6 and not result.get("main_leader"):
+        return False, "setup score too weak"
+
+    if safe_int(result.get("risk_score")) >= 7 and not result.get("main_leader"):
+        return False, "risk score too high"
+
+    return True, "passed"
+
+
+def opening_protection_gate(result, session):
+    if not OPENING_5_MIN_PROTECTION:
+        return True, "passed"
+
+    now_time = datetime.now(ET).time()
+
+    if session == "OPEN" and dtime(9, 30) <= now_time < dtime(9, 35):
+        if safe_int(result.get("score")) < 9 and not result.get("main_leader"):
+            return False, "waiting first 5 minutes"
+
+    return True, "passed"
+
+
 def classify_alert_tier(result, rank):
-    """
-    V21: no WATCH tier.
-    Phone alerts are only:
-    - RUNNER = clean continuation / actionable momentum
-    - LEADER = major tape leader / awareness name
-    Everything else is suppressed as AVOID.
-    """
     gate_ok, _ = passes_master_alert_gate(result)
     if not gate_ok:
         return "AVOID"
 
-    gain = safe_float(result.get("gain"))
     score = safe_int(result.get("score"))
     above_vwap = bool(result.get("above_vwap", True))
     deep_vwap_loss = bool(result.get("deep_vwap_loss"))
@@ -2237,6 +2488,11 @@ def classify_alert_tier(result, rank):
 
     if score < MIN_ALERT_SCORE:
         return "AVOID"
+
+    if result.get("main_leader"):
+        if deep_vwap_loss or bad_structure:
+            return "LEADER"
+        return "MAIN_LEADER"
 
     if deep_vwap_loss or bad_structure or result.get("momentum_decay"):
         if result.get("market_leader") and score >= MIN_ALERT_SCORE:
@@ -2265,7 +2521,7 @@ def classify_alert_tier(result, rank):
     if score >= MIN_ALERT_SCORE and above_vwap and clean_runner_setup:
         return "RUNNER"
 
-    if score >= 9 and gain >= ALERT_MIN_GAIN and above_vwap:
+    if score >= 9 and safe_float(result.get("gain")) >= ALERT_MIN_GAIN and above_vwap:
         return "RUNNER"
 
     if result.get("market_leader") and score >= MIN_ALERT_SCORE:
@@ -2275,6 +2531,8 @@ def classify_alert_tier(result, rank):
 
 
 def title_for_tier(result, tier):
+    moment = result.get("momentum_moment", "NONE")
+
     if tier == "AVOID":
         if result.get("momentum_decay"):
             return "🔴 AVOID — MOMENTUM FADED"
@@ -2282,14 +2540,22 @@ def title_for_tier(result, tier):
             return "🔴 AVOID — TRAP RISK"
         return "🔴 AVOID"
 
+    if result.get("main_leader"):
+        if tier == "MAIN_LEADER" and moment != "NONE":
+            return f"👑 MAIN LEADER — {moment.replace('🚀 ', '').replace('🟢 ', '').replace('📈 ', '').replace('🔥 ', '')}"
+        return "👑 MAIN LEADER"
+
     if tier == "LEADER":
-        # Important awareness name, but not necessarily a clean entry.
-        # No WATCH wording in final alerts.
+        if result.get("leader_state") == "⚠️ FORMER LEADER — RECLAIM NEEDED":
+            return "🔥 MARKET LEADER — RECLAIM NEEDED"
         if result.get("momentum_decay"):
             return "🔥 MARKET LEADER — PULLBACK"
         if result.get("above_vwap"):
             return "🔥 MARKET LEADER"
         return "🔥 MARKET LEADER — RECLAIM NEEDED"
+
+    if moment != "NONE":
+        return moment
 
     if result.get("fresh_leader_ignition"):
         return "🟢 RUNNER — FRESH IGNITION"
@@ -2310,7 +2576,9 @@ def title_for_tier(result, tier):
 def setup_tier_context(result):
     tier = result.get("alert_tier", "AVOID")
 
-    if tier == "RUNNER":
+    if tier == "MAIN_LEADER":
+        result["tier_context"] = "Main leader of tape"
+    elif tier == "RUNNER":
         result["tier_context"] = "Clean runner setup"
     elif tier == "LEADER":
         result["tier_context"] = "Market leader awareness"
@@ -2340,11 +2608,16 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if not hard_cooldown_done:
         return False, "hard cooldown active"
 
+    if setup == last_setup and current_score <= last_score and current_price < last_price * 1.05:
+        return False, "same setup / no improvement"
+
     major_upgrade = (
         ("LEADER" in last_setup and "RUNNER" in setup)
+        or ("MAIN LEADER" in setup and "MAIN LEADER" not in last_setup)
         or ("RECLAIM" in setup and "RECLAIM" not in last_setup)
         or ("SECOND LEG" in setup and "SECOND LEG" not in last_setup)
-        or ("FRESH IGNITION" in setup and "FRESH IGNITION" not in last_setup)
+        or ("IGNITION" in setup and "IGNITION" not in last_setup)
+        or ("MOMENT" in setup and "MOMENT" not in last_setup)
     )
 
     if major_upgrade and last_price and current_price >= last_price * 1.02:
@@ -2366,6 +2639,9 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
     if current_score >= last_score + 2:
         return True, "score improved +2"
 
+    if result.get("main_leader") and last_price and current_price >= last_price * 1.04:
+        return True, "main leader continuation +4%"
+
     if result.get("market_leader") and last_price and current_price >= last_price * 1.04:
         return True, "leader continuation +4%"
 
@@ -2374,6 +2650,7 @@ def meaningful_realert(result, alert_history, runner_prices, alert_scores, alert
 
 def first_matching_reason(result):
     preferred = [
+        "Main leader of tape",
         "Fresh leader ignition",
         "Leader VWAP reclaim",
         "Second leg continuation",
@@ -2392,7 +2669,7 @@ def first_matching_reason(result):
     for pref in preferred:
         for reason in reasons:
             if pref.lower() in str(reason).lower():
-                return str(reason).replace("🔥 ", "").replace("🟢 ", "").replace("📈 ", "").strip()
+                return str(reason).replace("🔥 ", "").replace("🟢 ", "").replace("📈 ", "").replace("👑 ", "").strip()
 
     return str(reasons[0]).strip() if reasons else "Momentum setup"
 
@@ -2403,9 +2680,11 @@ def first_matching_risk(result):
         return "None obvious"
 
     preferred = [
+        "offering filed today",
         "dilution",
         "offering",
         "warrant",
+        "quote/candle mismatch",
         "momentum decay",
         "midday chop",
         "upper wick",
@@ -2423,10 +2702,6 @@ def first_matching_risk(result):
 
 
 def build_compact_alert(result):
-    """
-    V21 phone alert: RUNNER / LEADER only. No WATCH, no Entry, no Bias.
-    Title + stats + catalyst + setup + risk only.
-    """
     result = clean_alert_consistency(result)
 
     float_shares = safe_float(result.get("float"))
@@ -2461,6 +2736,7 @@ def build_compact_alert(result):
     return (
         f"{title}\n\n"
         f"{result['ticker']} | {result['score']}/10 | {tier} | "
+        f"L{safe_int(result.get('leader_score'))}/10 S{safe_int(result.get('setup_score'))}/10 R{safe_int(result.get('risk_score'))}/10 | "
         f"${safe_float(result.get('price')):.4f} | +{safe_float(result.get('gain')):.1f}% | Float {float_text}\n"
         f"Catalyst: {news_header}{source_note} — {catalyst_line}\n\n"
         f"Setup: {setup_line}\n"
@@ -2482,8 +2758,9 @@ def detect_market_regime(results):
     )
     quality_setups = sum(1 for r in top if safe_int(r.get("score")) >= 7)
     leaders = sum(1 for r in top if r.get("market_leader"))
+    main_leaders = sum(1 for r in top if r.get("main_leader"))
 
-    if leaders >= 2 or big_runners >= 5 or (big_runners >= 3 and quality_setups >= 1):
+    if main_leaders >= 1 or leaders >= 2 or big_runners >= 5 or (big_runners >= 3 and quality_setups >= 1):
         return "HOT"
 
     if leaders >= 1 or big_runners >= 2 or active_runners >= 4 or quality_setups >= 1:
@@ -2500,8 +2777,9 @@ def run_scanner():
     print(f"[BOOT] Scanner started | {BOOT_MARKER}", flush=True)
     print(
         f"[BOOT] Scanning {SCAN_MIN_GAIN}%+ gainers internally | "
-        f"leaders require {LEADER_MIN_GAIN}%+ / heavy tape | "
-        f"phone alerts require {ALERT_MIN_GAIN}%+ and score {MIN_ALERT_SCORE}+ | runner/leader only",
+        f"premarket alerts={'ON' if PREMARKET_ALERTS_ENABLED else 'OFF'} | "
+        f"phone alerts require {ALERT_MIN_GAIN}%+ and score {MIN_ALERT_SCORE}+ | "
+        f"main leader / momentum moment / junk gate enabled",
         flush=True,
     )
 
@@ -2559,7 +2837,6 @@ def run_scanner():
                     print(f"[FILTER] {ticker} price ${price:.2f} outside range", flush=True)
                     continue
 
-                # Full processing is for 25%+ movers only.
                 if gain < ALERT_MIN_GAIN:
                     print(f"[FILTER] {ticker} gain under alert floor {gain:.1f}%", flush=True)
                     continue
@@ -2567,7 +2844,6 @@ def run_scanner():
                 if volume <= 0:
                     mover["volume"] = 500_000
 
-                # Cheap profile filter BEFORE slow news/PR scraping.
                 market_cap, float_shares = get_finnhub_profile(ticker)
                 company_name = get_company_name(ticker, fallback=mover.get("company_name", ""))
 
@@ -2594,6 +2870,7 @@ def run_scanner():
                 result["news_quality"] = news_quality
                 result["catalyst_bucket"] = catalyst_bucket
                 result["catalyst_source"] = catalyst_source
+                result["news_confidence_score"] = safe_int(news_data.get("news_confidence_score"))
                 result["session"] = session
                 result["market_cap"] = market_cap
                 result["float"] = float_shares
@@ -2630,6 +2907,8 @@ def run_scanner():
                     last_close = safe_float(candles[-1].get("close"))
                     result["candle_session_gain"] = ((last_close - first_close) / first_close) * 100 if first_close else 0
 
+                result = detect_quote_candle_mismatch(result)
+
                 structure = analyze_structure(ticker, candles or [])
 
                 result["structure_score"] = safe_int(structure.get("structure_score"))
@@ -2656,6 +2935,11 @@ def run_scanner():
                 result = compute_momentum_flags(result)
                 result = detect_sympathy_or_technical_context(result)
                 result = apply_clean_scoring(result)
+                result = classify_main_leader(result)
+                result = classify_momentum_moment(result)
+                result = compute_setup_score(result)
+                result = compute_risk_score(result)
+                result = enforce_score_quality_boundaries(result)
 
                 sec_risk = False
                 sec_note = ""
@@ -2667,6 +2951,12 @@ def run_scanner():
                 if sec_risk:
                     add_unique(result.setdefault("risks", []), f"🚨 Active dilution filing: {sec_note}")
 
+                # Full SEC filing-body dilution scan only for priority names to keep bot fast.
+                if result.get("score", 0) >= MIN_ALERT_SCORE or result.get("market_leader") or result.get("rank", 99) <= 8:
+                    body_risks = scan_recent_sec_bodies_for_dilution(ticker, price=price, max_filings=4)
+                    for risk in body_risks:
+                        add_unique(result.setdefault("risks", []), risk)
+
                 filing_text = f"{result.get('sec_note', '')} {result.get('catalyst_text', '')}"
                 extra_risks = detect_offering_risk(filing_text, price=price) or []
                 result.setdefault("risks", []).extend(extra_risks)
@@ -2675,6 +2965,7 @@ def run_scanner():
                 if dilution_label:
                     result.setdefault("risks", []).insert(0, dilution_label)
 
+                result = compute_risk_score(result)
                 result = compact_reasons(result)
                 results.append(result)
 
@@ -2689,43 +2980,66 @@ def run_scanner():
             time.sleep(SCAN_SLEEP)
             continue
 
+        # First sort for tape reading.
         results.sort(
             key=lambda r: (
-                r.get("market_leader", False),
+                bool(r.get("main_leader")),
                 safe_int(r.get("leader_score")),
+                safe_int(r.get("score")),
+                safe_int(r.get("setup_score")),
                 safe_float(r.get("gain")),
                 safe_int(r.get("recent_volume")),
-                safe_int(r.get("score")),
             ),
             reverse=True,
         )
 
         regime = detect_market_regime(results)
+        bot_mode = get_bot_mode(regime, session)
 
         for r in results:
             r["market_regime"] = regime
+            r["bot_mode"] = bot_mode
 
         top_line = " | ".join(
-            f"#{r.get('rank')} {r['ticker']} S{r['score']}/10 L{safe_int(r.get('leader_score'))}/10 {r['gain']:.1f}% "
-            f"{'LEADER' if r.get('market_leader') else ''}"
+            f"#{r.get('rank')} {r['ticker']} S{r['score']}/10 L{safe_int(r.get('leader_score'))}/10 "
+            f"E{safe_int(r.get('setup_score'))}/10 R{safe_int(r.get('risk_score'))}/10 {r['gain']:.1f}% "
+            f"{'MAIN' if r.get('main_leader') else ('LEADER' if r.get('market_leader') else '')}"
             for r in results[:10]
         )
 
         print(f"[SCAN] Top ranked: {top_line}", flush=True)
-        print(f"[REGIME] {regime}", flush=True)
+        print(f"[REGIME] {regime} | [BOT MODE] {bot_mode} | [SESSION] {session}", flush=True)
 
         now = time.time()
         sent_count = 0
 
         alert_candidates = []
-        tier_priority = {"RUNNER": 2, "LEADER": 1, "AVOID": 0}
+        tier_priority = {"MAIN_LEADER": 3, "RUNNER": 2, "LEADER": 1, "AVOID": 0}
 
         for result in results[:MAX_GAINERS]:
             ticker = result["ticker"]
 
+            if session == "PREMARKET" and not PREMARKET_ALERTS_ENABLED:
+                print(f"[PREMARKET] {ticker} radar only — no phone alert", flush=True)
+                continue
+
+            if bot_mode == "STRICT" and safe_int(result.get("score")) < 8 and not result.get("main_leader"):
+                print(f"[STRICT] {ticker} suppressed — score under 8 in chop mode", flush=True)
+                continue
+
+            open_ok, open_reason = opening_protection_gate(result, session)
+            if not open_ok:
+                print(f"[OPEN FILTER] {ticker} {open_reason}", flush=True)
+                continue
+
             gate_ok, gate_reason = passes_master_alert_gate(result)
             if not gate_ok:
                 print(f"[NO ALERT] {ticker} {gate_reason}", flush=True)
+                continue
+
+            junk_ok, junk_reason = junk_spam_gate(result)
+            if not junk_ok:
+                print(f"[NO ALERT] {ticker} junk gate — {junk_reason}", flush=True)
                 continue
 
             tier = classify_alert_tier(result, safe_int(result.get("rank", 99)))
@@ -2754,10 +3068,11 @@ def run_scanner():
         alert_candidates.sort(
             key=lambda r: (
                 tier_priority.get(r.get("alert_tier", "AVOID"), 0),
-                safe_int(r.get("leader_score")),
-                safe_float(r.get("gain")),
-                safe_int(r.get("recent_volume")),
                 safe_int(r.get("score")),
+                safe_int(r.get("setup_score")),
+                safe_int(r.get("leader_score")),
+                safe_int(r.get("recent_volume")),
+                safe_float(r.get("gain")),
             ),
             reverse=True,
         )
@@ -2788,6 +3103,7 @@ def run_scanner():
 
             print(
                 f"[SEND] {ticker} tier={result.get('alert_tier')} score={result['score']} "
+                f"setup={safe_int(result.get('setup_score'))} risk={safe_int(result.get('risk_score'))} "
                 f"gain={safe_float(result.get('gain')):.1f}% reason={reason}",
                 flush=True,
             )
