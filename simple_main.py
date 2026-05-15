@@ -25,7 +25,7 @@ load_dotenv()
 
 ET = ZoneInfo("America/New_York")
 
-BOOT_MARKER = "elite scanner rebuild v30 — dynamic momentum intelligence engine"
+BOOT_MARKER = "elite scanner rebuild v31 — momentum first / dilution awareness engine"
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -233,6 +233,17 @@ TRASH_WEAK_NEWS = [
     "follow-on offering",
     "warrant inducement",
     "at-the-market under nasdaq rules",
+]
+
+NON_CATALYST_PR = [
+    "webcast", "conference call", "investor presentation", "register here",
+    "annual meeting", "shareholder meeting", "director appointment",
+    "appoints", "appointed", "to present at", "participate at",
+]
+
+MEDICAL_COLLISION_PHRASES = [
+    "transurethral resection", "bladder tumor", "turb procedure",
+    "testosterone replacement therapy",
 ]
 
 # Law-firm/legal solicitation headlines are not momentum catalysts.
@@ -1054,10 +1065,10 @@ def classify_news_quality(headline):
         return "TRASH"
 
     if any(word in text for word in NEGATIVE_NEWS):
-        return "NEGATIVE"
+        return "WEAK"
 
     if any(word in text for word in TRASH_WEAK_NEWS):
-        return "TRASH"
+        return "WEAK"
 
     if any(word in text for word in LAW_FIRM_PHRASES):
         return "TRASH"
@@ -1079,11 +1090,48 @@ def classify_news_quality(headline):
     return "WEAK"
 
 def classify_catalyst_bucket(text):
+    """Strict catalyst tagging.
+    v31 fix: avoid broad single-word matches that mislabeled PIII as AI or HCWB as energy.
+    """
     lower = f" {normalize_text(text).lower()} "
-    for bucket, keywords in CATALYST_BUCKETS.items():
-        for keyword in keywords:
-            if keyword.strip().lower() in lower:
-                return bucket
+
+    def has_any(words):
+        return any(w in lower for w in words)
+
+    # Explicit buckets first. Require contextual words, not vague single terms.
+    if has_any(["fda", "clinical trial", "phase ", "preclinical", "oncology", "cell therapy", "tumor", "survival", "ind submission", "cancer"]):
+        return "FDA / biotech"
+
+    if has_any(["earnings", "quarterly results", "q1", "q2", "q3", "q4", "revenue", "profit", "ebitda", "guidance", "raises guidance", "beats estimates"]):
+        return "Earnings / guidance"
+
+    if has_any(["artificial intelligence", "ai-powered", "ai driven", "ai-driven", "machine learning", "nvidia", "gpu", "large language model", " llm "]):
+        return "AI / Nvidia"
+
+    if has_any(["energy storage", "battery", "solar", "refinery", "oil sands", "fuel", "grid", "bess", "ev charging"]):
+        return "Battery / EV / energy"
+
+    if has_any(["contract", "purchase order", "order from", "supply agreement", "distribution deal", "commercial agreement"]):
+        return "Contract / order"
+
+    if has_any(["partnership", "collaboration", "strategic alliance", "memorandum of understanding", " mou ", "joint venture", "letter of intent", " loi "]):
+        return "Partnership / MOU"
+
+    if has_any(["acquisition", "merger", "to acquire", "definitive agreement", "business combination"]):
+        return "Merger / acquisition"
+
+    if has_any(["patent", "intellectual property", "exclusive license", "licensing agreement"]):
+        return "Patent / IP"
+
+    if has_any(["bitcoin", "ethereum", "crypto", "blockchain", "digital asset", "tokenization", "defi"]):
+        return "Crypto / blockchain"
+
+    if has_any(["department of defense", "dod", "army", "navy", "air force", "government contract", "federal contract", "nasa"]):
+        return "Defense / government"
+
+    if has_any(["8-k", "10-q", "6-k", "sec filing"]):
+        return "SEC filing"
+
     return "General news"
 
 
@@ -1111,8 +1159,15 @@ def clean_headline(text, allow_aggregator=False):
     if any(x in lower for x in BAD_PR_MATCH_PHRASES):
         return ""
 
-    # Negative/admin/dilution items are risk/background, not clean catalysts.
-    if any(x in lower for x in NEGATIVE_NEWS):
+    if any(x in lower for x in MEDICAL_COLLISION_PHRASES):
+        return ""
+
+    if any(x in lower for x in NON_CATALYST_PR):
+        return ""
+
+    # Admin/dilution/reverse-split items are risk/background only.
+    # v31: do NOT use them as clean catalyst, but do NOT penalize momentum names for having them.
+    if any(x in lower for x in RISK_AWARENESS_NEWS):
         return ""
 
     # Trash weak items are risk/background, not catalysts. Do not let them become the main catalyst line.
@@ -2583,8 +2638,7 @@ def compute_risk_score(result):
         risk += 2
     if result.get("bad_print_risk"):
         risk += 3
-    if "dilution" in risk_text or "offering" in risk_text or "warrant" in risk_text:
-        risk += 2
+    # v31: dilution/offering/warrant language is awareness-only, not a score penalty.
 
     result["risk_score"] = max(0, min(risk, 10))
     return result
