@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.12 — leader rank floor indent fixed"
+BOOT_MARKER = "elite scanner v33.13 — news_explain alert crash fixed"
 
 # ============================================================
 # ENV
@@ -150,7 +150,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v32 FULL fast pass runner/avoid engine", 200
+    return "scanner alive — v33.13 news_explain alert crash fixed", 200
 
 
 @app.route("/health")
@@ -2529,6 +2529,26 @@ def main_risk_sentence(result):
 def build_alert(result):
     title = alert_title(result)
 
+    # v33.13 hotfix: never let a missing news_explain/news field crash alerts.
+    news = result.get("news") or {}
+    news_score = safe_float(result.get("news_score", news.get("score", 0)))
+    news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
+    news_headline = result.get("news_headline") or news.get("headline") or ""
+    news_explain = (
+        result.get("news_explain")
+        or news.get("explain")
+        or news_headline
+        or "No catalyst details available"
+    )
+    if news_explain == news_label:
+        news_explain = news_headline or "No catalyst details available"
+
+    # Store normalized safe values back into result for downstream code/logging.
+    result["news_score"] = news_score
+    result["news_label"] = news_label
+    result["news_headline"] = news_headline
+    result["news_explain"] = news_explain
+
     header = f"{result['ticker']} | {result['score']:.1f}/10 | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
     if SHOW_FLOAT and result.get("float"):
         header += f" | {result.get('float_info', {}).get('label') or ('Float ' + fmt_big_num(result['float']))}"
@@ -2538,7 +2558,7 @@ def build_alert(result):
         "",
         header,
         "",
-        f"Catalyst: {result['news_score']}/10 {result.get('news_label', result.get('news', {}).get('label', '📰 NEWS'))} — {result['news_explain']}",
+        f"Catalyst: {news_score:.0f}/10 {news_label} — {news_explain}",
         f"State: {result['bias']}",
         f"Phase: {result['phase']}",
         "",
@@ -2911,6 +2931,7 @@ def analyze_candidate(candidate, regime):
         "news": news,
         "news_label": news.get("label", "📰 NEWS"),
         "news_headline": news.get("headline", ""),
+        "news_explain": news.get("explain") or news.get("headline") or "No catalyst details available",
         "news_category": news.get("category", ""),
         "news_quality": news.get("quality", ""),
         "news_score": news_score,
