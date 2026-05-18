@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.4 FIXED — stable finalized candles + wider candidates + deterministic scoring"
+BOOT_MARKER = "elite scanner rebuild v32.5 FIXED — true top-gainer discovery + multi-source percent gainers"
 
 # ============================================================
 # ENV
@@ -62,7 +62,7 @@ EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 7.0
-MAX_GAINERS = 80
+MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 3
 SCAN_SLEEP = 90
 
@@ -218,6 +218,19 @@ def http_get(url, params=None, headers=None, timeout=6):
     if headers:
         default_headers.update(headers)
     return requests.get(url, params=params, headers=default_headers, timeout=timeout)
+
+
+def http_post(url, payload=None, params=None, headers=None, timeout=8):
+    default_headers = {
+        "User-Agent": "Mozilla/5.0 scannerbot/1.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Content-Type": "application/json",
+        "Origin": "https://finance.yahoo.com",
+        "Referer": "https://finance.yahoo.com/markets/stocks/gainers/",
+    }
+    if headers:
+        default_headers.update(headers)
+    return requests.post(url, params=params, json=payload or {}, headers=default_headers, timeout=timeout)
 
 
 # ============================================================
@@ -390,38 +403,164 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
 # GAINER SOURCES
 # ============================================================
 
-def parse_yahoo_quote_item(q):
+def parse_yahoo_quote_item(q, source="Yahoo Gainers"):
+    # Yahoo returns slightly different field names depending on endpoint.
+    price = (
+        q.get("regularMarketPrice")
+        or q.get("postMarketPrice")
+        or q.get("preMarketPrice")
+        or q.get("price")
+    )
+    gain = (
+        q.get("regularMarketChangePercent")
+        or q.get("postMarketChangePercent")
+        or q.get("preMarketChangePercent")
+        or q.get("percentChange")
+        or q.get("changePercent")
+    )
+    volume = (
+        q.get("regularMarketVolume")
+        or q.get("postMarketVolume")
+        or q.get("preMarketVolume")
+        or q.get("volume")
+    )
     return {
-        "ticker": str(q.get("symbol", "")).upper(),
-        "price": safe_float(q.get("regularMarketPrice")),
-        "gain": safe_float(q.get("regularMarketChangePercent")),
-        "volume": safe_int(q.get("regularMarketVolume")),
+        "ticker": str(q.get("symbol", "")).upper().strip(),
+        "price": safe_float(price),
+        "gain": safe_float(gain),
+        "volume": safe_int(volume),
         "market_cap": safe_int(q.get("marketCap")),
-        "source": "Yahoo Gainers",
+        "source": source,
     }
 
 
-def get_yahoo_gainers():
+def merge_source_items(items):
+    merged = {}
+    for item in items:
+        ticker = item.get("ticker", "").upper().strip()
+        if not ticker or is_bad_ticker(ticker):
+            continue
+
+        gain = safe_float(item.get("gain"))
+        volume = safe_int(item.get("volume"))
+        price = safe_float(item.get("price"))
+
+        # Discard empty/garbage rows, but keep low-gain rows for ranking safety net.
+        if price <= 0 and gain <= 0:
+            continue
+
+        existing = merged.get(ticker)
+        if not existing:
+            merged[ticker] = item
+            continue
+
+        # Prefer the row with the best percent gain. Fill missing fields from the other row.
+        if gain > safe_float(existing.get("gain")):
+            old = existing
+            merged[ticker] = item
+            if not merged[ticker].get("volume"):
+                merged[ticker]["volume"] = old.get("volume", 0)
+            if not merged[ticker].get("market_cap"):
+                merged[ticker]["market_cap"] = old.get("market_cap", 0)
+        else:
+            if not existing.get("volume") and volume:
+                existing["volume"] = volume
+            if not existing.get("market_cap") and item.get("market_cap"):
+                existing["market_cap"] = item.get("market_cap")
+
+    out = list(merged.values())
+    out.sort(key=lambda x: (safe_float(x.get("gain")), safe_int(x.get("volume"))), reverse=True)
+    return out
+
+
+def get_yahoo_predefined_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-    params = {"scrIds": "day_gainers", "count": MAX_GAINERS, "formatted": "false"}
+    params = {"scrIds": "day_gainers", "count": 250, "formatted": "false"}
 
     try:
         r = http_get(url, params=params, timeout=8)
         data = r.json()
         quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
-
-        results = []
-        for q in quotes:
-            item = parse_yahoo_quote_item(q)
-            if item["ticker"]:
-                results.append(item)
-
-        print(f"[GAINERS] Yahoo returned {len(results)} names")
+        results = [parse_yahoo_quote_item(q, source="Yahoo predefined day_gainers") for q in quotes]
+        results = [x for x in results if x.get("ticker")]
+        print(f"[GAINERS] Yahoo predefined returned {len(results)} names")
         return results
-
     except Exception as e:
-        print(f"[GAINERS ERROR] Yahoo: {e}")
+        print(f"[GAINERS ERROR] Yahoo predefined: {e}")
         return []
+
+
+def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250):
+    # This is the important v32.5 fix: ask Yahoo for the true sorted percent-gainer universe,
+    # not only the canned day_gainers list that sometimes misses small-cap leaders.
+    operands = [
+        {"operator": "EQ", "operands": ["region", "us"]},
+        {"operator": "EQ", "operands": ["quoteType", "EQUITY"]},
+        {"operator": "GT", "operands": ["regularMarketChangePercent", min_gain]},
+        {"operator": "GT", "operands": ["regularMarketPrice", 0.30]},
+        {"operator": "LT", "operands": ["regularMarketPrice", 500.0]},
+    ]
+    if min_volume:
+        operands.append({"operator": "GT", "operands": ["regularMarketVolume", int(min_volume)]})
+
+    return {
+        "size": size,
+        "offset": 0,
+        "sortField": "regularMarketChangePercent",
+        "sortType": "DESC",
+        "quoteType": "EQUITY",
+        "query": {"operator": "AND", "operands": operands},
+        "userId": "",
+        "userIdType": "guid",
+    }
+
+
+def get_yahoo_custom_percent_gainers():
+    url = "https://query1.finance.yahoo.com/v1/finance/screener"
+    all_results = []
+
+    # Multiple passes: high-gain leaders first, then wider backup. This catches the +50% names
+    # even when Yahoo's canned day_gainers endpoint only surfaces large caps.
+    scans = [
+        (50.0, 0, "Yahoo custom 50pct"),
+        (25.0, 50_000, "Yahoo custom 25pct liquid"),
+        (10.0, 100_000, "Yahoo custom 10pct liquid"),
+    ]
+
+    for min_gain, min_volume, label in scans:
+        try:
+            payload = yahoo_screener_payload(min_gain=min_gain, min_volume=min_volume, size=250)
+            r = http_post(url, payload=payload, timeout=8)
+            data = r.json()
+            quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+            results = [parse_yahoo_quote_item(q, source=label) for q in quotes]
+            results = [x for x in results if x.get("ticker")]
+            print(f"[GAINERS] {label} returned {len(results)} names")
+            all_results.extend(results)
+        except Exception as e:
+            print(f"[GAINERS ERROR] {label}: {e}")
+
+    return merge_source_items(all_results)
+
+
+def get_yahoo_gainers():
+    results = []
+    results.extend(get_yahoo_predefined_gainers())
+    results.extend(get_yahoo_custom_percent_gainers())
+
+    merged = merge_source_items(results)
+
+    # Diagnostic that will immediately show if the bot sees the same leaders you see.
+    top50 = [x for x in merged if safe_float(x.get("gain")) >= 50.0]
+    if top50:
+        print("[GAINERS] Yahoo +50% leaders: " + " | ".join(
+            f"{x['ticker']} +{safe_float(x.get('gain')):.1f}%" for x in top50[:12]
+        ))
+    else:
+        print("[GAINERS] Yahoo +50% leaders: none detected from Yahoo endpoints")
+
+    print(f"[GAINERS] Yahoo merged total {len(merged)} names")
+    return merged[:250]
 
 
 def get_nasdaq_gainers():
@@ -489,7 +628,7 @@ def get_candidates():
 
         gain = safe_float(item.get("gain"))
         rank = yahoo_rank.get(ticker, 999)
-        top_gainer_safety_net = rank <= 20 and gain >= 5.0
+        top_gainer_safety_net = rank <= 80 and gain >= 5.0
 
         if gain < candidate_floor and not top_gainer_safety_net:
             continue
@@ -502,7 +641,7 @@ def get_candidates():
     candidates.sort(key=lambda x: (safe_float(x.get("gain")), safe_int(x.get("volume"))), reverse=True)
 
     print(f"[CANDIDATES] merged {len(candidates)} candidates from {len(sources)} raw names")
-    return candidates[:MAX_GAINERS]
+    return candidates[:max(MAX_GAINERS, 120)]
 
 
 # ============================================================
