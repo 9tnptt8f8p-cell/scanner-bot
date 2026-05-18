@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32 FULL — fast pass + all engines"
+BOOT_MARKER = "elite scanner rebuild v32.1 FIXED — dynamic fast pass + runner/avoid"
 
 # ============================================================
 # ENV
@@ -44,15 +44,21 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 # ============================================================
 
 # Universe / fast pass
-SCAN_MIN_GAIN = 12.0                 # scanner can view wider universe internally
-HARD_MIN_GAIN = 25.0                 # hard skip before candles/news/sec
-ALERT_MIN_GAIN = 25.0
+SCAN_MIN_GAIN = 8.0                  # scanner can view wider universe internally
+PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
+OPEN_SCAN_MIN_GAIN = 12.0
+HARD_MIN_GAIN = 25.0                 # regular-hours hard floor
+PREMARKET_HARD_MIN_GAIN = 18.0       # fixed: do not kill 18-24% premarket leaders
+ALERT_MIN_GAIN = 25.0                # alerts still prefer real 25%+ movers
+PREMARKET_ALERT_MIN_GAIN = 20.0      # but allow elite premarket runners slightly early
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
-MIN_FAST_VOLUME = 100_000
+MIN_FAST_VOLUME = 75_000             # fixed: premarket liquidity can be thinner
 MIN_DEEP_VOLUME = 150_000
-MAX_FLOAT = 40_000_000
-MAX_MARKET_CAP = 800_000_000
+MAX_FLOAT = 80_000_000               # fixed: 40M was too nuclear in thin markets
+MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
+EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
+EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 7.0
@@ -247,6 +253,29 @@ def get_market_session_label():
     return "CLOSED"
 
 
+def is_premarket_session():
+    return get_market_session_label() == "PREMARKET"
+
+
+def dynamic_scan_min_gain():
+    return PREMARKET_SCAN_MIN_GAIN if is_premarket_session() else OPEN_SCAN_MIN_GAIN
+
+
+def dynamic_hard_min_gain():
+    return PREMARKET_HARD_MIN_GAIN if is_premarket_session() else HARD_MIN_GAIN
+
+
+def dynamic_alert_min_gain(result=None):
+    # Keep regular session strict, but don't miss clean early premarket runners.
+    if is_premarket_session():
+        return PREMARKET_ALERT_MIN_GAIN
+    return ALERT_MIN_GAIN
+
+
+def is_cold_regime(regime):
+    return bool(regime and "COLD" in regime.get("label", ""))
+
+
 def estimate_market_regime(candidates):
     cached = cached_get(MARKET_REGIME_CACHE, "regime", ttl=SHORT_CACHE_TTL_SECONDS)
     if cached:
@@ -313,34 +342,49 @@ def is_bad_ticker(ticker):
     return False
 
 
-def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0):
+def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0, regime=None):
+    """
+    V32.1 fix: only hard-skip things that are truly untradeable.
+    Float/market-cap are mostly awareness/score penalties now, especially in cold markets,
+    so Yahoo can feed real candidates into deep scan instead of collapsing to zero.
+    """
     reasons = []
+    warnings = []
+    gain_floor = dynamic_hard_min_gain()
 
     if is_bad_ticker(ticker):
         reasons.append("warrant/unit/right ticker")
 
-    if gain is None or gain < HARD_MIN_GAIN:
-        reasons.append(f"gain under {HARD_MIN_GAIN:.0f}%")
+    if gain is None or gain < gain_floor:
+        reasons.append(f"gain under {gain_floor:.0f}%")
 
     if price is None or price < MIN_PRICE or price > MAX_PRICE:
         reasons.append(f"price outside {fmt_money(MIN_PRICE)}-${MAX_PRICE:.0f}")
 
-    if volume and volume < MIN_FAST_VOLUME:
-        reasons.append(f"volume under {fmt_big_num(MIN_FAST_VOLUME)}")
+    # Premarket liquidity is thinner; don't overblock names before the open.
+    min_vol = 50_000 if is_premarket_session() else MIN_FAST_VOLUME
+    if volume and volume < min_vol:
+        reasons.append(f"volume under {fmt_big_num(min_vol)}")
 
-    if float_shares and float_shares > MAX_FLOAT:
-        reasons.append(f"float over {fmt_big_num(MAX_FLOAT)}")
+    # Only hard-skip huge/heavy names. Normal float/cap over target becomes awareness.
+    if float_shares and float_shares > EXTREME_FLOAT_SKIP:
+        reasons.append(f"extreme float over {fmt_big_num(EXTREME_FLOAT_SKIP)}")
+    elif float_shares and float_shares > MAX_FLOAT:
+        warnings.append(f"float over ideal {fmt_big_num(MAX_FLOAT)}")
 
-    if market_cap and market_cap > MAX_MARKET_CAP:
-        reasons.append(f"market cap over {fmt_big_num(MAX_MARKET_CAP)}")
+    if market_cap and market_cap > EXTREME_MARKET_CAP_SKIP:
+        reasons.append(f"extreme market cap over {fmt_big_num(EXTREME_MARKET_CAP_SKIP)}")
+    elif market_cap and market_cap > MAX_MARKET_CAP:
+        warnings.append(f"market cap over ideal {fmt_big_num(MAX_MARKET_CAP)}")
 
+    # In a cold tape, don't make float/cap nuclear unless truly extreme.
     if reasons:
         print(f"[FAST SKIP] {ticker}: " + " | ".join(reasons))
-        return False, reasons
+        return False, reasons, warnings
 
-    print(f"[FAST PASS] {ticker}: {fmt_money(price)} +{gain:.1f}% vol={fmt_big_num(volume)}")
-    return True, []
-
+    warn_text = (" | " + " | ".join(warnings)) if warnings else ""
+    print(f"[FAST PASS] {ticker}: {fmt_money(price)} +{gain:.1f}% vol={fmt_big_num(volume)}{warn_text}")
+    return True, [], warnings
 
 # ============================================================
 # GAINER SOURCES
@@ -430,13 +474,15 @@ def get_candidates():
         sources.extend(get_nasdaq_gainers())
 
     seen = {}
+    candidate_floor = dynamic_scan_min_gain()
+
     for item in sources:
         ticker = item.get("ticker", "").upper()
         if not ticker or is_bad_ticker(ticker):
             continue
 
         gain = safe_float(item.get("gain"))
-        if gain < SCAN_MIN_GAIN:
+        if gain < candidate_floor:
             continue
 
         existing = seen.get(ticker)
@@ -1486,7 +1532,7 @@ def build_entry(bias, structure, coil, second_leg, entry_score):
     return "No trade unless VWAP reclaim + clean reset"
 
 
-def score_candidate(gain, structure_score, volume_score, news_score, entry_score, coil, second_leg, decay, exhaustion, sec, regime):
+def score_candidate(gain, structure_score, volume_score, news_score, entry_score, coil, second_leg, decay, exhaustion, sec, regime, float_shares=0, market_cap=0):
     # Weighted for user's style: structure > volume > entry > news.
     score = (
         structure_score * 0.40 +
@@ -1508,6 +1554,12 @@ def score_candidate(gain, structure_score, volume_score, news_score, entry_score
     # SEC is awareness mostly, but heavy confirmed offering should nudge down.
     if sec.get("severity") == "HIGH":
         score -= 0.45
+
+    # Float/cap are no longer hard-kills unless extreme; they become small quality penalties.
+    if float_shares and float_shares > MAX_FLOAT:
+        score -= 0.35 if is_cold_regime(regime) else 0.55
+    if market_cap and market_cap > MAX_MARKET_CAP:
+        score -= 0.25 if is_cold_regime(regime) else 0.45
 
     score += regime.get("score_adjust", 0)
 
@@ -1551,8 +1603,10 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: already sent this cycle")
         return False
 
-    if result["gain"] < ALERT_MIN_GAIN:
-        print(f"[NO ALERT] {ticker}: gain below floor")
+    alert_gain_floor = dynamic_alert_min_gain(result)
+    elite_exception = result["score"] >= 8.2 and "RUNNER" in result["bias"]
+    if result["gain"] < alert_gain_floor and not elite_exception:
+        print(f"[NO ALERT] {ticker}: gain {result['gain']:.1f}% below alert floor {alert_gain_floor:.0f}%")
         return False
 
     if result["score"] < ALERT_MIN_SCORE:
@@ -1694,13 +1748,14 @@ def analyze_candidate(candidate, regime):
     float_shares = profile.get("float", 0)
 
     # HARD FAST PASS — no candles/news/sec before this.
-    passed, skip_reasons = fast_pass_filter(
+    passed, skip_reasons, fast_warnings = fast_pass_filter(
         ticker=ticker,
         price=price,
         gain=gain,
         volume=volume,
         market_cap=market_cap,
         float_shares=float_shares,
+        regime=regime,
     )
 
     if not passed:
@@ -1748,6 +1803,9 @@ def analyze_candidate(candidate, regime):
 
     reasons.extend(entry_reasons)
 
+    # Soft fast-pass warnings become awareness, not hard skips.
+    risks.extend(fast_warnings)
+
     # Risk stack
     if news_score <= 2:
         risks.append(news.get("explain", "Weak/no catalyst"))
@@ -1777,6 +1835,8 @@ def analyze_candidate(candidate, regime):
         exhaustion=exhaustion,
         sec=sec,
         regime=regime,
+        float_shares=float_shares,
+        market_cap=market_cap,
     )
 
     bias = build_bias(
