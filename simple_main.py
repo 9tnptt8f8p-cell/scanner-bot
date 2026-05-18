@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.6 FIXED — low-float boost + leader discovery + stable scoring"
+BOOT_MARKER = "elite scanner v33 — leader-only + catalyst + active dilution + 27% alert floor"
 
 # ============================================================
 # ENV
@@ -47,10 +47,10 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 SCAN_MIN_GAIN = 8.0                  # scanner can view wider universe internally
 PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
 OPEN_SCAN_MIN_GAIN = 8.0
-HARD_MIN_GAIN = 25.0                 # regular-hours hard floor
-PREMARKET_HARD_MIN_GAIN = 18.0       # fixed: do not kill 18-24% premarket leaders
-ALERT_MIN_GAIN = 25.0                # alerts still prefer real 25%+ movers
-PREMARKET_ALERT_MIN_GAIN = 20.0      # but allow elite premarket runners slightly early
+HARD_MIN_GAIN = 8.0                 # regular-hours hard floor
+PREMARKET_HARD_MIN_GAIN = 8.0       # fixed: do not kill 18-24% premarket leaders
+ALERT_MIN_GAIN = 27.0                # alerts still prefer real 25%+ movers
+PREMARKET_ALERT_MIN_GAIN = 27.0      # but allow elite premarket runners slightly early
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
 MIN_FAST_VOLUME = 75_000             # fixed: premarket liquidity can be thinner
@@ -60,10 +60,36 @@ MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
 EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 
+
+# ============================================================
+# v33 LEADER-ONLY RULES
+# ============================================================
+DISCOVERY_MIN_GAIN = 8.0       # internal only — lets the bot see emerging leaders
+WATCH_MIN_GAIN = 15.0          # internal watch/rank zone
+RUNNER_MIN_GAIN = 27.0         # hard public alert floor
+ALERT_MIN_GAIN = 27.0          # never alert under this, no exceptions
+
+LEADER_50_GAIN = 50.0
+LEADER_75_GAIN = 75.0
+LEADER_100_GAIN = 100.0
+
+# Priority hot ticker lane — always check, never force-alert.
+PRIORITY_TICKERS = {
+    "SBFM",
+    "GOVX",
+    "VRAX",
+    "AIM",
+    "CREG",
+    "CISS",
+}
+
+PRIORITY_MIN_GAIN = 5.0
+PRIORITY_MIN_VOLUME = 50_000
+
 # Alerting
 ALERT_MIN_SCORE = 7.0
 MAX_GAINERS = 120
-MAX_ALERTS_PER_CYCLE = 3
+MAX_ALERTS_PER_CYCLE = 4
 SCAN_SLEEP = 90
 
 ALERT_COOLDOWN_SECONDS = 900
@@ -480,7 +506,10 @@ def get_yahoo_predefined_gainers():
     try:
         r = http_get(url, params=params, timeout=8)
         data = r.json()
-        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        result = data.get("finance", {}).get("result") or []
+        if not result:
+            return []
+        quotes = result[0].get("quotes", [])
         results = [parse_yahoo_quote_item(q, source="Yahoo predefined day_gainers") for q in quotes]
         results = [x for x in results if x.get("ticker")]
         print(f"[GAINERS] Yahoo predefined returned {len(results)} names")
@@ -491,7 +520,7 @@ def get_yahoo_predefined_gainers():
 
 
 def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250):
-    # This is the important v32.6 fix: ask Yahoo for the true sorted percent-gainer universe,
+    # This is the important v32.5 fix: ask Yahoo for the true sorted percent-gainer universe,
     # not only the canned day_gainers list that sometimes misses small-cap leaders.
     operands = [
         {"operator": "EQ", "operands": ["region", "us"]},
@@ -532,7 +561,11 @@ def get_yahoo_custom_percent_gainers():
             payload = yahoo_screener_payload(min_gain=min_gain, min_volume=min_volume, size=250)
             r = http_post(url, payload=payload, timeout=8)
             data = r.json()
-            quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+            result = data.get("finance", {}).get("result") or []
+            if not result:
+                print(f"[GAINERS] {label} returned 0 names")
+                continue
+            quotes = result[0].get("quotes", [])
             results = [parse_yahoo_quote_item(q, source=label) for q in quotes]
             results = [x for x in results if x.get("ticker")]
             print(f"[GAINERS] {label} returned {len(results)} names")
@@ -592,6 +625,7 @@ def get_nasdaq_gainers():
                     "ticker": ticker,
                     "price": price,
                     "gain": gain,
+        "gain_label": gain_label,
                     "volume": volume,
                     "source": "Nasdaq Gainers",
                 })
@@ -603,6 +637,43 @@ def get_nasdaq_gainers():
         print(f"[GAINERS ERROR] Nasdaq: {e}")
         return []
 
+
+
+def get_priority_candidates():
+    """Always check user priority hot tickers. This does not force alerts."""
+    results = []
+
+    for ticker in sorted(PRIORITY_TICKERS):
+        ticker = ticker.upper().strip()
+        if not ticker or is_bad_ticker(ticker):
+            continue
+
+        try:
+            quote = get_finnhub_quote(ticker)
+            price = safe_float(quote.get("price"))
+            gain = safe_float(quote.get("gain"))
+            volume = safe_int(quote.get("volume"))
+
+            if price <= 0:
+                print(f"[PRIORITY SKIP] {ticker}: no live quote")
+                continue
+
+            print(f"[PRIORITY] {ticker}: {fmt_money(price)} +{gain:.1f}%")
+
+            results.append({
+                "ticker": ticker,
+                "price": price,
+                "gain": gain,
+                "volume": volume,
+                "market_cap": 0,
+                "source": "Priority Hot Ticker",
+                "priority": True,
+            })
+
+        except Exception as e:
+            print(f"[PRIORITY ERROR] {ticker}: {e}")
+
+    return results
 
 def get_candidates():
     sources = []
@@ -1258,6 +1329,15 @@ def get_best_news(ticker):
 # SEC / DILUTION ENGINE
 # ============================================================
 
+
+ACTIVE_DILUTION_TERMS = [
+    "at-the-market", "atm offering", "equity distribution agreement",
+    "sales agreement", "registered direct", "public offering",
+    "private placement", "securities purchase agreement",
+    "warrant", "warrants", "convertible", "convertible note",
+    "resale prospectus", "selling stockholder", "selling shareholder",
+]
+
 DILUTION_TERMS = [
     "at-the-market", "atm offering", "equity distribution agreement",
     "sales agreement", "registered direct", "public offering",
@@ -1594,10 +1674,7 @@ def detect_halt_risk(price, gain, float_shares, candles):
 
 
 # ============================================================
-# LOW FLOAT ENGINE — v32.6
-# Purpose:
-# Low floats are often the best momentum runners, but they also carry halt/chop risk.
-# This engine promotes clean low-float names without blindly alerting garbage.
+# LOW FLOAT ENGINE — v33
 # ============================================================
 
 LOW_FLOAT_TINY = 5_000_000
@@ -1612,55 +1689,66 @@ def classify_float(float_shares):
     if f <= 0:
         return {
             "tier": "UNKNOWN",
-            "score_boost": 0.0,
-            "label": "Float unknown",
-            "alert_tag": "⚠️ Float unknown",
-            "risk": "Profile/float data missing",
+            "boost": 0.0,
+            "label": "⚠️ Float unknown",
+            "risk": "Float/profile data missing",
         }
 
     if f <= LOW_FLOAT_TINY:
         return {
             "tier": "TINY",
-            "score_boost": 0.75,
-            "label": f"TINY FLOAT {fmt_big_num(f)}",
-            "alert_tag": f"🔥 TINY FLOAT {fmt_big_num(f)}",
-            "risk": "Tiny float — can move fast, halt risk higher",
+            "boost": 0.85,
+            "label": f"🔥 TINY FLOAT {fmt_big_num(f)}",
+            "risk": "Tiny float — explosive but halt/chop risk higher",
         }
 
     if f <= LOW_FLOAT_ELITE:
         return {
             "tier": "ELITE",
-            "score_boost": 0.55,
-            "label": f"ELITE LOW FLOAT {fmt_big_num(f)}",
-            "alert_tag": f"🔥 LOW FLOAT {fmt_big_num(f)}",
+            "boost": 0.65,
+            "label": f"🔥 LOW FLOAT {fmt_big_num(f)}",
             "risk": "Low float momentum name — size carefully",
         }
 
     if f <= LOW_FLOAT_GOOD:
         return {
             "tier": "GOOD",
-            "score_boost": 0.35,
-            "label": f"LOW FLOAT {fmt_big_num(f)}",
-            "alert_tag": f"🟢 LOW FLOAT {fmt_big_num(f)}",
+            "boost": 0.40,
+            "label": f"🟢 LOW FLOAT {fmt_big_num(f)}",
             "risk": "Low float can accelerate quickly",
         }
 
     if f <= LOW_FLOAT_ACCEPTABLE:
         return {
             "tier": "ACCEPTABLE",
-            "score_boost": 0.15,
-            "label": f"DECENT FLOAT {fmt_big_num(f)}",
-            "alert_tag": f"🟡 Float {fmt_big_num(f)}",
+            "boost": 0.15,
+            "label": f"🟡 Float {fmt_big_num(f)}",
             "risk": "",
         }
 
     return {
         "tier": "HIGH",
-        "score_boost": -0.15,
-        "label": f"HIGHER FLOAT {fmt_big_num(f)}",
-        "alert_tag": f"Float {fmt_big_num(f)}",
-        "risk": "Higher float — usually needs stronger volume",
+        "boost": -0.10,
+        "label": f"Float {fmt_big_num(f)}",
+        "risk": "Higher float — needs stronger volume to lead",
     }
+
+
+def leader_gain_boost(gain):
+    gain = safe_float(gain)
+    if gain >= LEADER_100_GAIN:
+        return 1.25, "💯 100%+ day leader"
+    if gain >= LEADER_75_GAIN:
+        return 0.95, "🔥 75%+ day leader"
+    if gain >= LEADER_50_GAIN:
+        return 0.70, "🔥 50%+ day leader"
+    if gain >= RUNNER_MIN_GAIN:
+        return 0.35, "🟢 27%+ momentum leader"
+    return 0.0, ""
+
+
+def is_alert_eligible_gain(gain):
+    return safe_float(gain) >= RUNNER_MIN_GAIN
 
 
 # ============================================================
@@ -1672,8 +1760,10 @@ def score_structure(structure):
     reasons = []
     risks = []
 
-    if float_info.get("alert_tag"):
-        reasons.append(float_info.get("alert_tag"))
+    if gain_label:
+        reasons.append(gain_label)
+    if float_info.get("label"):
+        reasons.append(float_info.get("label"))
     if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
         risks.append(float_info.get("risk"))
 
@@ -1763,11 +1853,6 @@ def score_entry_quality(structure, coil, second_leg, exhaustion):
     score = 5.0
     reasons = []
     risks = []
-
-    if float_info.get("alert_tag"):
-        reasons.append(float_info.get("alert_tag"))
-    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
-        risks.append(float_info.get("risk"))
 
     if bool(get_struct(structure, "above_vwap", False)):
         score += 1.5
@@ -2072,9 +2157,6 @@ def build_alert(result):
     if result["halt_risk"]["label"]:
         awareness.append(result["halt_risk"]["label"])
 
-    if result.get("float_info", {}).get("risk"):
-        awareness.append(result.get("float_info", {}).get("risk"))
-
     if result["sec"].get("has_risk"):
         awareness.append(result["sec"].get("label"))
 
@@ -2131,6 +2213,8 @@ def analyze_candidate(candidate, regime):
     if not passed:
         return None
 
+    gain_boost, gain_label = leader_gain_boost(gain)
+
     print(f"[PIPELINE] {ticker}: passed fast filter — running deep scan")
 
     candles = get_candles(ticker)
@@ -2171,11 +2255,6 @@ def analyze_candidate(candidate, regime):
 
     reasons = []
     risks = []
-
-    if float_info.get("alert_tag"):
-        reasons.append(float_info.get("alert_tag"))
-    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
-        risks.append(float_info.get("risk"))
 
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
@@ -2227,8 +2306,10 @@ def analyze_candidate(candidate, regime):
         market_cap=market_cap,
     )
 
-    # Low-float boost: promotes clean low-float runners without forcing bad charts.
-    score += float_info.get(\"score_boost\", 0)
+    # v33 leader boosts: high % day and low float matter, but do not override bad structure.
+    score += gain_boost
+    if structure_score >= 4.5 and entry_score >= 5.5:
+        score += float_info.get("boost", 0)
     score = clamp(score)
 
     bias = build_bias(
@@ -2242,6 +2323,16 @@ def analyze_candidate(candidate, regime):
         exhaustion=exhaustion,
         coil=coil,
     )
+
+    # v33 bias override: leader-only, cleaner RUNNER/WATCH/AVOID taxonomy.
+    if score >= 8.0 and gain >= RUNNER_MIN_GAIN:
+        bias = "🟢 RUNNER"
+    elif score >= 6.0 and gain >= WATCH_MIN_GAIN:
+        bias = "👀 WATCH"
+    elif score >= 4.0:
+        bias = "🤔 NEUTRAL"
+    else:
+        bias = "⚠️ AVOID"
 
     phase = build_phase(structure, coil, second_leg, exhaustion, decay)
     entry = build_entry(bias, structure, coil, second_leg, entry_score)
@@ -2311,7 +2402,7 @@ def print_top_ranked(results):
         return
 
     top = " | ".join(
-        f"{r['ticker']} {r['score']:.1f}/10 {r['bias'].replace('🟢 ', '').replace('👀 ', '').replace('⚠️ ', '')} +{r['gain']:.1f}%"
+        f"{r['ticker']} {r['score']:.1f}/10 {r['bias'].replace('🟢 ', '').replace('👀 ', '').replace('⚠️ ', '')} +{r['gain']:.1f}% {r.get('float_info', {}).get('label', '')}"
         for r in results[:5]
     )
     print(f"[SCAN] Top ranked: {top}")
