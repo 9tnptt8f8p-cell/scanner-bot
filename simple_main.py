@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.14 — alert safety normalizer fixed"
+BOOT_MARKER = "elite scanner v33.15 — news cleanup only"
 
 # ============================================================
 # ENV
@@ -1430,13 +1430,34 @@ def get_structure(candles, ticker):
 # ============================================================
 
 JUNK_HEADLINE_PHRASES = [
+    # Aggregator / mover-roundup junk
     "stocks moving", "stock is moving", "why shares", "why is",
     "top gainers", "market movers", "most active", "gap-ups and gap-downs",
     "driving market activity", "shares are trading higher",
+    "benzinga examines", "what's going on", "today's session",
+
+    # Law-firm / investigation junk
     "deadline", "law firm", "investigation", "shareholder alert",
     "class action", "reminds investors", "notice to investors",
-    "benzinga examines", "what's going on", "today's session",
+    "johnson fistel", "levi & korsinsky", "pomerantz", "rosen law",
+
+    # v33.15: quote-card / webpage boilerplate junk seen in live logs
+    "get top stock picks", "trading disclosure", "coinbase",
+    "benchmark is", "s&p 500", "^gspc", "ytd", "1-year", "3-year",
+    "all news earnings", "earnings calls press releases sec filings",
+    "items per page", "25 per page", "50 per page", "75 per page", "100 per page",
+    "as of ", "trade ", "return ",
 ]
+
+STALE_NEWS_MARKERS = [
+    "mo ago", "yr ago", "year ago", "years ago",
+    "sep ", "sept ", "oct ", "nov ", "dec 2025", "2025",
+]
+
+QUOTE_CARD_RE = re.compile(
+    r"\b[A-Z]{1,5}\b.*?[-+]?\d+(?:\.\d+)?%.*?(as of|ytd|1-year|3-year|get top stock picks)",
+    re.IGNORECASE,
+)
 
 NEGATIVE_HEADLINE_PHRASES = [
     "public offering", "registered direct", "private placement",
@@ -1490,6 +1511,45 @@ COMMON_WORD_TICKERS = {
 }
 
 
+def is_junk_news_text(headline, ticker=None):
+    """
+    v33.15 news-only cleanup.
+    Blocks quote cards, stale snippets, law-firm pages, ETF/page boilerplate,
+    and scraped webpage fragments before they can become catalysts.
+    """
+    raw = clean_text(headline)
+    if not raw:
+        return True
+
+    h = f" {raw.lower()} "
+
+    if any(p in h for p in JUNK_HEADLINE_PHRASES):
+        return True
+
+    # Old news should not be treated as a fresh catalyst for a live scanner.
+    if any(p in h for p in STALE_NEWS_MARKERS):
+        return True
+
+    # Yahoo/PR pages often expose quote widgets that look like headlines.
+    if QUOTE_CARD_RE.search(raw):
+        return True
+
+    # Reject obvious performance-stat snippets.
+    if re.search(r"\b(YTD|1-Year|3-Year|S&P 500|\^GSPC)\b", raw, flags=re.IGNORECASE):
+        return True
+
+    # Reject sentences that are mostly navigation/boilerplate.
+    boiler_count = sum(1 for p in ["news", "earnings", "press releases", "sec filings", "quote", "chart", "watchlist"] if p in h)
+    if boiler_count >= 3:
+        return True
+
+    # False positive seen live: medical plural GCTs treated as ticker GCTS.
+    if ticker and ticker.upper() == "GCTS" and "gcts können" in h:
+        return True
+
+    return False
+
+
 def strict_ticker_in_text(ticker, text):
     if not ticker or not text:
         return False
@@ -1529,6 +1589,16 @@ def classify_news(headline, ticker=None):
             "label": "❌ NO CONFIRMED NEWS",
             "explain": "No fresh catalyst found",
             "headline": "",
+        }
+
+    if is_junk_news_text(h_raw, ticker):
+        return {
+            "score": 0,
+            "quality": "JUNK",
+            "category": "Junk / Webpage Snippet",
+            "label": "🚫 JUNK NEWS",
+            "explain": "Webpage/quote-card/old-news snippet — not a real catalyst",
+            "headline": h_raw,
         }
 
     if any(p in h for p in NEGATIVE_HEADLINE_PHRASES):
@@ -1598,6 +1668,10 @@ def extract_headlines_from_soup(soup, ticker):
         # is actually present. This prevents false catalysts like RAMP receiving
         # unrelated GCTS / Dust / Denarius headlines scraped from generic pages.
         if ticker and not strict_ticker_in_text(ticker, chunk):
+            continue
+
+        # v33.15: filter quote cards, stale snippets, law-firm pages, and boilerplate before ranking.
+        if is_junk_news_text(chunk, ticker):
             continue
 
         headlines.append(chunk)
