@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.4 — clean labels no leader/entry score display"
+BOOT_MARKER = "elite scanner v33.5 — leadership wiring fixed clean labels"
 
 # ============================================================
 # ENV
@@ -2468,6 +2468,10 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    if "MARKET LEADER — EXTENDED" in result["bias"]:
+        return "🔥 MARKET LEADER — EXTENDED"
+    if "MARKET LEADER" in result["bias"]:
+        return "🔥 MARKET LEADER"
     if "LEADER / EXTENDED" in result["bias"]:
         return "🔥 MARKET LEADER — EXTENDED"
     if "MARKET LEADER" in result["bias"]:
