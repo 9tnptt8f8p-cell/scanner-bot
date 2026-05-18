@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.9 — scoring helper signature fix"
+BOOT_MARKER = "elite scanner v33.10 — self-contained analyzer working build"
 
 # ============================================================
 # ENV
@@ -2589,113 +2589,189 @@ def build_alert(result):
 
 
 # ============================================================
-# SAFE SCORING WRAPPERS — v33.9
-# Keeps analyze_candidate compatible with older helper signatures.
+# SELF-CONTAINED SCORING HELPERS — v33.10
+# No dependency on old score_entry / score_risk / score_candidate / build_phase.
 # ============================================================
 
-def safe_score_structure(structure, coil=None, second_leg=None):
-    try:
-        return score_structure(structure, coil, second_leg)
-    except TypeError:
-        try:
-            return score_structure(structure)
-        except Exception as e:
-            print(f"[SCORE ERROR] structure: {e}")
-            return 0.0, []
-    except Exception as e:
-        print(f"[SCORE ERROR] structure: {e}")
-        return 0.0, []
+def calc_structure_score_v3310(structure, coil, second_leg):
+    score = 0.0
+    reasons = []
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    bad_structure = bool(get_struct(structure, "bad_structure", False))
+    big_upper_wick = bool(get_struct(structure, "big_upper_wick", False))
+
+    if above_vwap:
+        score += 2.0
+        reasons.append("above VWAP")
+    if higher_lows:
+        score += 1.5
+        reasons.append("higher lows")
+    if breakout:
+        score += 1.5
+        reasons.append("breakout/holding high")
+    if near_high:
+        score += 1.0
+        reasons.append("near highs")
+    if coil and coil.get("detected"):
+        score += 1.5
+        reasons.append(coil.get("label") or "coil")
+    if second_leg and second_leg.get("detected"):
+        score += 1.5
+        reasons.append(second_leg.get("label") or "second leg")
+
+    if bad_structure:
+        score -= 1.5
+    if big_upper_wick:
+        score -= 0.75
+
+    return clamp(score), dedupe(reasons)
 
 
-def safe_score_volume(volume, structure=None):
-    try:
-        return score_volume(volume, structure)
-    except TypeError:
-        try:
-            return score_volume(volume)
-        except Exception as e:
-            print(f"[SCORE ERROR] volume: {e}")
-            return 0.0, []
-    except Exception as e:
-        print(f"[SCORE ERROR] volume: {e}")
-        return 0.0, []
+def calc_volume_score_v3310(volume):
+    volume = safe_int(volume)
+    reasons = []
+    score = 0.0
+
+    if volume >= 250_000_000:
+        score = 10
+        reasons.append("250M+ volume")
+    elif volume >= 100_000_000:
+        score = 9
+        reasons.append("100M+ volume")
+    elif volume >= 50_000_000:
+        score = 8
+        reasons.append("50M+ volume")
+    elif volume >= 20_000_000:
+        score = 7
+        reasons.append("20M+ volume")
+    elif volume >= 5_000_000:
+        score = 6
+        reasons.append("5M+ volume")
+    elif volume >= 1_000_000:
+        score = 5
+        reasons.append("1M+ volume")
+    elif volume >= MIN_DEEP_VOLUME:
+        score = 3.5
+        reasons.append("liquid enough")
+    else:
+        score = 1.5
+
+    return clamp(score), reasons
 
 
-def safe_score_entry(structure, coil=None, second_leg=None, exhaustion=None, decay=None):
-    try:
-        return score_entry(structure, coil, second_leg, exhaustion, decay)
-    except TypeError:
-        try:
-            return score_entry(structure, coil, second_leg)
-        except TypeError:
-            try:
-                return score_entry(structure)
-            except Exception as e:
-                print(f"[SCORE ERROR] entry: {e}")
-                return 0.0, []
-        except Exception as e:
-            print(f"[SCORE ERROR] entry: {e}")
-            return 0.0, []
-    except Exception as e:
-        print(f"[SCORE ERROR] entry: {e}")
-        return 0.0, []
+def calc_entry_score_v3310(structure, coil, second_leg, exhaustion, decay):
+    score = 3.0
+    reasons = []
+
+    if bool(get_struct(structure, "above_vwap", False)):
+        score += 1.5
+    if bool(get_struct(structure, "higher_lows", False)):
+        score += 1.25
+    if bool(get_struct(structure, "near_high", False)):
+        score += 0.75
+    if coil and coil.get("detected"):
+        score += 1.25
+        reasons.append("coil setup")
+    if second_leg and second_leg.get("detected"):
+        score += 1.25
+        reasons.append("second-leg setup")
+
+    if exhaustion and exhaustion.get("detected"):
+        score -= 2.0
+        if exhaustion.get("risk"):
+            reasons.append(exhaustion.get("risk"))
+    if decay and decay.get("detected"):
+        score -= 1.5
+
+    return clamp(score), dedupe(reasons)
 
 
-def safe_score_risk(decay=None, exhaustion=None, sec=None, halt_risk=None, fast_warnings=None):
-    try:
-        return score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
-    except TypeError:
-        try:
-            return score_risk(decay, exhaustion, sec)
-        except TypeError:
-            try:
-                return score_risk(decay)
-            except Exception as e:
-                print(f"[SCORE ERROR] risk: {e}")
-                return 0.0, []
-        except Exception as e:
-            print(f"[SCORE ERROR] risk: {e}")
-            return 0.0, []
-    except Exception as e:
-        print(f"[SCORE ERROR] risk: {e}")
-        return 0.0, []
+def calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings=None):
+    penalty = 0.0
+    reasons = []
+
+    fast_warnings = fast_warnings or []
+
+    if decay and decay.get("detected"):
+        penalty += safe_float(decay.get("penalty", 1.0))
+        reasons.extend(decay.get("risks", []))
+
+    if exhaustion and exhaustion.get("detected"):
+        penalty += safe_float(exhaustion.get("penalty", 1.0))
+        if exhaustion.get("risk"):
+            reasons.append(exhaustion.get("risk"))
+
+    sec_label = sec.get("label", "") if isinstance(sec, dict) else ""
+    sec_severity = sec.get("severity", "") if isinstance(sec, dict) else ""
+    if sec_severity == "HIGH":
+        penalty += 1.0
+    elif sec_severity == "MEDIUM":
+        penalty += 0.5
+
+    halt_label = halt_risk.get("label", "") if isinstance(halt_risk, dict) else ""
+    if halt_label:
+        penalty += 0.35
+        reasons.append(halt_label)
+
+    reasons.extend(fast_warnings)
+    return penalty, dedupe(reasons)
 
 
-def safe_score_candidate_v33(structure_score, volume_score, entry_score, news_score, risk_penalty, regime=None):
-    try:
-        return score_candidate(
-            structure_score=structure_score,
-            volume_score=volume_score,
-            entry_score=entry_score,
-            news_score=news_score,
-            risk_penalty=risk_penalty,
-            regime=regime,
-        )
-    except TypeError:
-        try:
-            return score_candidate(structure_score, volume_score, entry_score, news_score, risk_penalty, regime)
-        except TypeError:
-            # Fallback direct v33 formula.
-            base = (
-                safe_float(structure_score) * 0.35
-                + safe_float(volume_score) * 0.25
-                + safe_float(entry_score) * 0.25
-                + safe_float(news_score) * 0.15
-            )
-            base -= safe_float(risk_penalty) * 0.25
-            if regime:
-                base += safe_float(regime.get("score_adjust", 0))
-            return clamp(base)
-    except Exception as e:
-        print(f"[SCORE ERROR] candidate: {e}")
-        base = (
-            safe_float(structure_score) * 0.35
-            + safe_float(volume_score) * 0.25
-            + safe_float(entry_score) * 0.25
-            + safe_float(news_score) * 0.15
-        )
-        base -= safe_float(risk_penalty) * 0.25
-        return clamp(base)
+def calc_total_score_v3310(structure_score, volume_score, entry_score, news_score, risk_penalty, gain, float_info, regime=None):
+    score = (
+        safe_float(structure_score) * 0.35
+        + safe_float(volume_score) * 0.25
+        + safe_float(entry_score) * 0.25
+        + safe_float(news_score) * 0.15
+    )
+
+    # Percent leader boost.
+    gain_boost, _ = leader_gain_boost(gain)
+    score += gain_boost
+
+    # Low float boost only if the chart is not totally broken.
+    if safe_float(structure_score) >= 3.0 and safe_float(entry_score) >= 3.0:
+        score += safe_float((float_info or {}).get("boost", 0))
+
+    score -= safe_float(risk_penalty) * 0.20
+
+    if regime:
+        score += safe_float(regime.get("score_adjust", 0))
+
+    return clamp(score)
+
+
+def build_phase_v3310(structure, coil, second_leg, exhaustion, decay):
+    if exhaustion and exhaustion.get("detected"):
+        return "⚠️ EXTENDED"
+    if decay and decay.get("detected"):
+        return "⚠️ FADING"
+    if second_leg and second_leg.get("detected"):
+        return "🔥 SECOND LEG"
+    if coil and coil.get("detected"):
+        return "🌀 COIL"
+    if bool(get_struct(structure, "above_vwap", False)) and bool(get_struct(structure, "near_high", False)):
+        return "🟢 IGNITION / HOLDING"
+    if bool(get_struct(structure, "above_vwap", False)):
+        return "🟢 ABOVE VWAP"
+    return "👀 RECLAIM WATCH"
+
+
+def build_entry_v3310(bias, structure, coil, second_leg, entry_score):
+    if "EXTENDED" in bias:
+        return "Wait for reset / VWAP hold"
+    if second_leg and second_leg.get("detected"):
+        return "Second-leg continuation only if holding highs"
+    if coil and coil.get("detected"):
+        return "Coil breakout / VWAP hold"
+    if bool(get_struct(structure, "above_vwap", False)):
+        return "VWAP hold / higher-low entry"
+    return "No clean entry yet"
+
 
 
 def analyze_candidate(candidate, regime):
@@ -2703,7 +2779,6 @@ def analyze_candidate(candidate, regime):
     if not ticker or is_bad_ticker(ticker):
         return None
 
-    # Define core variables FIRST. This fixes all old "gain is not defined" branches.
     price = safe_float(candidate.get("price"))
     gain = safe_float(candidate.get("gain"))
     volume = safe_int(candidate.get("volume"))
@@ -2715,7 +2790,6 @@ def analyze_candidate(candidate, regime):
     live = get_finnhub_quote(ticker)
     live_price = safe_float(live.get("price"))
     live_gain = safe_float(live.get("gain"))
-
     if live_price > 0:
         price = live_price
     if live_gain > 0:
@@ -2724,9 +2798,6 @@ def analyze_candidate(candidate, regime):
     profile = get_profile(ticker)
     float_shares = safe_int(profile.get("float"))
     market_cap = safe_int(profile.get("market_cap"))
-
-    if not volume:
-        volume = safe_int(candidate.get("volume"))
 
     ok, fast_reasons, fast_warnings = fast_pass_filter(
         ticker=ticker,
@@ -2763,19 +2834,21 @@ def analyze_candidate(candidate, regime):
     news_score = safe_float(news.get("score", 0))
     sec = check_sec_filings(ticker)
 
-    structure_score, structure_reasons = safe_score_structure(structure, coil, second_leg)
-    volume_score, volume_reasons = safe_score_volume(volume, structure)
-    entry_score, entry_reasons = safe_score_entry(structure, coil, second_leg, exhaustion, decay)
-    risk_penalty, risk_reasons = safe_score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
+    structure_score, structure_reasons = calc_structure_score_v3310(structure, coil, second_leg)
+    volume_score, volume_reasons = calc_volume_score_v3310(volume)
+    entry_score, entry_reasons = calc_entry_score_v3310(structure, coil, second_leg, exhaustion, decay)
+    risk_penalty, risk_reasons = calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings)
 
-    score = safe_score_candidate_v33(structure_score, volume_score, entry_score, news_score, risk_penalty, regime)
-
-    # High % day and low float matter, but do not override broken structure completely.
-    gain_boost, gain_label = leader_gain_boost(gain)
-    score += gain_boost
-    if structure_score >= 4.0 and entry_score >= 4.0:
-        score += safe_float(float_info.get("boost", 0))
-    score = clamp(score)
+    score = calc_total_score_v3310(
+        structure_score=structure_score,
+        volume_score=volume_score,
+        entry_score=entry_score,
+        news_score=news_score,
+        risk_penalty=risk_penalty,
+        gain=gain,
+        float_info=float_info,
+        regime=regime,
+    )
 
     bias = simple_market_label(
         gain=gain,
@@ -2788,21 +2861,13 @@ def analyze_candidate(candidate, regime):
         decay=decay,
     )
 
-    phase = build_phase(structure, coil, second_leg, exhaustion, decay)
-    entry = build_entry(bias, structure, coil, second_leg, entry_score)
+    phase = build_phase_v3310(structure, coil, second_leg, exhaustion, decay)
+    entry = build_entry_v3310(bias, structure, coil, second_leg, entry_score)
 
     reasons = []
     risks = []
 
-    reasons.extend(simple_leader_reasons(
-        gain=gain,
-        float_info=float_info,
-        volume=volume,
-        news_score=news_score,
-    ))
-    if gain_label:
-        reasons.append(gain_label)
-
+    reasons.extend(simple_leader_reasons(gain, float_info, volume, news_score))
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
     reasons.extend(entry_reasons)
