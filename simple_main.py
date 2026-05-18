@@ -2454,9 +2454,15 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: gain {result['gain']:.1f}% below hard alert floor {alert_gain_floor:.0f}%")
         return False
 
-    if result["score"] < ALERT_MIN_SCORE:
-        print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
-        return False
+   true_leader_exception = (
+    result.get("gain", 0) >= 50
+    and 0 < result.get("float", 0) <= 25_000_000
+    and result.get("score", 0) >= 6.5
+)
+
+if result["score"] < ALERT_MIN_SCORE and not true_leader_exception:
+    print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
+    return False
 
     if result["bias"] == "⚠️ AVOID":
         print(f"[NO ALERT] {ticker}: avoid bias")
