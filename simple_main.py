@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.3 — leadership score separated from entry risk"
+BOOT_MARKER = "elite scanner v33.4 — clean labels no leader/entry score display"
 
 # ============================================================
 # ENV
@@ -2510,7 +2510,7 @@ def main_risk_sentence(result):
 def build_alert(result):
     title = alert_title(result)
 
-    header = f"{result['ticker']} | {result['score']:.1f}/10 | L{result.get('leadership_score', 0):.1f} E{result.get('entry_score', 0):.1f} | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
+    header = f"{result['ticker']} | {result['score']:.1f}/10 | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
     if SHOW_FLOAT and result.get("float"):
         header += f" | {result.get('float_info', {}).get('label') or ('Float ' + fmt_big_num(result['float']))}"
 
@@ -2520,6 +2520,7 @@ def build_alert(result):
         header,
         "",
         f"Catalyst: {result['news_score']}/10 {result['news_label']} — {result['news_explain']}",
+        f"State: {result['bias']}",
         f"Phase: {result['phase']}",
         "",
         "Why:",
