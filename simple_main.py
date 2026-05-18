@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.2 FIXED — structure signature + clean news + UTC"
+BOOT_MARKER = "elite scanner rebuild v32.3 FIXED — calibrated scoring + stricter common-word news"
 
 # ============================================================
 # ENV
@@ -881,11 +881,39 @@ WEAK_NEWS_PATTERNS = {
     "Product": ["launches", "unveils", "introduces"],
 }
 
+# Some tickers are normal English words. Do not treat lowercase prose like
+# "ramp up revenue" or "fly higher" as ticker-specific news.
+COMMON_WORD_TICKERS = {
+    "RAMP", "FLY", "OPEN", "ROOT", "REAL", "PLAY", "LOVE", "LIFE",
+    "EYES", "BODY", "TREE", "TRUE", "HUGE", "VERY", "NICE", "GOOD",
+}
+
 
 def strict_ticker_in_text(ticker, text):
     if not ticker or not text:
         return False
-    return re.search(rf"\b{re.escape(ticker.upper())}\b", text.upper()) is not None
+
+    t = ticker.upper().strip()
+    raw = str(text)
+
+    # Strong ticker formats first.
+    strong_patterns = [
+        rf"\${re.escape(t)}\b",
+        rf"\({re.escape(t)}\)",
+        rf"\bNASDAQ[:/ ]+{re.escape(t)}\b",
+        rf"\bNYSE[:/ ]+{re.escape(t)}\b",
+        rf"\bAMEX[:/ ]+{re.escape(t)}\b",
+        rf"\bNYSEAMERICAN[:/ ]+{re.escape(t)}\b",
+    ]
+    if any(re.search(p, raw) for p in strong_patterns):
+        return True
+
+    # For common-word tickers, require exact uppercase symbol in the original text.
+    if t in COMMON_WORD_TICKERS:
+        return re.search(rf"\b{re.escape(t)}\b", raw) is not None
+
+    # For normal tickers, case-insensitive word match is acceptable.
+    return re.search(rf"\b{re.escape(t)}\b", raw, flags=re.IGNORECASE) is not None
 
 
 def classify_news(headline, ticker=None):
@@ -1399,9 +1427,12 @@ def score_structure(structure):
     near_high = bool(get_struct(structure, "near_high", False))
     bad_structure = bool(get_struct(structure, "bad_structure", False))
     big_upper_wick = bool(get_struct(structure, "big_upper_wick", False))
+    raw_coil = bool(get_struct(structure, "coil", False) or get_struct(structure, "tightening_range", False))
 
+    # V32.3 calibration: structure should not be nuked to 1-2 when a name is
+    # liquid, coiling, and not clearly failing. The old version was too bearish.
     if above_vwap:
-        score += 2.5
+        score += 3.0
         reasons.append("Above VWAP")
     else:
         risks.append("Below VWAP / reclaim needed")
@@ -1418,12 +1449,21 @@ def score_structure(structure):
         score += 1.5
         reasons.append("Holding near highs")
 
-    if bad_structure:
+    if raw_coil:
+        score += 1.0
+        reasons.append("Tightening / coil structure")
+
+    # Only punish bad_structure hard if price is also below VWAP. This prevents
+    # contradictory "coil + strong entry" names from being scored as dead fades.
+    if bad_structure and not above_vwap:
         score -= 2.0
         risks.append("Bad structure / failed momentum")
+    elif bad_structure:
+        score -= 0.75
+        risks.append("Structure warning / needs confirmation")
 
     if big_upper_wick:
-        score -= 1.0
+        score -= 0.75
         risks.append("Big upper wick / possible trap")
 
     return clamp(score), reasons, risks
@@ -1494,23 +1534,29 @@ def score_entry_quality(structure, coil, second_leg, exhaustion):
     return clamp(score), reasons, risks
 
 
-def build_bias(score, structure_score, entry_score, news, risks, second_leg, decay, exhaustion):
+def build_bias(score, structure_score, entry_score, news, risks, second_leg, decay, exhaustion, coil=None):
     risk_text = " ".join(risks).lower()
+    coil = coil or {"detected": False}
+    news_score = safe_float(news.get("score", 0)) if isinstance(news, dict) else 0
 
-    if "offering" in risk_text and score < 8.5:
+    # Confirmed offering still blocks weak names, but SEC/filing awareness alone
+    # should not turn a clean runner into AVOID.
+    if "confirmed dilution risk" in risk_text and score < 8.0:
         return "⚠️ AVOID"
 
     if ("below vwap" in risk_text or "lost vwap" in risk_text) and not second_leg["detected"]:
-        if score < 8:
+        if score < 7.8:
             return "⚠️ AVOID"
 
-    if decay["detected"] and exhaustion["detected"] and score < 8.2:
+    if decay["detected"] and exhaustion["detected"] and score < 7.8:
         return "⚠️ AVOID"
 
-    if score >= 8.2 and structure_score >= 6 and entry_score >= 6:
+    if score >= 8.0 and entry_score >= 6.5 and structure_score >= 4.5:
         return "🟢 RUNNER"
 
-    if score >= 7.0 and structure_score >= 5:
+    # V32.3: a liquid coil with strong entry/news can be a WATCH even if the
+    # external structure engine under-scores it.
+    if score >= 7.0 and entry_score >= 6.5 and (structure_score >= 4.0 or coil.get("detected") or second_leg.get("detected") or news_score >= 8):
         return "👀 WATCH"
 
     return "⚠️ AVOID"
@@ -1547,35 +1593,66 @@ def build_entry(bias, structure, coil, second_leg, entry_score):
 
 
 def score_candidate(gain, structure_score, volume_score, news_score, entry_score, coil, second_leg, decay, exhaustion, sec, regime, float_shares=0, market_cap=0):
-    # Weighted for user's style: structure > volume > entry > news.
+    # V32.3 calibration: stop over-punishing valid momentum. Structure still
+    # matters most, but volume + entry + real catalyst can carry a WATCH/RUNNER.
     score = (
-        structure_score * 0.40 +
-        volume_score * 0.20 +
-        entry_score * 0.20 +
-        news_score * 0.10 +
-        clamp(gain / 10) * 0.10
+        structure_score * 0.35 +
+        volume_score * 0.22 +
+        entry_score * 0.23 +
+        news_score * 0.15 +
+        clamp(gain / 10) * 0.05
     )
 
-    if coil["detected"]:
-        score += 0.25
+    if coil.get("detected"):
+        score += 0.75
 
-    if second_leg["detected"]:
-        score += 0.55
+    if second_leg.get("detected"):
+        score += 0.85
 
-    score -= decay["penalty"] * 0.35
-    score -= exhaustion["penalty"] * 0.45
+    # Penalties are awareness nudges, not nuclear score killers.
+    score -= decay.get("penalty", 0) * 0.15
+    score -= exhaustion.get("penalty", 0) * 0.15
 
-    # SEC is awareness mostly, but heavy confirmed offering should nudge down.
     if sec.get("severity") == "HIGH":
-        score -= 0.45
+        score -= 0.20
+    elif sec.get("severity") in ["MEDIUM", "LOW"]:
+        score -= 0.05
 
-    # Float/cap are no longer hard-kills unless extreme; they become small quality penalties.
+    # Float/cap are quality awareness only unless extreme. Large-cap movers can
+    # still be useful market leaders, but they should not be treated like low-float rockets.
     if float_shares and float_shares > MAX_FLOAT:
-        score -= 0.35 if is_cold_regime(regime) else 0.55
+        score -= 0.20 if is_cold_regime(regime) else 0.35
     if market_cap and market_cap > MAX_MARKET_CAP:
-        score -= 0.25 if is_cold_regime(regime) else 0.45
+        score -= 0.15 if is_cold_regime(regime) else 0.30
 
-    score += regime.get("score_adjust", 0)
+    # Cold market should tighten a little, not bury every setup.
+    if is_cold_regime(regime):
+        score -= 0.10
+    else:
+        score += regime.get("score_adjust", 0)
+
+    # Safety floor: liquid 25%+ gainer + strong entry + coil/second-leg + real
+    # catalyst deserves at least WATCH range unless it is truly broken.
+    if (
+        gain >= 25 and
+        entry_score >= 7.0 and
+        volume_score >= 4.0 and
+        news_score >= 7.0 and
+        (coil.get("detected") or second_leg.get("detected")) and
+        not (decay.get("detected") and exhaustion.get("detected"))
+    ):
+        score = max(score, 7.05)
+
+    # No-news but elite structure/volume can still be a technical runner watch.
+    if (
+        gain >= 30 and
+        entry_score >= 7.0 and
+        volume_score >= 6.0 and
+        structure_score >= 5.5 and
+        news_score <= 2 and
+        not exhaustion.get("detected")
+    ):
+        score = max(score, 7.0)
 
     return clamp(score)
 
@@ -1862,6 +1939,7 @@ def analyze_candidate(candidate, regime):
         second_leg=second_leg,
         decay=decay,
         exhaustion=exhaustion,
+        coil=coil,
     )
 
     phase = build_phase(structure, coil, second_leg, exhaustion, decay)
