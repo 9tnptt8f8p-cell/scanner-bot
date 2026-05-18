@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.2.1 — fixed multi-source leader function"
+BOOT_MARKER = "elite scanner v33.3 — leadership score separated from entry risk"
 
 # ============================================================
 # ENV
@@ -1556,6 +1556,7 @@ def classify_news(headline, ticker=None):
             score = 9 if category in ["FDA / Clinical", "Contract / Order", "M&A", "AI / Nvidia"] else 8
             return {
                 "score": score,
+        "leadership_score": leadership_score,
                 "quality": "STRONG",
                 "category": category,
                 "label": "⚡ STRONG NEWS",
@@ -2016,6 +2017,118 @@ def detect_halt_risk(price, gain, float_shares, candles):
     }
 
 
+
+# ============================================================
+# LEADERSHIP ENGINE — v33.3
+# Separates "who owns the day" from "is this a clean entry right now?"
+# ============================================================
+
+def calc_leadership_score(gain, volume, float_shares, news_score=0, sources=None):
+    score = 0.0
+    reasons = []
+
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+    float_shares = safe_int(float_shares)
+    news_score = safe_float(news_score)
+    sources = sources or []
+
+    # Percent gain is king for this bot.
+    if gain >= 200:
+        score += 4.0
+        reasons.append("200%+ day leader")
+    elif gain >= 100:
+        score += 3.4
+        reasons.append("100%+ day leader")
+    elif gain >= 75:
+        score += 2.8
+        reasons.append("75%+ day leader")
+    elif gain >= 50:
+        score += 2.3
+        reasons.append("50%+ day leader")
+    elif gain >= 27:
+        score += 1.7
+        reasons.append("27%+ momentum leader")
+
+    # Liquidity/attention.
+    if volume >= 200_000_000:
+        score += 2.0
+        reasons.append("200M+ volume")
+    elif volume >= 100_000_000:
+        score += 1.7
+        reasons.append("100M+ volume")
+    elif volume >= 50_000_000:
+        score += 1.4
+        reasons.append("50M+ volume")
+    elif volume >= 20_000_000:
+        score += 1.1
+        reasons.append("20M+ volume")
+    elif volume >= 5_000_000:
+        score += 0.7
+        reasons.append("5M+ volume")
+
+    # Low float = leadership accelerator.
+    if 0 < float_shares <= 5_000_000:
+        score += 1.6
+        reasons.append("tiny float")
+    elif 0 < float_shares <= 10_000_000:
+        score += 1.3
+        reasons.append("elite low float")
+    elif 0 < float_shares <= 20_000_000:
+        score += 0.9
+        reasons.append("low float")
+    elif 0 < float_shares <= 40_000_000:
+        score += 0.5
+        reasons.append("decent float")
+
+    # Catalyst helps, but no-news squeezes can still lead.
+    if news_score >= 8:
+        score += 1.0
+        reasons.append("strong catalyst")
+    elif news_score >= 5:
+        score += 0.45
+        reasons.append("some catalyst")
+
+    # Multiple sources confirming the leader is valuable.
+    source_count = len(sources)
+    if source_count >= 3:
+        score += 0.6
+        reasons.append("confirmed by multiple sources")
+    elif source_count == 2:
+        score += 0.35
+        reasons.append("confirmed by 2 sources")
+
+    return clamp(score), dedupe(reasons)
+
+
+def classify_leader_state(leadership_score, entry_score, structure_score, exhaustion, decay, gain):
+    gain = safe_float(gain)
+    exhausted = bool(exhaustion.get("detected")) if isinstance(exhaustion, dict) else False
+    fading = bool(decay.get("detected")) if isinstance(decay, dict) else False
+
+    if leadership_score >= 8 and gain >= RUNNER_MIN_GAIN:
+        if exhausted or entry_score < 4:
+            return "🔥 LEADER / EXTENDED"
+        if entry_score >= 6 and structure_score >= 4:
+            return "🟢 RUNNER"
+        return "🔥 MARKET LEADER"
+
+    if leadership_score >= 6 and gain >= RUNNER_MIN_GAIN:
+        if exhausted or entry_score < 4:
+            return "🔥 LEADER / EXTENDED"
+        return "👀 LEADER WATCH"
+
+    if gain >= RUNNER_MIN_GAIN and leadership_score >= 4:
+        return "👀 WATCH"
+
+    return "⚠️ AVOID"
+
+
+def display_score_for_alert(leadership_score, entry_score):
+    # Alert score displays leadership first but still respects entry quality.
+    return clamp((safe_float(leadership_score) * 0.70) + (safe_float(entry_score) * 0.30))
+
+
 # ============================================================
 # SCORING ENGINE
 # ============================================================
@@ -2141,7 +2254,15 @@ def score_entry_quality(structure, coil, second_leg, exhaustion):
 def build_bias(score, structure_score, entry_score, news, risks, second_leg, decay, exhaustion, coil=None):
     risk_text = " ".join(risks).lower()
     coil = coil or {"detected": False}
-    news_score = safe_float(news.get("score", 0)) if isinstance(news, dict) else 0
+    news_score = safe_float(news.get("score", 0))
+
+    leadership_score, leadership_reasons = calc_leadership_score(
+        gain=gain,
+        volume=volume,
+        float_shares=float_shares,
+        news_score=news_score,
+        sources=candidate.get("sources", []),
+    ) if isinstance(news, dict) else 0
 
     # Confirmed offering still blocks weak names, but SEC/filing awareness alone
     # should not turn a clean runner into AVOID.
@@ -2322,7 +2443,7 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
         return False
 
-    if "AVOID" in result["bias"]:
+    if result["bias"] == "⚠️ AVOID":
         print(f"[NO ALERT] {ticker}: avoid bias")
         return False
 
@@ -2347,6 +2468,10 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    if "LEADER / EXTENDED" in result["bias"]:
+        return "🔥 MARKET LEADER — EXTENDED"
+    if "MARKET LEADER" in result["bias"]:
+        return "🔥 MARKET LEADER"
     if "RUNNER" in result["bias"]:
         if result["second_leg"]["detected"]:
             return "🔥 RUNNER — SECOND LEG"
@@ -2385,7 +2510,7 @@ def main_risk_sentence(result):
 def build_alert(result):
     title = alert_title(result)
 
-    header = f"{result['ticker']} | {result['score']:.1f}/10 | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
+    header = f"{result['ticker']} | {result['score']:.1f}/10 | L{result.get('leadership_score', 0):.1f} E{result.get('entry_score', 0):.1f} | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
     if SHOW_FLOAT and result.get("float"):
         header += f" | {result.get('float_info', {}).get('label') or ('Float ' + fmt_big_num(result['float']))}"
 
@@ -2523,6 +2648,7 @@ def analyze_candidate(candidate, regime):
     if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
         risks.append(float_info.get("risk"))
 
+    reasons.extend(leadership_reasons)
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
 
@@ -2579,6 +2705,22 @@ def analyze_candidate(candidate, regime):
         score += float_info.get("boost", 0)
     score = clamp(score)
 
+    # v33.3: leadership is separate from entry. Extended leaders stay leaders, not fake AVOIDs.
+    entry_score_final = entry_score
+    display_score = display_score_for_alert(leadership_score, entry_score_final)
+    leader_state = classify_leader_state(
+        leadership_score=leadership_score,
+        entry_score=entry_score_final,
+        structure_score=structure_score,
+        exhaustion=exhaustion,
+        decay=decay,
+        gain=gain,
+    )
+
+    # Use the display score/state for the final alert identity.
+    score = display_score
+    bias = leader_state
+
     bias = build_bias(
         score=score,
         structure_score=structure_score,
@@ -2617,6 +2759,7 @@ def analyze_candidate(candidate, regime):
         "structure_score": structure_score,
         "volume_score": volume_score,
         "entry_score": entry_score,
+        "entry_score_final": entry_score_final,
         "news_score": news_score,
         "news_label": news.get("label", ""),
         "news_explain": news.get("explain", ""),
@@ -2625,6 +2768,7 @@ def analyze_candidate(candidate, regime):
         "reasons": dedupe(reasons),
         "risks": dedupe(risks),
         "bias": bias,
+        "leader_state": leader_state,
         "entry": entry,
         "phase": phase,
         "structure": structure,
@@ -2651,18 +2795,17 @@ def analyze_candidate(candidate, regime):
 # ============================================================
 
 def sort_results(results):
-    # Prefer true runner quality over raw gain.
+    # v33.3: sort by true leadership first, then entry/actionability.
     return sorted(
         results,
         key=lambda r: (
-            r["score"],
-            1 if "RUNNER" in r["bias"] else 0,
-            1 if r["second_leg"]["detected"] else 0,
-            r["gain"],
+            safe_float(r.get("leadership_score", r.get("score", 0))),
+            safe_float(r.get("score", 0)),
+            safe_float(r.get("gain", 0)),
+            safe_int(r.get("volume", 0)),
         ),
         reverse=True,
     )
-
 
 def print_top_ranked(results):
     if not results:
