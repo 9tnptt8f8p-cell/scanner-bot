@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.5 FIXED — true top-gainer discovery + multi-source percent gainers"
+BOOT_MARKER = "elite scanner rebuild v32.6 FIXED — low-float boost + leader discovery + stable scoring"
 
 # ============================================================
 # ENV
@@ -491,7 +491,7 @@ def get_yahoo_predefined_gainers():
 
 
 def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250):
-    # This is the important v32.5 fix: ask Yahoo for the true sorted percent-gainer universe,
+    # This is the important v32.6 fix: ask Yahoo for the true sorted percent-gainer universe,
     # not only the canned day_gainers list that sometimes misses small-cap leaders.
     operands = [
         {"operator": "EQ", "operands": ["region", "us"]},
@@ -1592,6 +1592,77 @@ def detect_halt_risk(price, gain, float_shares, candles):
     }
 
 
+
+# ============================================================
+# LOW FLOAT ENGINE — v32.6
+# Purpose:
+# Low floats are often the best momentum runners, but they also carry halt/chop risk.
+# This engine promotes clean low-float names without blindly alerting garbage.
+# ============================================================
+
+LOW_FLOAT_TINY = 5_000_000
+LOW_FLOAT_ELITE = 10_000_000
+LOW_FLOAT_GOOD = 20_000_000
+LOW_FLOAT_ACCEPTABLE = 40_000_000
+
+
+def classify_float(float_shares):
+    f = safe_int(float_shares)
+
+    if f <= 0:
+        return {
+            "tier": "UNKNOWN",
+            "score_boost": 0.0,
+            "label": "Float unknown",
+            "alert_tag": "⚠️ Float unknown",
+            "risk": "Profile/float data missing",
+        }
+
+    if f <= LOW_FLOAT_TINY:
+        return {
+            "tier": "TINY",
+            "score_boost": 0.75,
+            "label": f"TINY FLOAT {fmt_big_num(f)}",
+            "alert_tag": f"🔥 TINY FLOAT {fmt_big_num(f)}",
+            "risk": "Tiny float — can move fast, halt risk higher",
+        }
+
+    if f <= LOW_FLOAT_ELITE:
+        return {
+            "tier": "ELITE",
+            "score_boost": 0.55,
+            "label": f"ELITE LOW FLOAT {fmt_big_num(f)}",
+            "alert_tag": f"🔥 LOW FLOAT {fmt_big_num(f)}",
+            "risk": "Low float momentum name — size carefully",
+        }
+
+    if f <= LOW_FLOAT_GOOD:
+        return {
+            "tier": "GOOD",
+            "score_boost": 0.35,
+            "label": f"LOW FLOAT {fmt_big_num(f)}",
+            "alert_tag": f"🟢 LOW FLOAT {fmt_big_num(f)}",
+            "risk": "Low float can accelerate quickly",
+        }
+
+    if f <= LOW_FLOAT_ACCEPTABLE:
+        return {
+            "tier": "ACCEPTABLE",
+            "score_boost": 0.15,
+            "label": f"DECENT FLOAT {fmt_big_num(f)}",
+            "alert_tag": f"🟡 Float {fmt_big_num(f)}",
+            "risk": "",
+        }
+
+    return {
+        "tier": "HIGH",
+        "score_boost": -0.15,
+        "label": f"HIGHER FLOAT {fmt_big_num(f)}",
+        "alert_tag": f"Float {fmt_big_num(f)}",
+        "risk": "Higher float — usually needs stronger volume",
+    }
+
+
 # ============================================================
 # SCORING ENGINE
 # ============================================================
@@ -1600,6 +1671,11 @@ def score_structure(structure):
     score = 0
     reasons = []
     risks = []
+
+    if float_info.get("alert_tag"):
+        reasons.append(float_info.get("alert_tag"))
+    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
+        risks.append(float_info.get("risk"))
 
     above_vwap = bool(get_struct(structure, "above_vwap", False))
     higher_lows = bool(get_struct(structure, "higher_lows", False))
@@ -1687,6 +1763,11 @@ def score_entry_quality(structure, coil, second_leg, exhaustion):
     score = 5.0
     reasons = []
     risks = []
+
+    if float_info.get("alert_tag"):
+        reasons.append(float_info.get("alert_tag"))
+    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
+        risks.append(float_info.get("risk"))
 
     if bool(get_struct(structure, "above_vwap", False)):
         score += 1.5
@@ -1991,6 +2072,9 @@ def build_alert(result):
     if result["halt_risk"]["label"]:
         awareness.append(result["halt_risk"]["label"])
 
+    if result.get("float_info", {}).get("risk"):
+        awareness.append(result.get("float_info", {}).get("risk"))
+
     if result["sec"].get("has_risk"):
         awareness.append(result["sec"].get("label"))
 
@@ -2031,6 +2115,7 @@ def analyze_candidate(candidate, regime):
     profile = get_profile(ticker)
     market_cap = profile.get("market_cap", 0) or candidate.get("market_cap", 0)
     float_shares = profile.get("float", 0)
+    float_info = classify_float(float_shares)
 
     # HARD FAST PASS — no candles/news/sec before this.
     passed, skip_reasons, fast_warnings = fast_pass_filter(
@@ -2087,6 +2172,11 @@ def analyze_candidate(candidate, regime):
     reasons = []
     risks = []
 
+    if float_info.get("alert_tag"):
+        reasons.append(float_info.get("alert_tag"))
+    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
+        risks.append(float_info.get("risk"))
+
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
 
@@ -2137,6 +2227,10 @@ def analyze_candidate(candidate, regime):
         market_cap=market_cap,
     )
 
+    # Low-float boost: promotes clean low-float runners without forcing bad charts.
+    score += float_info.get(\"score_boost\", 0)
+    score = clamp(score)
+
     bias = build_bias(
         score=score,
         structure_score=structure_score,
@@ -2158,6 +2252,7 @@ def analyze_candidate(candidate, regime):
         "gain": gain,
         "volume": volume,
         "float": float_shares,
+        "float_info": float_info,
         "market_cap": market_cap,
         "score": score,
         "structure_score": structure_score,
