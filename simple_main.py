@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.10 — self-contained analyzer working build"
+BOOT_MARKER = "elite scanner v33.11 — news_label alert crash fixed"
 
 # ============================================================
 # ENV
@@ -2538,7 +2538,7 @@ def build_alert(result):
         "",
         header,
         "",
-        f"Catalyst: {result['news_score']}/10 {result['news_label']} — {result['news_explain']}",
+        f"Catalyst: {result['news_score']}/10 {result.get('news_label', result.get('news', {}).get('label', '📰 NEWS'))} — {result['news_explain']}",
         f"State: {result['bias']}",
         f"Phase: {result['phase']}",
         "",
@@ -2903,6 +2903,10 @@ def analyze_candidate(candidate, regime):
         "reasons": reasons,
         "risks": risks,
         "news": news,
+        "news_label": news.get("label", "📰 NEWS"),
+        "news_headline": news.get("headline", ""),
+        "news_category": news.get("category", ""),
+        "news_quality": news.get("quality", ""),
         "news_score": news_score,
         "sec": sec,
         "structure": structure,
