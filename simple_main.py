@@ -19,12 +19,12 @@ from alerts import send_alert
 load_dotenv()
 
 # ============================================================
-# ELITE SCANNER REBUILD v32 FULL
-# Fast Pass + Full Runner/Avoid Engine + News + SEC + Coil
+# ELITE SCANNER REBUILD v33.14 FULL
+# Fast Pass + Full Runner/Avoid Engine + News + SEC + Coil + Alert Safety
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.13 — news_explain alert crash fixed"
+BOOT_MARKER = "elite scanner v33.14 — alert safety normalizer fixed"
 
 # ============================================================
 # ENV
@@ -150,7 +150,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v33.13 news_explain alert crash fixed", 200
+    return "scanner alive — v33.14 alert safety normalizer fixed", 200
 
 
 @app.route("/health")
@@ -2526,10 +2526,68 @@ def main_risk_sentence(result):
     return risks[0]
 
 
+
+def normalize_alert_fields(result):
+    """v33.14: one missing field should never crash Telegram alerts."""
+    if not isinstance(result, dict):
+        return {}
+
+    news = result.get("news") or {}
+    regime = result.get("regime") or {}
+
+    if isinstance(regime, str):
+        regime = {"label": regime, "description": "", "score_adjust": 0}
+    elif not isinstance(regime, dict):
+        regime = {}
+
+    result["regime"] = {
+        "label": regime.get("label") or "⚪ NORMAL",
+        "description": regime.get("description") or "Normal momentum tape",
+        "score_adjust": safe_float(regime.get("score_adjust", 0)),
+    }
+
+    result["ticker"] = result.get("ticker", "UNKNOWN")
+    result["score"] = safe_float(result.get("score", 0))
+    result["price"] = safe_float(result.get("price", 0))
+    result["gain"] = safe_float(result.get("gain", 0))
+    result["bias"] = result.get("bias") or "🤔 UNCLEAR"
+    result["phase"] = result.get("phase") or "⚪ NEUTRAL"
+    result["entry"] = result.get("entry") or "👀 WATCH"
+    result["reasons"] = result.get("reasons") or []
+    result["risks"] = result.get("risks") or []
+    result["float_info"] = result.get("float_info") or {}
+    result["halt_risk"] = result.get("halt_risk") or {"label": ""}
+    result["sec"] = result.get("sec") or {"has_risk": False, "label": ""}
+    result["coil"] = result.get("coil") or {"detected": False}
+    result["second_leg"] = result.get("second_leg") or {"detected": False}
+    result["decay"] = result.get("decay") or {"detected": False, "risks": []}
+    result["exhaustion"] = result.get("exhaustion") or {"detected": False, "risk": ""}
+
+    news_score = safe_float(result.get("news_score", news.get("score", 0)))
+    news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
+    news_headline = result.get("news_headline") or news.get("headline") or ""
+    news_explain = (
+        result.get("news_explain")
+        or news.get("explain")
+        or news_headline
+        or "No catalyst details available"
+    )
+    if news_explain == news_label:
+        news_explain = news_headline or "No catalyst details available"
+
+    result["news_score"] = news_score
+    result["news_label"] = news_label
+    result["news_headline"] = news_headline
+    result["news_explain"] = news_explain
+    result["catalyst_line"] = f"Catalyst: {news_score:.0f}/10 {news_label} — {news_explain}"
+
+    return result
+
 def build_alert(result):
+    result = normalize_alert_fields(result)
     title = alert_title(result)
 
-    # v33.13 hotfix: never let a missing news_explain/news field crash alerts.
+    # v33.14 hotfix: never let a missing news_explain/news field crash alerts.
     news = result.get("news") or {}
     news_score = safe_float(result.get("news_score", news.get("score", 0)))
     news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
@@ -2577,16 +2635,16 @@ def build_alert(result):
 
     # Add only high-value awareness, not clutter.
     awareness = []
-    if result["halt_risk"]["label"]:
-        awareness.append(result["halt_risk"]["label"])
+    if result.get("halt_risk", {}).get("label"):
+        awareness.append(result.get("halt_risk", {}).get("label"))
 
     if result.get("float_info", {}).get("risk"):
         awareness.append(result.get("float_info", {}).get("risk"))
 
-    if result["sec"].get("has_risk"):
-        awareness.append(result["sec"].get("label"))
+    if result.get("sec", {}).get("has_risk"):
+        awareness.append(result.get("sec", {}).get("label"))
 
-    if result["regime"]["label"] == "❄️ COLD / THIN MOMENTUM MARKET":
+    if result.get("regime", {}).get("label") == "❄️ COLD / THIN MOMENTUM MARKET":
         awareness.append("Cold market — be extra selective")
 
     if awareness:
@@ -2922,6 +2980,7 @@ def analyze_candidate(candidate, regime):
         "float": float_shares,
         "float_info": float_info,
         "market_cap": market_cap,
+        "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
         "score": score,
         "bias": bias,
         "phase": phase,
