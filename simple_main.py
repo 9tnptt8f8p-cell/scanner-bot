@@ -3,7 +3,7 @@ import re
 import time
 import html
 import json
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta, time as dtime, timezone
 from zoneinfo import ZoneInfo
 from threading import Thread
 from urllib.parse import quote_plus
@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.1 FIXED — dynamic fast pass + runner/avoid"
+BOOT_MARKER = "elite scanner rebuild v32.2 FIXED — structure signature + clean news + UTC"
 
 # ============================================================
 # ENV
@@ -595,14 +595,14 @@ def get_alpaca_candles(ticker):
         return []
 
     try:
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
         start = end - timedelta(hours=9)
 
         url = f"{ALPACA_BASE_URL}/v2/stocks/{quote_plus(ticker)}/bars"
         params = {
             "timeframe": "1Min",
-            "start": start.replace(microsecond=0).isoformat() + "Z",
-            "end": end.replace(microsecond=0).isoformat() + "Z",
+            "start": start.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "end": end.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "limit": 500,
             "adjustment": "raw",
             "feed": "iex",
@@ -802,11 +802,25 @@ def merge_structure(external, fallback):
 
 def get_structure(candles, ticker):
     fallback = fallback_structure_analysis(candles)
+    external = {}
+
+    # V32.2 fix:
+    # Older structure_engine versions used analyze_structure(ticker, candles).
+    # Some newer drafts used analyze_structure(candles).
+    # Try the production signature first so Render does not spam:
+    # [STRUCTURE ERROR] analyze_structure() missing 1 required positional argument: 'candles'
     try:
-        external = analyze_structure(candles)
+        external = analyze_structure(ticker, candles)
+    except TypeError:
+        try:
+            external = analyze_structure(candles)
+        except Exception as e:
+            print(f"[STRUCTURE ERROR] {ticker}: {e}")
+            external = {}
     except Exception as e:
         print(f"[STRUCTURE ERROR] {ticker}: {e}")
         external = {}
+
     return merge_structure(external, fallback)
 
 
@@ -951,11 +965,11 @@ def extract_headlines_from_soup(soup, ticker):
         if not (25 <= len(chunk) <= 240):
             continue
 
+        # V32.2 fix: do NOT accept random strong-keyword chunks unless the ticker
+        # is actually present. This prevents false catalysts like RAMP receiving
+        # unrelated GCTS / Dust / Denarius headlines scraped from generic pages.
         if ticker and not strict_ticker_in_text(ticker, chunk):
-            # Allow category keywords even if ticker not directly repeated.
-            lower = chunk.lower()
-            if not any(w in lower for group in STRONG_NEWS_PATTERNS.values() for w in group):
-                continue
+            continue
 
         headlines.append(chunk)
 
