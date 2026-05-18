@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33 — leader-only + catalyst + active dilution + 27% alert floor"
+BOOT_MARKER = "elite scanner v33.2 — multi-source small-cap leader discovery"
 
 # ============================================================
 # ENV
@@ -60,31 +60,21 @@ MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
 EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 
-
 # ============================================================
-# v33 LEADER-ONLY RULES
+# v33 PURE LEADER UNIVERSE — NO WATCHLISTS
 # ============================================================
-DISCOVERY_MIN_GAIN = 8.0       # internal only — lets the bot see emerging leaders
-WATCH_MIN_GAIN = 15.0          # internal watch/rank zone
-RUNNER_MIN_GAIN = 27.0         # hard public alert floor
-ALERT_MIN_GAIN = 27.0          # never alert under this, no exceptions
+DISCOVERY_MIN_GAIN = 8.0       # internal discovery only
+RUNNER_MIN_GAIN = 27.0         # hard Telegram alert floor, no exceptions
+SMALL_CAP_IDEAL = 300_000_000
+SMALL_CAP_MAX = 1_500_000_000
+BIG_CAP_SOURCE_SKIP = 3_000_000_000
+LOW_PRICE_LEADER_MAX = 20.0
+LEADER_MIN_VOLUME = 75_000
 
-LEADER_50_GAIN = 50.0
-LEADER_75_GAIN = 75.0
-LEADER_100_GAIN = 100.0
-
-# Priority hot ticker lane — always check, never force-alert.
-PRIORITY_TICKERS = {
-    "SBFM",
-    "GOVX",
-    "VRAX",
-    "AIM",
-    "CREG",
-    "CISS",
-}
-
-PRIORITY_MIN_GAIN = 5.0
-PRIORITY_MIN_VOLUME = 50_000
+LOW_FLOAT_TINY = 5_000_000
+LOW_FLOAT_ELITE = 10_000_000
+LOW_FLOAT_GOOD = 20_000_000
+LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 7.0
@@ -116,6 +106,25 @@ SENT_THIS_CYCLE = set()
 SHOW_FLOAT = True
 SHOW_HEADLINE = False
 SHOW_VERBOSE_DEBUG = True
+
+
+# ============================================================
+# v33.2 MULTI-SOURCE LEADER DISCOVERY
+# ============================================================
+DISCOVERY_MIN_GAIN = 8.0
+RUNNER_MIN_GAIN = 27.0
+ALERT_MIN_GAIN = 27.0
+
+LEADER_SOURCE_LIMIT = 180
+MAX_RAW_LEADER_POOL = 450
+
+# Source-layer small-cap focus. Unknown cap is allowed because small-cap feeds
+# often have incomplete data and the quote/profile step can verify later.
+SOURCE_MAX_MARKET_CAP = 3_000_000_000
+SOURCE_MAX_FLOAT = 150_000_000
+SOURCE_MIN_PRICE = 0.20
+SOURCE_MAX_PRICE = 80.00
+SOURCE_MIN_VOLUME = 50_000
 
 # ============================================================
 # FLASK KEEPALIVE
@@ -389,7 +398,7 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
     """
     reasons = []
     warnings = []
-    gain_floor = dynamic_hard_min_gain()
+    gain_floor = DISCOVERY_MIN_GAIN
 
     if is_bad_ticker(ticker):
         reasons.append("warrant/unit/right ticker")
@@ -424,6 +433,98 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
     warn_text = (" | " + " | ".join(warnings)) if warnings else ""
     print(f"[FAST PASS] {ticker}: {fmt_money(price)} +{gain:.1f}% vol={fmt_big_num(volume)}{warn_text}")
     return True, [], warnings
+
+
+# ============================================================
+# v33 SMALL-CAP / LOW-FLOAT LEADER HELPERS
+# ============================================================
+
+def classify_float(float_shares):
+    f = safe_int(float_shares)
+    if f <= 0:
+        return {"tier": "UNKNOWN", "boost": 0.0, "label": "⚠️ Float unknown", "risk": "Float/profile data missing"}
+    if f <= LOW_FLOAT_TINY:
+        return {"tier": "TINY", "boost": 0.85, "label": f"🔥 TINY FLOAT {fmt_big_num(f)}", "risk": "Tiny float — explosive but halt/chop risk higher"}
+    if f <= LOW_FLOAT_ELITE:
+        return {"tier": "ELITE", "boost": 0.65, "label": f"🔥 LOW FLOAT {fmt_big_num(f)}", "risk": "Low float momentum name — size carefully"}
+    if f <= LOW_FLOAT_GOOD:
+        return {"tier": "GOOD", "boost": 0.40, "label": f"🟢 LOW FLOAT {fmt_big_num(f)}", "risk": "Low float can accelerate quickly"}
+    if f <= LOW_FLOAT_ACCEPTABLE:
+        return {"tier": "ACCEPTABLE", "boost": 0.15, "label": f"🟡 Float {fmt_big_num(f)}", "risk": ""}
+    return {"tier": "HIGH", "boost": -0.10, "label": f"Float {fmt_big_num(f)}", "risk": "Higher float — needs stronger volume"}
+
+
+def leader_gain_boost(gain):
+    g = safe_float(gain)
+    if g >= 100:
+        return 1.25, "💯 100%+ day leader"
+    if g >= 75:
+        return 0.95, "🔥 75%+ day leader"
+    if g >= 50:
+        return 0.70, "🔥 50%+ day leader"
+    if g >= RUNNER_MIN_GAIN:
+        return 0.35, "🟢 27%+ momentum leader"
+    return 0.0, ""
+
+
+def source_universe_score(item):
+    """Rank raw screener rows so small-cap high-percent leaders go first, not mega caps."""
+    gain = safe_float(item.get("gain"))
+    volume = safe_int(item.get("volume"))
+    price = safe_float(item.get("price"))
+    cap = safe_int(item.get("market_cap"))
+
+    score = gain * 2.0
+    if gain >= 50:
+        score += 50
+    elif gain >= 27:
+        score += 25
+
+    if price and price <= LOW_PRICE_LEADER_MAX:
+        score += 15
+    if volume >= 1_000_000:
+        score += 12
+    elif volume >= 250_000:
+        score += 8
+    elif volume >= LEADER_MIN_VOLUME:
+        score += 4
+
+    if cap:
+        if cap <= SMALL_CAP_IDEAL:
+            score += 25
+        elif cap <= SMALL_CAP_MAX:
+            score += 12
+        elif cap >= BIG_CAP_SOURCE_SKIP:
+            score -= 60
+    return score
+
+
+def source_big_cap_skip(item):
+    """Stop Yahoo big-cap rows from using live quote/profile slots before real leaders."""
+    gain = safe_float(item.get("gain"))
+    cap = safe_int(item.get("market_cap"))
+    price = safe_float(item.get("price"))
+    volume = safe_int(item.get("volume"))
+
+    # Always keep true high-percent leaders even if cap data is weird.
+    if gain >= 50:
+        return False
+
+    # Hard reject obvious big-cap slow movers at the source layer.
+    if cap and cap >= BIG_CAP_SOURCE_SKIP and gain < RUNNER_MIN_GAIN:
+        return True
+
+    # Slow expensive names are not this bot's game.
+    if price > MAX_PRICE and gain < RUNNER_MIN_GAIN:
+        return True
+
+    # Illiquid sub-leaders do not need profile calls.
+    if gain < DISCOVERY_MIN_GAIN:
+        return True
+    if volume and volume < LEADER_MIN_VOLUME and gain < RUNNER_MIN_GAIN:
+        return True
+
+    return False
 
 # ============================================================
 # GAINER SOURCES
@@ -519,18 +620,19 @@ def get_yahoo_predefined_gainers():
         return []
 
 
-def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250):
-    # This is the important v32.5 fix: ask Yahoo for the true sorted percent-gainer universe,
-    # not only the canned day_gainers list that sometimes misses small-cap leaders.
+def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250, max_market_cap=None, max_price=80.0):
+    # v33: ask Yahoo for small-cap / low-price percent gainers first.
     operands = [
         {"operator": "EQ", "operands": ["region", "us"]},
         {"operator": "EQ", "operands": ["quoteType", "EQUITY"]},
         {"operator": "GT", "operands": ["regularMarketChangePercent", min_gain]},
         {"operator": "GT", "operands": ["regularMarketPrice", 0.30]},
-        {"operator": "LT", "operands": ["regularMarketPrice", 500.0]},
+        {"operator": "LT", "operands": ["regularMarketPrice", max_price]},
     ]
     if min_volume:
         operands.append({"operator": "GT", "operands": ["regularMarketVolume", int(min_volume)]})
+    if max_market_cap:
+        operands.append({"operator": "LT", "operands": ["marketCap", int(max_market_cap)]})
 
     return {
         "size": size,
@@ -548,17 +650,24 @@ def get_yahoo_custom_percent_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener"
     all_results = []
 
-    # Multiple passes: high-gain leaders first, then wider backup. This catches the +50% names
-    # even when Yahoo's canned day_gainers endpoint only surfaces large caps.
+    # v33: small-cap/high-percent scans first. If Yahoo returns none, predefined still works.
     scans = [
-        (50.0, 0, "Yahoo custom 50pct"),
-        (25.0, 50_000, "Yahoo custom 25pct liquid"),
-        (10.0, 100_000, "Yahoo custom 10pct liquid"),
+        (50.0, 0, SMALL_CAP_MAX, 80.0, "Yahoo smallcap 50pct"),
+        (27.0, 50_000, SMALL_CAP_MAX, 80.0, "Yahoo smallcap 27pct liquid"),
+        (15.0, 100_000, SMALL_CAP_MAX, 40.0, "Yahoo smallcap 15pct lowprice"),
+        (8.0, 250_000, SMALL_CAP_MAX, 25.0, "Yahoo smallcap 8pct volume"),
+        (50.0, 0, None, 500.0, "Yahoo anycap 50pct backup"),
     ]
 
-    for min_gain, min_volume, label in scans:
+    for min_gain, min_volume, max_cap, max_price, label in scans:
         try:
-            payload = yahoo_screener_payload(min_gain=min_gain, min_volume=min_volume, size=250)
+            payload = yahoo_screener_payload(
+                min_gain=min_gain,
+                min_volume=min_volume,
+                size=250,
+                max_market_cap=max_cap,
+                max_price=max_price,
+            )
             r = http_post(url, payload=payload, timeout=8)
             data = r.json()
             result = data.get("finance", {}).get("result") or []
@@ -625,7 +734,6 @@ def get_nasdaq_gainers():
                     "ticker": ticker,
                     "price": price,
                     "gain": gain,
-        "gain_label": gain_label,
                     "volume": volume,
                     "source": "Nasdaq Gainers",
                 })
@@ -639,80 +747,46 @@ def get_nasdaq_gainers():
 
 
 
-def get_priority_candidates():
-    """Always check user priority hot tickers. This does not force alerts."""
-    results = []
-
-    for ticker in sorted(PRIORITY_TICKERS):
-        ticker = ticker.upper().strip()
-        if not ticker or is_bad_ticker(ticker):
-            continue
-
-        try:
-            quote = get_finnhub_quote(ticker)
-            price = safe_float(quote.get("price"))
-            gain = safe_float(quote.get("gain"))
-            volume = safe_int(quote.get("volume"))
-
-            if price <= 0:
-                print(f"[PRIORITY SKIP] {ticker}: no live quote")
-                continue
-
-            print(f"[PRIORITY] {ticker}: {fmt_money(price)} +{gain:.1f}%")
-
-            results.append({
-                "ticker": ticker,
-                "price": price,
-                "gain": gain,
-                "volume": volume,
-                "market_cap": 0,
-                "source": "Priority Hot Ticker",
-                "priority": True,
-            })
-
-        except Exception as e:
-            print(f"[PRIORITY ERROR] {ticker}: {e}")
-
-    return results
-
 def get_candidates():
-    sources = []
-    yahoo = get_yahoo_gainers()
-    sources.extend(yahoo)
-
-    # Always add Nasdaq as a fallback/second opinion when possible. If it fails,
-    # Yahoo still carries the scan.
-    sources.extend(get_nasdaq_gainers())
+    raw = get_multi_source_leaders()
 
     seen = {}
-    candidate_floor = dynamic_scan_min_gain()
-
-    # V32.4: do not let the candidate pool collapse from 80 -> 1 in a thin tape.
-    # Keep all names over the scan floor, plus the top few Yahoo movers even if
-    # they are slightly below floor. Fast-pass will still protect expensive scans.
-    yahoo_rank = {item.get("ticker", "").upper(): i for i, item in enumerate(yahoo, start=1)}
-
-    for item in sources:
-        ticker = item.get("ticker", "").upper()
+    for item in raw:
+        ticker = str(item.get("ticker", "")).upper().strip()
         if not ticker or is_bad_ticker(ticker):
             continue
 
         gain = safe_float(item.get("gain"))
-        rank = yahoo_rank.get(ticker, 999)
-        top_gainer_safety_net = rank <= 80 and gain >= 5.0
-
-        if gain < candidate_floor and not top_gainer_safety_net:
+        if gain < DISCOVERY_MIN_GAIN:
             continue
 
         existing = seen.get(ticker)
-        if not existing or gain > safe_float(existing.get("gain")):
+        if not existing:
             seen[ticker] = item
+            continue
+
+        # Keep the best gain and merge sources.
+        if gain > safe_float(existing.get("gain")):
+            existing.update(item)
+
+        sources = list(dict.fromkeys((existing.get("sources") or []) + (item.get("sources") or [item.get("source", "unknown")])))
+        existing["sources"] = sources
+        existing["source"] = "+".join(sources)
 
     candidates = list(seen.values())
-    candidates.sort(key=lambda x: (safe_float(x.get("gain")), safe_int(x.get("volume"))), reverse=True)
+    candidates.sort(
+        key=lambda x: (
+            safe_float(x.get("gain")) >= 50,
+            safe_float(x.get("gain")) >= 27,
+            safe_float(x.get("gain")),
+            len(x.get("sources", [])),
+            safe_int(x.get("volume")),
+        ),
+        reverse=True,
+    )
 
-    print(f"[CANDIDATES] merged {len(candidates)} candidates from {len(sources)} raw names")
-    return candidates[:max(MAX_GAINERS, 120)]
+    print(f"[CANDIDATES] merged {len(candidates)} leader candidates from {len(raw)} multi-source names")
+    return candidates[:MAX_GAINERS]
 
 
 # ============================================================
@@ -1329,15 +1403,6 @@ def get_best_news(ticker):
 # SEC / DILUTION ENGINE
 # ============================================================
 
-
-ACTIVE_DILUTION_TERMS = [
-    "at-the-market", "atm offering", "equity distribution agreement",
-    "sales agreement", "registered direct", "public offering",
-    "private placement", "securities purchase agreement",
-    "warrant", "warrants", "convertible", "convertible note",
-    "resale prospectus", "selling stockholder", "selling shareholder",
-]
-
 DILUTION_TERMS = [
     "at-the-market", "atm offering", "equity distribution agreement",
     "sales agreement", "registered direct", "public offering",
@@ -1672,85 +1737,6 @@ def detect_halt_risk(price, gain, float_shares, candles):
     }
 
 
-
-# ============================================================
-# LOW FLOAT ENGINE — v33
-# ============================================================
-
-LOW_FLOAT_TINY = 5_000_000
-LOW_FLOAT_ELITE = 10_000_000
-LOW_FLOAT_GOOD = 20_000_000
-LOW_FLOAT_ACCEPTABLE = 40_000_000
-
-
-def classify_float(float_shares):
-    f = safe_int(float_shares)
-
-    if f <= 0:
-        return {
-            "tier": "UNKNOWN",
-            "boost": 0.0,
-            "label": "⚠️ Float unknown",
-            "risk": "Float/profile data missing",
-        }
-
-    if f <= LOW_FLOAT_TINY:
-        return {
-            "tier": "TINY",
-            "boost": 0.85,
-            "label": f"🔥 TINY FLOAT {fmt_big_num(f)}",
-            "risk": "Tiny float — explosive but halt/chop risk higher",
-        }
-
-    if f <= LOW_FLOAT_ELITE:
-        return {
-            "tier": "ELITE",
-            "boost": 0.65,
-            "label": f"🔥 LOW FLOAT {fmt_big_num(f)}",
-            "risk": "Low float momentum name — size carefully",
-        }
-
-    if f <= LOW_FLOAT_GOOD:
-        return {
-            "tier": "GOOD",
-            "boost": 0.40,
-            "label": f"🟢 LOW FLOAT {fmt_big_num(f)}",
-            "risk": "Low float can accelerate quickly",
-        }
-
-    if f <= LOW_FLOAT_ACCEPTABLE:
-        return {
-            "tier": "ACCEPTABLE",
-            "boost": 0.15,
-            "label": f"🟡 Float {fmt_big_num(f)}",
-            "risk": "",
-        }
-
-    return {
-        "tier": "HIGH",
-        "boost": -0.10,
-        "label": f"Float {fmt_big_num(f)}",
-        "risk": "Higher float — needs stronger volume to lead",
-    }
-
-
-def leader_gain_boost(gain):
-    gain = safe_float(gain)
-    if gain >= LEADER_100_GAIN:
-        return 1.25, "💯 100%+ day leader"
-    if gain >= LEADER_75_GAIN:
-        return 0.95, "🔥 75%+ day leader"
-    if gain >= LEADER_50_GAIN:
-        return 0.70, "🔥 50%+ day leader"
-    if gain >= RUNNER_MIN_GAIN:
-        return 0.35, "🟢 27%+ momentum leader"
-    return 0.0, ""
-
-
-def is_alert_eligible_gain(gain):
-    return safe_float(gain) >= RUNNER_MIN_GAIN
-
-
 # ============================================================
 # SCORING ENGINE
 # ============================================================
@@ -1759,13 +1745,6 @@ def score_structure(structure):
     score = 0
     reasons = []
     risks = []
-
-    if gain_label:
-        reasons.append(gain_label)
-    if float_info.get("label"):
-        reasons.append(float_info.get("label"))
-    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
-        risks.append(float_info.get("risk"))
 
     above_vwap = bool(get_struct(structure, "above_vwap", False))
     higher_lows = bool(get_struct(structure, "higher_lows", False))
@@ -2054,10 +2033,10 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: already sent this cycle")
         return False
 
-    alert_gain_floor = dynamic_alert_min_gain(result)
-    elite_exception = result["score"] >= 8.2 and "RUNNER" in result["bias"]
-    if result["gain"] < alert_gain_floor and not elite_exception:
-        print(f"[NO ALERT] {ticker}: gain {result['gain']:.1f}% below alert floor {alert_gain_floor:.0f}%")
+    # v33 hard rule: never alert any name under 27% on the day.
+    alert_gain_floor = RUNNER_MIN_GAIN
+    if result["gain"] < alert_gain_floor:
+        print(f"[NO ALERT] {ticker}: gain {result['gain']:.1f}% below hard alert floor {alert_gain_floor:.0f}%")
         return False
 
     if result["score"] < ALERT_MIN_SCORE:
@@ -2129,7 +2108,7 @@ def build_alert(result):
 
     header = f"{result['ticker']} | {result['score']:.1f}/10 | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
     if SHOW_FLOAT and result.get("float"):
-        header += f" | Float {fmt_big_num(result['float'])}"
+        header += f" | {result.get('float_info', {}).get('label') or ('Float ' + fmt_big_num(result['float']))}"
 
     lines = [
         title,
@@ -2156,6 +2135,9 @@ def build_alert(result):
     awareness = []
     if result["halt_risk"]["label"]:
         awareness.append(result["halt_risk"]["label"])
+
+    if result.get("float_info", {}).get("risk"):
+        awareness.append(result.get("float_info", {}).get("risk"))
 
     if result["sec"].get("has_risk"):
         awareness.append(result["sec"].get("label"))
@@ -2198,6 +2180,7 @@ def analyze_candidate(candidate, regime):
     market_cap = profile.get("market_cap", 0) or candidate.get("market_cap", 0)
     float_shares = profile.get("float", 0)
     float_info = classify_float(float_shares)
+    gain_boost, gain_label = leader_gain_boost(gain)
 
     # HARD FAST PASS — no candles/news/sec before this.
     passed, skip_reasons, fast_warnings = fast_pass_filter(
@@ -2212,8 +2195,6 @@ def analyze_candidate(candidate, regime):
 
     if not passed:
         return None
-
-    gain_boost, gain_label = leader_gain_boost(gain)
 
     print(f"[PIPELINE] {ticker}: passed fast filter — running deep scan")
 
@@ -2255,6 +2236,13 @@ def analyze_candidate(candidate, regime):
 
     reasons = []
     risks = []
+
+    if gain_label:
+        reasons.append(gain_label)
+    if float_info.get("label"):
+        reasons.append(float_info.get("label"))
+    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
+        risks.append(float_info.get("risk"))
 
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
@@ -2306,7 +2294,7 @@ def analyze_candidate(candidate, regime):
         market_cap=market_cap,
     )
 
-    # v33 leader boosts: high % day and low float matter, but do not override bad structure.
+    # v33 leader boosts: high % on day and low float matter, but only after structure/entry are acceptable.
     score += gain_boost
     if structure_score >= 4.5 and entry_score >= 5.5:
         score += float_info.get("boost", 0)
@@ -2324,10 +2312,10 @@ def analyze_candidate(candidate, regime):
         coil=coil,
     )
 
-    # v33 bias override: leader-only, cleaner RUNNER/WATCH/AVOID taxonomy.
+    # v33 clean taxonomy: AVOID only for truly weak names.
     if score >= 8.0 and gain >= RUNNER_MIN_GAIN:
         bias = "🟢 RUNNER"
-    elif score >= 6.0 and gain >= WATCH_MIN_GAIN:
+    elif score >= 6.0 and gain >= 15.0:
         bias = "👀 WATCH"
     elif score >= 4.0:
         bias = "🤔 NEUTRAL"
@@ -2341,6 +2329,7 @@ def analyze_candidate(candidate, regime):
         "ticker": ticker,
         "price": price,
         "gain": gain,
+        "gain_label": gain_label,
         "volume": volume,
         "float": float_shares,
         "float_info": float_info,
@@ -2372,7 +2361,7 @@ def analyze_candidate(candidate, regime):
     print(
         f"[RANK] {ticker} {score:.1f}/10 {bias} "
         f"STR{structure_score:.1f} VOL{volume_score:.1f} ENT{entry_score:.1f} NEWS{news_score:.0f} "
-        f"+{gain:.1f}% Phase={phase}"
+        f"+{gain:.1f}% {float_info.get('label', '')} Phase={phase}"
     )
 
     return result
