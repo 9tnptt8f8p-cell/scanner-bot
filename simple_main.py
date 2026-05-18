@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.5 — leadership wiring fixed clean labels"
+BOOT_MARKER = "elite scanner v33.6 — leadership globals initialized"
 
 # ============================================================
 # ENV
@@ -2573,6 +2573,10 @@ def build_alert(result):
 
 def analyze_candidate(candidate, regime):
     ticker = candidate["ticker"].upper()
+    leadership_score = 0.0
+    leadership_reasons = []
+    gain_boost = 0.0
+    gain_label = ""
 
     if is_bad_ticker(ticker):
         print(f"[FAST SKIP] {ticker}: bad ticker")
