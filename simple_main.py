@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner rebuild v32.3 FIXED — calibrated scoring + stricter common-word news"
+BOOT_MARKER = "elite scanner rebuild v32.4 FIXED — stable finalized candles + wider candidates + deterministic scoring"
 
 # ============================================================
 # ENV
@@ -46,7 +46,7 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 # Universe / fast pass
 SCAN_MIN_GAIN = 8.0                  # scanner can view wider universe internally
 PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
-OPEN_SCAN_MIN_GAIN = 12.0
+OPEN_SCAN_MIN_GAIN = 8.0
 HARD_MIN_GAIN = 25.0                 # regular-hours hard floor
 PREMARKET_HARD_MIN_GAIN = 18.0       # fixed: do not kill 18-24% premarket leaders
 ALERT_MIN_GAIN = 25.0                # alerts still prefer real 25%+ movers
@@ -467,14 +467,20 @@ def get_nasdaq_gainers():
 
 def get_candidates():
     sources = []
-    sources.extend(get_yahoo_gainers())
+    yahoo = get_yahoo_gainers()
+    sources.extend(yahoo)
 
-    # Fallback/merge only if Yahoo is thin.
-    if len(sources) < 20:
-        sources.extend(get_nasdaq_gainers())
+    # Always add Nasdaq as a fallback/second opinion when possible. If it fails,
+    # Yahoo still carries the scan.
+    sources.extend(get_nasdaq_gainers())
 
     seen = {}
     candidate_floor = dynamic_scan_min_gain()
+
+    # V32.4: do not let the candidate pool collapse from 80 -> 1 in a thin tape.
+    # Keep all names over the scan floor, plus the top few Yahoo movers even if
+    # they are slightly below floor. Fast-pass will still protect expensive scans.
+    yahoo_rank = {item.get("ticker", "").upper(): i for i, item in enumerate(yahoo, start=1)}
 
     for item in sources:
         ticker = item.get("ticker", "").upper()
@@ -482,7 +488,10 @@ def get_candidates():
             continue
 
         gain = safe_float(item.get("gain"))
-        if gain < candidate_floor:
+        rank = yahoo_rank.get(ticker, 999)
+        top_gainer_safety_net = rank <= 20 and gain >= 5.0
+
+        if gain < candidate_floor and not top_gainer_safety_net:
             continue
 
         existing = seen.get(ticker)
@@ -490,9 +499,9 @@ def get_candidates():
             seen[ticker] = item
 
     candidates = list(seen.values())
-    candidates.sort(key=lambda x: safe_float(x.get("gain")), reverse=True)
+    candidates.sort(key=lambda x: (safe_float(x.get("gain")), safe_int(x.get("volume"))), reverse=True)
 
-    print(f"[CANDIDATES] merged {len(candidates)} candidates")
+    print(f"[CANDIDATES] merged {len(candidates)} candidates from {len(sources)} raw names")
     return candidates[:MAX_GAINERS]
 
 
@@ -725,7 +734,24 @@ def calc_vwap(candles):
     return total_pv / total_v
 
 
+def finalized_candles(candles, min_keep=8):
+    """
+    V32.4 stability fix.
+    Alpaca/Yahoo 1-minute data includes the currently forming candle. That
+    unfinished candle can flip wick/VWAP/breakout/decay between scans and caused
+    scores like STR4 -> STR1 seconds apart. All structure-style calculations use
+    finalized candles only.
+    """
+    if not candles:
+        return []
+    cleaned = [c for c in candles if candle_close(c) > 0 and candle_high(c) > 0 and candle_low(c) > 0]
+    if len(cleaned) > min_keep:
+        return cleaned[:-1]
+    return cleaned
+
+
 def fallback_structure_analysis(candles):
+    candles = finalized_candles(candles)
     if not candles or len(candles) < 8:
         return {
             "above_vwap": False,
@@ -790,17 +816,29 @@ def fallback_structure_analysis(candles):
 
 
 def merge_structure(external, fallback):
+    """
+    Stable fallback wins for core live-trading booleans. External structure_engine
+    can add extra context, but it should not flip VWAP/coil/decay states from one
+    scan to the next because of a forming candle or different parser assumptions.
+    """
     if not isinstance(external, dict):
         return fallback
 
-    merged = dict(fallback)
-    for k, v in external.items():
-        if v is not None:
+    merged = dict(external)
+    stable_core_keys = {
+        "above_vwap", "higher_lows", "breakout", "breakout_level",
+        "near_high", "bad_structure", "big_upper_wick", "momentum_decay",
+        "coil", "tightening_range", "recent_volume", "previous_volume",
+        "vwap", "day_high", "recent_high", "recent_low",
+    }
+    for k, v in fallback.items():
+        if k in stable_core_keys or merged.get(k) is None:
             merged[k] = v
     return merged
 
 
 def get_structure(candles, ticker):
+    candles = finalized_candles(candles)
     fallback = fallback_structure_analysis(candles)
     external = {}
 
@@ -1182,6 +1220,7 @@ def get_struct(structure, key, default=None):
 
 
 def detect_coil(candles, structure):
+    candles = finalized_candles(candles)
     if not candles or len(candles) < 15:
         return {
             "detected": False,
@@ -1315,6 +1354,7 @@ def detect_momentum_decay(candles, structure):
 
 
 def detect_exhaustion(candles, structure, price):
+    candles = finalized_candles(candles)
     if not candles:
         return {
             "detected": False,
@@ -1369,6 +1409,7 @@ def detect_exhaustion(candles, structure, price):
 
 
 def detect_halt_risk(price, gain, float_shares, candles):
+    candles = finalized_candles(candles)
     risk = "LOW"
     reasons = []
     score = 0
@@ -1545,7 +1586,8 @@ def build_bias(score, structure_score, entry_score, news, risks, second_leg, dec
         return "⚠️ AVOID"
 
     if ("below vwap" in risk_text or "lost vwap" in risk_text) and not second_leg["detected"]:
-        if score < 7.8:
+        # A finalized-bar coil can still be WATCH, but not RUNNER, if score holds 7+.
+        if not (coil.get("detected") and entry_score >= 7.0 and score >= 7.0):
             return "⚠️ AVOID"
 
     if decay["detected"] and exhaustion["detected"] and score < 7.8:
@@ -1642,6 +1684,19 @@ def score_candidate(gain, structure_score, volume_score, news_score, entry_score
         not (decay.get("detected") and exhaustion.get("detected"))
     ):
         score = max(score, 7.05)
+
+    # Liquid coil with clean entry should not be buried just because the headline
+    # parser returns UNCLEAR instead of STRONG. Keep it as WATCH, not RUNNER.
+    if (
+        gain >= 25 and
+        entry_score >= 7.5 and
+        volume_score >= 6.0 and
+        structure_score >= 4.5 and
+        coil.get("detected") and
+        news_score >= 4.0 and
+        not (decay.get("detected") and exhaustion.get("detected"))
+    ):
+        score = max(score, 7.0)
 
     # No-news but elite structure/volume can still be a technical runner watch.
     if (
@@ -1855,25 +1910,38 @@ def analyze_candidate(candidate, regime):
     print(f"[PIPELINE] {ticker}: passed fast filter — running deep scan")
 
     candles = get_candles(ticker)
-    if not candles or len(candles) < 8:
-        print(f"[DEEP SKIP] {ticker}: insufficient candles")
+    stable_candles = finalized_candles(candles)
+    if not stable_candles or len(stable_candles) < 8:
+        print(f"[DEEP SKIP] {ticker}: insufficient finalized candles")
         return None
 
-    structure = get_structure(candles, ticker)
+    if len(candles) != len(stable_candles):
+        print(f"[CANDLES] {ticker}: using {len(stable_candles)} finalized bars (ignored active bar)")
+
+    structure = get_structure(stable_candles, ticker)
 
     # Deeper checks only after fast pass.
     news = get_best_news(ticker)
     sec = check_sec_filings(ticker)
 
-    coil = detect_coil(candles, structure)
-    second_leg = detect_second_leg(candles, structure, coil)
-    decay = detect_momentum_decay(candles, structure)
-    exhaustion = detect_exhaustion(candles, structure, price)
-    halt_risk = detect_halt_risk(price, gain, float_shares, candles)
+    coil = detect_coil(stable_candles, structure)
+    second_leg = detect_second_leg(stable_candles, structure, coil)
+    decay = detect_momentum_decay(stable_candles, structure)
+    exhaustion = detect_exhaustion(stable_candles, structure, price)
+    halt_risk = detect_halt_risk(price, gain, float_shares, stable_candles)
 
     structure_score, structure_reasons, structure_risks = score_structure(structure)
     volume_score, volume_reasons = score_volume(volume, structure)
     entry_score, entry_reasons, entry_risks = score_entry_quality(structure, coil, second_leg, exhaustion)
+
+    # V32.4 deterministic floor: if finalized bars show a liquid coil/entry, do
+    # not let one weak external/fallback flag collapse structure to 1-2.
+    if coil.get("detected") and entry_score >= 7.0 and volume_score >= 4.0:
+        structure_score = max(structure_score, 4.5)
+        if "Stabilized coil structure" not in structure_reasons:
+            structure_reasons.append("Stabilized coil structure")
+    if second_leg.get("detected"):
+        structure_score = max(structure_score, 5.5)
 
     news_score = safe_float(news.get("score", 0))
 
