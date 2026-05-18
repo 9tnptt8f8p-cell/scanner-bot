@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.2 — multi-source small-cap leader discovery"
+BOOT_MARKER = "elite scanner v33.2.1 — fixed multi-source leader function"
 
 # ============================================================
 # ENV
@@ -120,6 +120,21 @@ MAX_RAW_LEADER_POOL = 450
 
 # Source-layer small-cap focus. Unknown cap is allowed because small-cap feeds
 # often have incomplete data and the quote/profile step can verify later.
+SOURCE_MAX_MARKET_CAP = 3_000_000_000
+SOURCE_MAX_FLOAT = 150_000_000
+SOURCE_MIN_PRICE = 0.20
+SOURCE_MAX_PRICE = 80.00
+SOURCE_MIN_VOLUME = 50_000
+
+
+# ============================================================
+# v33.2.1 MULTI-SOURCE LEADER DISCOVERY CONSTANTS
+# ============================================================
+DISCOVERY_MIN_GAIN = 8.0
+RUNNER_MIN_GAIN = 27.0
+ALERT_MIN_GAIN = 27.0
+LEADER_SOURCE_LIMIT = 180
+MAX_RAW_LEADER_POOL = 450
 SOURCE_MAX_MARKET_CAP = 3_000_000_000
 SOURCE_MAX_FLOAT = 150_000_000
 SOURCE_MIN_PRICE = 0.20
@@ -747,6 +762,269 @@ def get_nasdaq_gainers():
 
 
 
+
+# ============================================================
+# MULTI-SOURCE SMALL-CAP LEADER SOURCES — v33.2.1
+# ============================================================
+
+def source_pass_item(item):
+    ticker = str(item.get("ticker", "")).upper().strip()
+    if not ticker or is_bad_ticker(ticker):
+        return False
+
+    gain = safe_float(item.get("gain"))
+    price = safe_float(item.get("price"))
+    volume = safe_int(item.get("volume"))
+    market_cap = safe_int(item.get("market_cap"))
+    float_shares = safe_int(item.get("float"))
+
+    if gain < DISCOVERY_MIN_GAIN:
+        return False
+
+    if price and (price < SOURCE_MIN_PRICE or price > SOURCE_MAX_PRICE):
+        return False
+
+    if volume and volume < SOURCE_MIN_VOLUME:
+        return False
+
+    if market_cap and market_cap > SOURCE_MAX_MARKET_CAP:
+        return False
+
+    if float_shares and float_shares > SOURCE_MAX_FLOAT:
+        return False
+
+    return True
+
+
+def normalize_leader_item(ticker, price=0, gain=0, volume=0, market_cap=0, float_shares=0, source="unknown"):
+    return {
+        "ticker": str(ticker or "").upper().strip(),
+        "price": safe_float(price),
+        "gain": safe_float(gain),
+        "volume": safe_int(volume),
+        "market_cap": safe_int(market_cap),
+        "float": safe_int(float_shares),
+        "source": source,
+        "sources": [source],
+    }
+
+
+def parse_percent_text(value):
+    return safe_float(str(value or "").replace("+", "").replace("%", ""))
+
+
+def parse_money_text(value):
+    return safe_float(str(value or "").replace("$", "").replace(",", ""))
+
+
+def parse_big_number_text(value):
+    if value is None:
+        return 0
+    s = str(value).replace(",", "").replace("$", "").strip().upper()
+    mult = 1
+    if s.endswith("T"):
+        mult = 1_000_000_000_000
+        s = s[:-1]
+    elif s.endswith("B"):
+        mult = 1_000_000_000
+        s = s[:-1]
+    elif s.endswith("M"):
+        mult = 1_000_000
+        s = s[:-1]
+    elif s.endswith("K"):
+        mult = 1_000
+        s = s[:-1]
+    return int(safe_float(s) * mult)
+
+
+def get_stockanalysis_gainers():
+    url = "https://stockanalysis.com/markets/gainers/"
+    results = []
+    try:
+        r = http_get(url, timeout=8)
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("table tbody tr")
+
+        for row in rows[:LEADER_SOURCE_LIMIT]:
+            cells = [clean_text(c.get_text(" ")) for c in row.find_all("td")]
+            if len(cells) < 5:
+                continue
+
+            ticker = cells[1]
+            gain = parse_percent_text(cells[3] if len(cells) > 3 else 0)
+            price = parse_money_text(cells[4] if len(cells) > 4 else 0)
+            volume = parse_big_number_text(cells[5] if len(cells) > 5 else 0)
+            market_cap = parse_big_number_text(cells[6] if len(cells) > 6 else 0)
+
+            item = normalize_leader_item(
+                ticker=ticker,
+                price=price,
+                gain=gain,
+                volume=volume,
+                market_cap=market_cap,
+                source="StockAnalysis",
+            )
+            if source_pass_item(item):
+                results.append(item)
+
+        print(f"[GAINERS] StockAnalysis returned {len(results)} filtered leaders")
+    except Exception as e:
+        print(f"[GAINERS ERROR] StockAnalysis: {e}")
+
+    return results
+
+
+def get_finviz_smallcap_gainers():
+    url = "https://finviz.com/screener.ashx"
+    params = {
+        "v": "111",
+        "f": "cap_smallover,sh_avgvol_o100,sh_price_u80,ta_change_u5",
+        "o": "-change",
+    }
+    results = []
+
+    try:
+        r = http_get(url, params=params, timeout=8)
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("tr[valign='top']")
+
+        for row in rows[:LEADER_SOURCE_LIMIT]:
+            cells = [clean_text(c.get_text(" ")) for c in row.find_all("td")]
+            if len(cells) < 10:
+                continue
+
+            ticker = cells[1]
+            market_cap = parse_big_number_text(cells[6] if len(cells) > 6 else 0)
+            price = parse_money_text(cells[8] if len(cells) > 8 else 0)
+            gain = parse_percent_text(cells[9] if len(cells) > 9 else 0)
+            volume = parse_big_number_text(cells[10] if len(cells) > 10 else 0)
+
+            item = normalize_leader_item(
+                ticker=ticker,
+                price=price,
+                gain=gain,
+                volume=volume,
+                market_cap=market_cap,
+                source="Finviz",
+            )
+            if source_pass_item(item):
+                results.append(item)
+
+        print(f"[GAINERS] Finviz small-cap returned {len(results)} filtered leaders")
+    except Exception as e:
+        print(f"[GAINERS ERROR] Finviz: {e}")
+
+    return results
+
+
+def get_marketwatch_gainers():
+    url = "https://www.marketwatch.com/tools/screener/stock"
+    params = {"exchange": "All", "skip": "0", "sort": "percentchange", "order": "desc"}
+    results = []
+
+    try:
+        r = http_get(url, params=params, timeout=8)
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("table tbody tr")
+
+        for row in rows[:LEADER_SOURCE_LIMIT]:
+            text = clean_text(row.get_text(" "))
+            ticker_match = re.search(r"\b[A-Z]{1,5}\b", text)
+            if not ticker_match:
+                continue
+
+            ticker = ticker_match.group(0)
+            nums = re.findall(r"[-+]?\d+(?:\.\d+)?%", text)
+            gain = parse_percent_text(nums[0]) if nums else 0
+            money = re.findall(r"\$\s*\d+(?:\.\d+)?", text)
+            price = parse_money_text(money[0]) if money else 0
+
+            item = normalize_leader_item(
+                ticker=ticker,
+                price=price,
+                gain=gain,
+                volume=0,
+                market_cap=0,
+                source="MarketWatch",
+            )
+            if source_pass_item(item):
+                results.append(item)
+
+        print(f"[GAINERS] MarketWatch returned {len(results)} filtered leaders")
+    except Exception as e:
+        print(f"[GAINERS ERROR] MarketWatch: {e}")
+
+    return results
+
+
+def merge_leader_sources(items):
+    merged = {}
+
+    for item in items:
+        ticker = str(item.get("ticker", "")).upper().strip()
+        if not ticker or is_bad_ticker(ticker):
+            continue
+
+        existing = merged.get(ticker)
+        if not existing:
+            item["sources"] = list(dict.fromkeys(item.get("sources", [item.get("source", "unknown")])))
+            merged[ticker] = item
+            continue
+
+        existing["gain"] = max(safe_float(existing.get("gain")), safe_float(item.get("gain")))
+        existing["price"] = safe_float(item.get("price")) or safe_float(existing.get("price"))
+        existing["volume"] = max(safe_int(existing.get("volume")), safe_int(item.get("volume")))
+        existing["market_cap"] = safe_int(existing.get("market_cap")) or safe_int(item.get("market_cap"))
+        existing["float"] = safe_int(existing.get("float")) or safe_int(item.get("float"))
+
+        sources = existing.get("sources", [])
+        src = item.get("source", "unknown")
+        if src not in sources:
+            sources.append(src)
+        existing["sources"] = sources
+        existing["source"] = "+".join(sources)
+
+    out = list(merged.values())
+
+    def sort_key(x):
+        gain = safe_float(x.get("gain"))
+        volume = safe_int(x.get("volume"))
+        cap = safe_int(x.get("market_cap"))
+        source_count = len(x.get("sources", []))
+        small_cap_bonus = 1 if (cap and cap <= SOURCE_MAX_MARKET_CAP) or not cap else 0
+        leader_bonus = 3 if gain >= 50 else 2 if gain >= 27 else 1 if gain >= 15 else 0
+        return (leader_bonus, gain, source_count, small_cap_bonus, volume)
+
+    out.sort(key=sort_key, reverse=True)
+
+    top50 = [x for x in out if safe_float(x.get("gain")) >= 50]
+    if top50:
+        print("[LEADERS] +50% detected: " + " | ".join(
+            f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% src={','.join(x.get('sources', []))}"
+            for x in top50[:12]
+        ))
+
+    return out[:MAX_RAW_LEADER_POOL]
+
+
+def get_multi_source_leaders():
+    sources = []
+
+    try:
+        sources.extend(get_yahoo_gainers())
+    except Exception as e:
+        print(f"[GAINERS ERROR] Yahoo source stack: {e}")
+
+    sources.extend(get_stockanalysis_gainers())
+    sources.extend(get_finviz_smallcap_gainers())
+    sources.extend(get_marketwatch_gainers())
+
+    merged = merge_leader_sources(sources)
+    print(f"[LEADERS] multi-source merged {len(merged)} candidates from {len(sources)} raw filtered names")
+    return merged
+
+
+
 def get_candidates():
     raw = get_multi_source_leaders()
 
@@ -765,11 +1043,12 @@ def get_candidates():
             seen[ticker] = item
             continue
 
-        # Keep the best gain and merge sources.
         if gain > safe_float(existing.get("gain")):
             existing.update(item)
 
-        sources = list(dict.fromkeys((existing.get("sources") or []) + (item.get("sources") or [item.get("source", "unknown")])))
+        sources = list(dict.fromkeys(
+            (existing.get("sources") or []) + (item.get("sources") or [item.get("source", "unknown")])
+        ))
         existing["sources"] = sources
         existing["source"] = "+".join(sources)
 
