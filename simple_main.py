@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.7 — no leader score clean market labels"
+BOOT_MARKER = "elite scanner v33.8 — clean analyze candidate no leader score"
 
 # ============================================================
 # ENV
@@ -2022,9 +2022,6 @@ def detect_halt_risk(price, gain, float_shares, candles):
 # Separates "who owns the day" from "is this a clean entry right now?"
 # ============================================================
 
-def calc_leadership_score(gain, volume, float_shares, news_score=0, sources=None):
-    score = 0.0
-    reasons = []
 
     gain = safe_float(gain)
     volume = safe_int(volume)
@@ -2100,39 +2097,47 @@ def calc_leadership_score(gain, volume, float_shares, news_score=0, sources=None
     return clamp(score), dedupe(reasons)
 
 
-def classify_leader_state(leadership_score, entry_score, structure_score, exhaustion, decay, gain):
+
+
+def simple_leader_reasons(gain, float_info, volume, news_score):
+    reasons = []
     gain = safe_float(gain)
-    exhausted = bool(exhaustion.get("detected")) if isinstance(exhaustion, dict) else False
-    fading = bool(decay.get("detected")) if isinstance(decay, dict) else False
+    volume = safe_int(volume)
+    news_score = safe_float(news_score)
 
-    if leadership_score >= 8 and gain >= RUNNER_MIN_GAIN:
-        if exhausted or entry_score < 4:
-            return "🔥 LEADER / EXTENDED"
-        if entry_score >= 6 and structure_score >= 4:
-            return "🟢 RUNNER"
-        return "🔥 MARKET LEADER"
+    if gain >= 300:
+        reasons.append("300%+ day leader")
+    elif gain >= 200:
+        reasons.append("200%+ day leader")
+    elif gain >= 100:
+        reasons.append("100%+ day leader")
+    elif gain >= 75:
+        reasons.append("75%+ day leader")
+    elif gain >= 50:
+        reasons.append("50%+ day leader")
+    elif gain >= RUNNER_MIN_GAIN:
+        reasons.append("27%+ momentum leader")
 
-    if leadership_score >= 6 and gain >= RUNNER_MIN_GAIN:
-        if exhausted or entry_score < 4:
-            return "🔥 LEADER / EXTENDED"
-        return "👀 LEADER WATCH"
+    if float_info and float_info.get("label"):
+        reasons.append(float_info.get("label"))
 
-    if gain >= RUNNER_MIN_GAIN and leadership_score >= 4:
-        return "👀 WATCH"
+    if volume >= 100_000_000:
+        reasons.append("100M+ volume")
+    elif volume >= 50_000_000:
+        reasons.append("50M+ volume")
+    elif volume >= 20_000_000:
+        reasons.append("20M+ volume")
+    elif volume >= 5_000_000:
+        reasons.append("5M+ volume")
 
-    return "⚠️ AVOID"
+    if news_score >= 8:
+        reasons.append("strong catalyst")
+    elif news_score >= 5:
+        reasons.append("some catalyst")
+
+    return dedupe(reasons)
 
 
-def display_score_for_alert(leadership_score, entry_score):
-    # Alert score displays leadership first but still respects entry quality.
-    return clamp((safe_float(leadership_score) * 0.70) + (safe_float(entry_score) * 0.30))
-
-
-
-# ============================================================
-# SIMPLE MARKET LABEL ENGINE — v33.7
-# No separate leader score. Uses raw leadership facts: gain, float, volume, entry, exhaustion.
-# ============================================================
 
 def simple_market_label(gain, float_shares, volume, score, entry_score, structure_score, exhaustion, decay):
     gain = safe_float(gain)
@@ -2145,11 +2150,9 @@ def simple_market_label(gain, float_shares, volume, score, entry_score, structur
     exhausted = bool(exhaustion.get("detected")) if isinstance(exhaustion, dict) else False
     fading = bool(decay.get("detected")) if isinstance(decay, dict) else False
 
-    is_tiny_float = 0 < float_shares <= 5_000_000
     is_low_float = 0 < float_shares <= 20_000_000
     huge_volume = volume >= 20_000_000
 
-    # True day leaders should stay visible even when extended.
     if gain >= 50 and (is_low_float or huge_volume):
         if exhausted or fading or entry_score < 4:
             return "🔥 MARKET LEADER — EXTENDED"
@@ -2170,7 +2173,6 @@ def simple_market_label(gain, float_shares, volume, score, entry_score, structur
 
 def simple_leader_reasons(gain, float_info, volume, news_score):
     reasons = []
-
     gain = safe_float(gain)
     volume = safe_int(volume)
     news_score = safe_float(news_score)
@@ -2584,31 +2586,38 @@ def build_alert(result):
 # CANDIDATE ANALYSIS PIPELINE
 # ============================================================
 
-def analyze_candidate(candidate, regime):
-    ticker = candidate["ticker"].upper()
-    news_score = 0.0
-    gain = safe_float(candidate.get("gain", 0))
-    price = safe_float(candidate.get("price", 0))
-    volume = safe_int(candidate.get("volume", 0))
 
-    if is_bad_ticker(ticker):
-        print(f"[FAST SKIP] {ticker}: bad ticker")
+def analyze_candidate(candidate, regime):
+    ticker = str(candidate.get("ticker", "")).upper().strip()
+    if not ticker or is_bad_ticker(ticker):
         return None
 
-    # Live quote first, screener fallback.
-    quote = get_finnhub_quote(ticker)
-    price = safe_float(quote.get("price")) or safe_float(candidate.get("price"))
-    gain = safe_float(quote.get("gain")) or safe_float(candidate.get("gain"))
-    volume = safe_int(candidate.get("volume")) or safe_int(quote.get("volume"))
+    # Define core variables FIRST. This fixes all old "gain is not defined" branches.
+    price = safe_float(candidate.get("price"))
+    gain = safe_float(candidate.get("gain"))
+    volume = safe_int(candidate.get("volume"))
+    source = candidate.get("source", "unknown")
 
-    # Lightweight profile before expensive deep scan.
+    if gain <= 0:
+        return None
+
+    live = get_finnhub_quote(ticker)
+    live_price = safe_float(live.get("price"))
+    live_gain = safe_float(live.get("gain"))
+
+    if live_price > 0:
+        price = live_price
+    if live_gain > 0:
+        gain = live_gain
+
     profile = get_profile(ticker)
-    market_cap = profile.get("market_cap", 0) or candidate.get("market_cap", 0)
-    float_shares = profile.get("float", 0)
-    float_info = classify_float(float_shares)
+    float_shares = safe_int(profile.get("float"))
+    market_cap = safe_int(profile.get("market_cap"))
 
-    # HARD FAST PASS — no candles/news/sec before this.
-    passed, skip_reasons, fast_warnings = fast_pass_filter(
+    if not volume:
+        volume = safe_int(candidate.get("volume"))
+
+    ok, fast_reasons, fast_warnings = fast_pass_filter(
         ticker=ticker,
         price=price,
         gain=gain,
@@ -2617,136 +2626,52 @@ def analyze_candidate(candidate, regime):
         float_shares=float_shares,
         regime=regime,
     )
-
-    if not passed:
+    if not ok:
         return None
 
     print(f"[PIPELINE] {ticker}: passed fast filter — running deep scan")
 
-    candles = get_candles(ticker)
-    stable_candles = finalized_candles(candles)
-    if not stable_candles or len(stable_candles) < 8:
+    candles_raw = get_candles(ticker)
+    candles = finalized_candles(candles_raw)
+    if candles:
+        print(f"[CANDLES] {ticker}: using {len(candles)} finalized bars (ignored active bar)")
+
+    if not candles or len(candles) < 8:
         print(f"[DEEP SKIP] {ticker}: insufficient finalized candles")
         return None
 
-    if len(candles) != len(stable_candles):
-        print(f"[CANDLES] {ticker}: using {len(stable_candles)} finalized bars (ignored active bar)")
+    structure = get_structure(candles, ticker)
+    coil = detect_coil(candles, structure)
+    second_leg = detect_second_leg(candles, structure, coil)
+    decay = detect_momentum_decay(candles, structure)
+    exhaustion = detect_exhaustion(candles, structure, price)
+    halt_risk = detect_halt_risk(price, gain, float_shares, candles)
 
-    structure = get_structure(stable_candles, ticker)
-
-    # Deeper checks only after fast pass.
+    float_info = classify_float(float_shares)
     news = get_best_news(ticker)
+    news_score = safe_float(news.get("score", 0))
     sec = check_sec_filings(ticker)
 
-    coil = detect_coil(stable_candles, structure)
-    second_leg = detect_second_leg(stable_candles, structure, coil)
-    decay = detect_momentum_decay(stable_candles, structure)
-    exhaustion = detect_exhaustion(stable_candles, structure, price)
-    halt_risk = detect_halt_risk(price, gain, float_shares, stable_candles)
-
-    structure_score, structure_reasons, structure_risks = score_structure(structure)
+    structure_score, structure_reasons = score_structure(structure, coil, second_leg)
     volume_score, volume_reasons = score_volume(volume, structure)
-    entry_score, entry_reasons, entry_risks = score_entry_quality(structure, coil, second_leg, exhaustion)
-
-    # V32.4 deterministic floor: if finalized bars show a liquid coil/entry, do
-    # not let one weak external/fallback flag collapse structure to 1-2.
-    if coil.get("detected") and entry_score >= 7.0 and volume_score >= 4.0:
-        structure_score = max(structure_score, 4.5)
-        if "Stabilized coil structure" not in structure_reasons:
-            structure_reasons.append("Stabilized coil structure")
-    if second_leg.get("detected"):
-        structure_score = max(structure_score, 5.5)
-
-    news_score = safe_float(news.get("score", 0))
-
-    reasons = []
-    risks = []
-
-    if float_info.get("label"):
-        reasons.append(float_info.get("label"))
-    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
-        risks.append(float_info.get("risk"))
-
-    reasons.extend(structure_reasons)
-    reasons.extend(volume_reasons)
-
-    if coil["detected"]:
-        reasons.append("Tight coil / second-leg pressure")
-
-    if second_leg["detected"]:
-        reasons.append("Second-leg continuation")
-
-    if news_score >= 8:
-        reasons.append(news.get("explain", "Real catalyst"))
-
-    reasons.extend(entry_reasons)
-
-    # Soft fast-pass warnings become awareness, not hard skips.
-    risks.extend(fast_warnings)
-
-    # Risk stack
-    if news_score <= 2:
-        risks.append(news.get("explain", "Weak/no catalyst"))
-
-    risks.extend(structure_risks)
-    risks.extend(decay["risks"])
-    risks.extend(entry_risks)
-
-    if exhaustion["detected"]:
-        risks.append(exhaustion["risk"])
-
-    if sec.get("has_risk"):
-        risks.append(sec.get("label"))
-
-    if halt_risk["risk"] == "HIGH":
-        risks.append("High halt risk / size carefully")
+    entry_score, entry_reasons = score_entry(structure, coil, second_leg, exhaustion, decay)
+    risk_penalty, risk_reasons = score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
 
     score = score_candidate(
-        gain=gain,
         structure_score=structure_score,
         volume_score=volume_score,
+        entry_score=entry_score,
         news_score=news_score,
-        entry_score=entry_score,
-        coil=coil,
-        second_leg=second_leg,
-        decay=decay,
-        exhaustion=exhaustion,
-        sec=sec,
+        risk_penalty=risk_penalty,
         regime=regime,
-        float_shares=float_shares,
-        market_cap=market_cap,
     )
 
-    # v33 leader boosts: high % on day and low float matter, but only after structure/entry are acceptable.
-    if structure_score >= 4.5 and entry_score >= 5.5:
-        score += float_info.get("boost", 0)
+    # High % day and low float matter, but do not override broken structure completely.
+    gain_boost, gain_label = leader_gain_boost(gain)
+    score += gain_boost
+    if structure_score >= 4.0 and entry_score >= 4.0:
+        score += safe_float(float_info.get("boost", 0))
     score = clamp(score)
-
-    # v33.3: leadership is separate from entry. Extended leaders stay leaders, not fake AVOIDs.
-    entry_score_final = entry_score
-    display_score = display_score_for_alert(leadership_score, entry_score_final)
-
-    bias = build_bias(
-        score=score,
-        structure_score=structure_score,
-        entry_score=entry_score,
-        news=news,
-        risks=risks,
-        second_leg=second_leg,
-        decay=decay,
-        exhaustion=exhaustion,
-        coil=coil,
-    )
-
-    # v33 clean taxonomy: AVOID only for truly weak names.
-    if score >= 8.0 and gain >= RUNNER_MIN_GAIN:
-        bias = "🟢 RUNNER"
-    elif score >= 6.0 and gain >= 15.0:
-        bias = "👀 WATCH"
-    elif score >= 4.0:
-        bias = "🤔 NEUTRAL"
-    else:
-        bias = "⚠️ AVOID"
 
     bias = simple_market_label(
         gain=gain,
@@ -2762,58 +2687,69 @@ def analyze_candidate(candidate, regime):
     phase = build_phase(structure, coil, second_leg, exhaustion, decay)
     entry = build_entry(bias, structure, coil, second_leg, entry_score)
 
-    result = {
+    reasons = []
+    risks = []
+
+    reasons.extend(simple_leader_reasons(
+        gain=gain,
+        float_info=float_info,
+        volume=volume,
+        news_score=news_score,
+    ))
+    if gain_label:
+        reasons.append(gain_label)
+
+    reasons.extend(structure_reasons)
+    reasons.extend(volume_reasons)
+    reasons.extend(entry_reasons)
+
+    risks.extend(risk_reasons)
+    if sec.get("label"):
+        risks.append(sec.get("label"))
+    if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
+        risks.append(float_info.get("risk"))
+    if halt_risk.get("label"):
+        risks.append(halt_risk.get("label"))
+
+    reasons = dedupe(reasons)
+    risks = dedupe(risks)
+
+    print(
+        f"[RANK] {ticker} {score:.1f}/10 {bias} "
+        f"+{gain:.1f}% {float_info.get('label', '')} Phase={phase}"
+    )
+
+    return {
         "ticker": ticker,
         "price": price,
         "gain": gain,
-        "gain_label": gain_label,
         "volume": volume,
         "float": float_shares,
         "float_info": float_info,
         "market_cap": market_cap,
         "score": score,
-        "structure_score": structure_score,
-        "volume_score": volume_score,
-        "entry_score": entry_score,
-        "news_score": news_score,
-        "news_label": news.get("label", ""),
-        "news_explain": news.get("explain", ""),
-        "headline": news.get("headline", ""),
-        "news_quality": news.get("quality", ""),
-        "reasons": dedupe(reasons),
-        "risks": dedupe(risks),
         "bias": bias,
-        "entry": entry,
         "phase": phase,
+        "entry": entry,
+        "reasons": reasons,
+        "risks": risks,
+        "news": news,
+        "news_score": news_score,
+        "sec": sec,
         "structure": structure,
         "coil": coil,
         "second_leg": second_leg,
         "decay": decay,
         "exhaustion": exhaustion,
         "halt_risk": halt_risk,
-        "sec": sec,
-        "regime": regime,
+        "source": source,
     }
 
-    print(
-        f"[RANK] {ticker} {score:.1f}/10 {bias} "
-        f"STR{structure_score:.1f} VOL{volume_score:.1f} ENT{entry_score:.1f} NEWS{news_score:.0f} "
-        f"+{gain:.1f}% {float_info.get('label', '')} Phase={phase}"
-    )
-
-    return result
-
-
-# ============================================================
-# SCANNER LOOP
-# ============================================================
 
 def sort_results(results):
-    # v33.3: sort by true leadership first, then entry/actionability.
     return sorted(
         results,
         key=lambda r: (
-            safe_float(r.get("leadership_score", r.get("score", 0))),
             safe_float(r.get("score", 0)),
             safe_float(r.get("gain", 0)),
             safe_int(r.get("volume", 0)),
