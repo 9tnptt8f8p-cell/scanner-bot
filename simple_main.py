@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.8 — clean analyze candidate no leader score"
+BOOT_MARKER = "elite scanner v33.9 — scoring helper signature fix"
 
 # ============================================================
 # ENV
@@ -2587,6 +2587,117 @@ def build_alert(result):
 # ============================================================
 
 
+
+# ============================================================
+# SAFE SCORING WRAPPERS — v33.9
+# Keeps analyze_candidate compatible with older helper signatures.
+# ============================================================
+
+def safe_score_structure(structure, coil=None, second_leg=None):
+    try:
+        return score_structure(structure, coil, second_leg)
+    except TypeError:
+        try:
+            return score_structure(structure)
+        except Exception as e:
+            print(f"[SCORE ERROR] structure: {e}")
+            return 0.0, []
+    except Exception as e:
+        print(f"[SCORE ERROR] structure: {e}")
+        return 0.0, []
+
+
+def safe_score_volume(volume, structure=None):
+    try:
+        return score_volume(volume, structure)
+    except TypeError:
+        try:
+            return score_volume(volume)
+        except Exception as e:
+            print(f"[SCORE ERROR] volume: {e}")
+            return 0.0, []
+    except Exception as e:
+        print(f"[SCORE ERROR] volume: {e}")
+        return 0.0, []
+
+
+def safe_score_entry(structure, coil=None, second_leg=None, exhaustion=None, decay=None):
+    try:
+        return score_entry(structure, coil, second_leg, exhaustion, decay)
+    except TypeError:
+        try:
+            return score_entry(structure, coil, second_leg)
+        except TypeError:
+            try:
+                return score_entry(structure)
+            except Exception as e:
+                print(f"[SCORE ERROR] entry: {e}")
+                return 0.0, []
+        except Exception as e:
+            print(f"[SCORE ERROR] entry: {e}")
+            return 0.0, []
+    except Exception as e:
+        print(f"[SCORE ERROR] entry: {e}")
+        return 0.0, []
+
+
+def safe_score_risk(decay=None, exhaustion=None, sec=None, halt_risk=None, fast_warnings=None):
+    try:
+        return score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
+    except TypeError:
+        try:
+            return score_risk(decay, exhaustion, sec)
+        except TypeError:
+            try:
+                return score_risk(decay)
+            except Exception as e:
+                print(f"[SCORE ERROR] risk: {e}")
+                return 0.0, []
+        except Exception as e:
+            print(f"[SCORE ERROR] risk: {e}")
+            return 0.0, []
+    except Exception as e:
+        print(f"[SCORE ERROR] risk: {e}")
+        return 0.0, []
+
+
+def safe_score_candidate_v33(structure_score, volume_score, entry_score, news_score, risk_penalty, regime=None):
+    try:
+        return score_candidate(
+            structure_score=structure_score,
+            volume_score=volume_score,
+            entry_score=entry_score,
+            news_score=news_score,
+            risk_penalty=risk_penalty,
+            regime=regime,
+        )
+    except TypeError:
+        try:
+            return score_candidate(structure_score, volume_score, entry_score, news_score, risk_penalty, regime)
+        except TypeError:
+            # Fallback direct v33 formula.
+            base = (
+                safe_float(structure_score) * 0.35
+                + safe_float(volume_score) * 0.25
+                + safe_float(entry_score) * 0.25
+                + safe_float(news_score) * 0.15
+            )
+            base -= safe_float(risk_penalty) * 0.25
+            if regime:
+                base += safe_float(regime.get("score_adjust", 0))
+            return clamp(base)
+    except Exception as e:
+        print(f"[SCORE ERROR] candidate: {e}")
+        base = (
+            safe_float(structure_score) * 0.35
+            + safe_float(volume_score) * 0.25
+            + safe_float(entry_score) * 0.25
+            + safe_float(news_score) * 0.15
+        )
+        base -= safe_float(risk_penalty) * 0.25
+        return clamp(base)
+
+
 def analyze_candidate(candidate, regime):
     ticker = str(candidate.get("ticker", "")).upper().strip()
     if not ticker or is_bad_ticker(ticker):
@@ -2652,19 +2763,12 @@ def analyze_candidate(candidate, regime):
     news_score = safe_float(news.get("score", 0))
     sec = check_sec_filings(ticker)
 
-    structure_score, structure_reasons = score_structure(structure, coil, second_leg)
-    volume_score, volume_reasons = score_volume(volume, structure)
-    entry_score, entry_reasons = score_entry(structure, coil, second_leg, exhaustion, decay)
-    risk_penalty, risk_reasons = score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
+    structure_score, structure_reasons = safe_score_structure(structure, coil, second_leg)
+    volume_score, volume_reasons = safe_score_volume(volume, structure)
+    entry_score, entry_reasons = safe_score_entry(structure, coil, second_leg, exhaustion, decay)
+    risk_penalty, risk_reasons = safe_score_risk(decay, exhaustion, sec, halt_risk, fast_warnings)
 
-    score = score_candidate(
-        structure_score=structure_score,
-        volume_score=volume_score,
-        entry_score=entry_score,
-        news_score=news_score,
-        risk_penalty=risk_penalty,
-        regime=regime,
-    )
+    score = safe_score_candidate_v33(structure_score, volume_score, entry_score, news_score, risk_penalty, regime)
 
     # High % day and low float matter, but do not override broken structure completely.
     gain_boost, gain_label = leader_gain_boost(gain)
