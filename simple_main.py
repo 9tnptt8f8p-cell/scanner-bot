@@ -3101,29 +3101,34 @@ def print_top_ranked(results):
     )
     print(f"[SCAN] Top ranked: {top}")
 
-
 def run_scanner():
     print(f"[BOOT] {BOOT_MARKER}")
-while True:
-    try:
-        if not market_is_active():
 
-            # Reduce overnight Render wakeups/log spam
-            now = datetime.now(ET)
+    while True:
+        try:
+            if not market_is_active():
+                now = datetime.now(ET)
 
-            if now.time() >= dtime(16, 10) or now.time() < dtime(7, 30):
-                time.sleep(300)  # 5 min after-hours / overnight
-            else:
-                time.sleep(60)   # 1 min premarket waiting
+                if now.time() >= dtime(16, 10) or now.time() < dtime(7, 30):
+                    time.sleep(300)
+                else:
+                    time.sleep(60)
 
-            continue
+                continue
 
-        SENT_THIS_CYCLE.clear()
+            SENT_THIS_CYCLE.clear()
 
             print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
+
             candidates = get_candidates()
+
             regime = estimate_market_regime(candidates)
+
             print(f"[REGIME] {regime['label']} — {regime['description']}")
+
+        except Exception as e:
+            print(f"[SCAN ERROR] {e}")
+            time.sleep(10)
 
             results = []
 
