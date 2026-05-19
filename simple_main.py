@@ -3104,14 +3104,21 @@ def print_top_ranked(results):
 
 def run_scanner():
     print(f"[BOOT] {BOOT_MARKER}")
+while True:
+    try:
+        if not market_is_active():
 
-    while True:
-        try:
-            if not market_is_active():
-                time.sleep(60)
-                continue
+            # Reduce overnight Render wakeups/log spam
+            now = datetime.now(ET)
 
-            SENT_THIS_CYCLE.clear()
+            if now.time() >= dtime(16, 10) or now.time() < dtime(7, 30):
+                time.sleep(300)  # 5 min after-hours / overnight
+            else:
+                time.sleep(60)   # 1 min premarket waiting
+
+            continue
+
+        SENT_THIS_CYCLE.clear()
 
             print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
             candidates = get_candidates()
