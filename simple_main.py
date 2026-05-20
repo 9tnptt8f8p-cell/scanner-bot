@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.15 — news cleanup only"
+BOOT_MARKER = "elite scanner v33.16 — full rewrite yahoo-safe loop-fixed"
 
 # ============================================================
 # ENV
@@ -150,7 +150,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v33.14 alert safety normalizer fixed", 200
+    return "scanner alive — v33.16 yahoo-safe loop-fixed", 200
 
 
 @app.route("/health")
@@ -269,6 +269,33 @@ def http_get(url, params=None, headers=None, timeout=6):
         default_headers.update(headers)
     return requests.get(url, params=params, headers=default_headers, timeout=timeout)
 
+
+
+
+def safe_json_response(response, label="HTTP"):
+    """Return JSON safely without crashing when a site sends HTML, blank text, or rate-limit pages."""
+    try:
+        text = getattr(response, "text", "") or ""
+        if not text.strip():
+            print(f"[{label} ERROR] empty response")
+            return None
+
+        content_type = ""
+        try:
+            content_type = response.headers.get("Content-Type", "")
+        except Exception:
+            content_type = ""
+
+        # Still allow JSON even if content-type is missing, but warn on obvious HTML.
+        if "html" in content_type.lower() or text.lstrip().startswith("<"):
+            print(f"[{label} ERROR] non-JSON response: {text[:120]}")
+            return None
+
+        return response.json()
+    except Exception as e:
+        text = getattr(response, "text", "") or ""
+        print(f"[{label} ERROR] invalid JSON: {e} | raw={text[:120]}")
+        return None
 
 def http_post(url, payload=None, params=None, headers=None, timeout=8):
     default_headers = {
@@ -621,7 +648,9 @@ def get_yahoo_predefined_gainers():
 
     try:
         r = http_get(url, params=params, timeout=8)
-        data = r.json()
+        data = safe_json_response(r, "GAINERS Yahoo predefined")
+        if not data:
+            return []
         result = data.get("finance", {}).get("result") or []
         if not result:
             return []
@@ -684,7 +713,9 @@ def get_yahoo_custom_percent_gainers():
                 max_price=max_price,
             )
             r = http_post(url, payload=payload, timeout=8)
-            data = r.json()
+            data = safe_json_response(r, f"GAINERS {label}")
+            if not data:
+                continue
             result = data.get("finance", {}).get("result") or []
             if not result:
                 print(f"[GAINERS] {label} returned 0 names")
@@ -3121,17 +3152,11 @@ def run_scanner():
             print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
 
             candidates = get_candidates()
-
             regime = estimate_market_regime(candidates)
 
             print(f"[REGIME] {regime['label']} — {regime['description']}")
 
-        except Exception as e:
-            print(f"[SCAN ERROR] {e}")
-            time.sleep(10)
-
             results = []
-
             for candidate in candidates:
                 try:
                     result = analyze_candidate(candidate, regime)
