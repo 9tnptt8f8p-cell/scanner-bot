@@ -3427,6 +3427,68 @@ def meaningful_change_since_alert(ticker, price, score, bias):
     return False, "cooldown/no meaningful change"
 
 
+
+
+def is_elite_market_leader(result):
+    """
+    v34.9: separates runner quality from entry quality.
+    A true day leader should not be blocked as AVOID just because the current
+    entry is extended, fakeout-sensitive, or needs a reset.
+    """
+    if not isinstance(result, dict):
+        return False
+
+    gain = safe_float(result.get("gain"))
+    score = safe_float(result.get("score"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    structure = result.get("structure") or {}
+    news_score = safe_float(result.get("news_score", (result.get("news") or {}).get("score", 0)))
+    daily_score = safe_float((result.get("daily_context") or {}).get("score", 0))
+    fresh_score = safe_float((result.get("freshness") or {}).get("score", 0))
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+
+    low_or_unknown_float = float_shares <= 0 or float_shares <= 40_000_000
+    massive_volume = volume >= 10_000_000
+    extreme_leader = gain >= 75 and massive_volume and low_or_unknown_float
+    strong_leader = gain >= 50 and score >= 8.0 and massive_volume and low_or_unknown_float
+    catalyst_leader = gain >= RUNNER_MIN_GAIN and score >= 8.5 and news_score >= 7.5 and volume >= 1_000_000
+    daily_fresh_leader = gain >= RUNNER_MIN_GAIN and score >= 8.5 and (daily_score >= 1.0 or fresh_score >= 1.0) and volume >= 1_000_000
+
+    # Needs at least one sign it is still structurally alive. This prevents true broken fades
+    # from getting promoted just because they had a giant earlier spike.
+    still_alive = above_vwap or near_high or breakout or higher_lows
+
+    return bool(still_alive and (extreme_leader or strong_leader or catalyst_leader or daily_fresh_leader))
+
+
+def apply_elite_leader_gate_fix(result):
+    """v34.9: never call elite leaders AVOID; mark them as extended/watch instead."""
+    if not isinstance(result, dict) or not is_elite_market_leader(result):
+        return result
+
+    tier = result.get("trade_tier", "") or ""
+    phase = result.get("phase", "") or ""
+    bias = result.get("bias", "") or ""
+
+    if "AVOID" in tier:
+        result["trade_tier"] = "👀 MARKET LEADER — EXTENDED"
+    elif not tier or "MARKET WATCH" in tier:
+        result["trade_tier"] = "👀 MARKET LEADER — EXTENDED"
+
+    if bias == "⚠️ AVOID" or "AVOID" in bias:
+        result["bias"] = "🔥 MARKET LEADER — EXTENDED"
+
+    if "FAKEOUT" in phase:
+        result["phase"] = "⚠️ EXTENDED / RESET NEEDED"
+
+    result["elite_leader"] = True
+    return result
+
 def should_alert(result):
     ticker = result["ticker"]
 
@@ -3444,13 +3506,18 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
         return False
 
+    result = apply_elite_leader_gate_fix(result)
     tier = result.get("trade_tier", "")
-    if result["bias"] == "⚠️ AVOID" or "AVOID" in tier:
+    elite_leader = bool(result.get("elite_leader"))
+
+    # v34.9: do not block elite day leaders just because entry quality says wait/extended.
+    # AVOID should mean broken/low-quality, not simply "do not chase this candle."
+    if not elite_leader and (result["bias"] == "⚠️ AVOID" or "AVOID" in tier):
         print(f"[NO ALERT] {ticker}: avoid/wait tier")
         return False
 
-    # v34: extended market leaders stay visible in ranking but only alert if truly exceptional.
-    if "AWARENESS" in tier and result["score"] < 8.5:
+    # Extended market leaders stay visible; only alert if exceptional enough.
+    if ("AWARENESS" in tier or "EXTENDED" in tier) and result["score"] < 8.5 and not elite_leader:
         print(f"[NO ALERT] {ticker}: awareness/extended tier under 8.5")
         return False
 
@@ -3475,14 +3542,15 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    result = apply_elite_leader_gate_fix(result)
     tier = result.get("trade_tier", "")
-    if "TRADEABLE RUNNER" in tier:
+    if "TRADEABLE" in tier:
         if result.get("second_leg", {}).get("detected"):
             return "🔥 SECOND LEG"
         if result.get("coil", {}).get("detected"):
             return "🔥 COIL"
         return "🔥 TRADEABLE"
-    if "AWARENESS" in tier:
+    if result.get("elite_leader") or "AWARENESS" in tier or "MARKET LEADER — EXTENDED" in tier:
         return "👀 MARKET LEADER — EXTENDED"
     if "AVOID" in tier:
         return "⚠️ AVOID / WAIT"
@@ -3979,6 +4047,19 @@ def analyze_candidate(candidate, regime):
     reasons = dedupe(reasons)
     risks = dedupe(risks)
 
+    preview_result = {
+        "ticker": ticker, "score": score, "price": price, "gain": gain,
+        "volume": volume, "float": float_shares, "bias": bias,
+        "trade_tier": trade_tier, "phase": phase, "structure": structure,
+        "news_score": news_score, "news": news,
+        "daily_context": daily_context, "freshness": freshness,
+    }
+    preview_result = apply_elite_leader_gate_fix(preview_result)
+    trade_tier = preview_result.get("trade_tier", trade_tier)
+    bias = preview_result.get("bias", bias)
+    phase = preview_result.get("phase", phase)
+    elite_leader = bool(preview_result.get("elite_leader"))
+
     print(
         f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
         f"+{gain:.1f}% {float_info.get('label', '')} "
@@ -4019,6 +4100,7 @@ def analyze_candidate(candidate, regime):
         "halt_risk": halt_risk,
         "freshness": freshness,
         "daily_context": daily_context,
+        "elite_leader": elite_leader,
         "source": source,
     }
 
