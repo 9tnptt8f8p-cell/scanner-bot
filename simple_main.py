@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta, time as dtime, timezone
 from zoneinfo import ZoneInfo
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
 
 import requests
@@ -24,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.4 — advanced dilution tiers + balanced continuation"
+BOOT_MARKER = "elite scanner v34.6 — fast parallel news + advanced dilution + clean alerts"
 
 # ============================================================
 # ENV
@@ -32,6 +33,7 @@ BOOT_MARKER = "elite scanner v34.4 — advanced dilution tiers + balanced contin
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+BENZINGA_API_KEY = os.getenv("BENZINGA_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
@@ -1683,6 +1685,7 @@ JUNK_HEADLINE_PHRASES = [
     "top gainers", "market movers", "most active", "gap-ups and gap-downs",
     "driving market activity", "shares are trading higher",
     "benzinga examines", "what's going on", "today's session",
+    "why it matters", "stocks to watch", "midday movers", "pre-market movers",
 
     # Law-firm / investigation junk
     "deadline", "law firm", "investigation", "shareholder alert",
@@ -1699,7 +1702,7 @@ JUNK_HEADLINE_PHRASES = [
 
 STALE_NEWS_MARKERS = [
     "mo ago", "yr ago", "year ago", "years ago",
-    "sep ", "sept ", "oct ", "nov ", "dec 2025", "2025",
+    "sep ", "sept ", "oct ", "nov ", "dec 2025", "2025", "2024", "2023",
 ]
 
 QUOTE_CARD_RE = re.compile(
@@ -1720,7 +1723,7 @@ STRONG_NEWS_PATTERNS = {
         "clinical data", "positive topline", "meets primary endpoint",
     ],
     "Contract / Order": [
-        "contract", "purchase order", "supply agreement", "government contract",
+        "contract", "purchase order", "supply agreement", "distribution agreement", "licensing agreement", "government contract",
         "multi-year agreement", "master services agreement", "award",
     ],
     "AI / Nvidia": [
@@ -1737,7 +1740,7 @@ STRONG_NEWS_PATTERNS = {
     ],
     "Partnership": [
         "partnership", "collaboration", "mou", "memorandum of understanding",
-        "strategic alliance",
+        "strategic alliance", "joint venture", "letter of intent",
     ],
     "Infrastructure / Facility": [
         "facility", "battery", "manufacturing", "buildout", "production capacity",
@@ -2005,6 +2008,103 @@ def scrape_globenewswire(ticker):
     return []
 
 
+def normalize_headline_key(headline):
+    h = clean_text(headline).lower()
+    h = re.sub(r"[^a-z0-9 ]+", " ", h)
+    h = re.sub(r"\b(nasdaq|nyse|amex|inc|ltd|corp|company|plc|llc)\b", " ", h)
+    h = re.sub(r"\s+", " ", h).strip()
+    return h[:160]
+
+
+def dedupe_headlines_fast(headlines):
+    out = []
+    seen = set()
+    for h in headlines or []:
+        h = clean_text(h)
+        if not h:
+            continue
+        key = normalize_headline_key(h)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
+
+
+def fetch_finnhub_company_news(ticker):
+    """Fast API news source. Uses only last 3 calendar days so old stories do not outrank fresh catalysts."""
+    if not FINNHUB_API_KEY:
+        return []
+    try:
+        today = now_et().date()
+        start = today - timedelta(days=3)
+        url = "https://finnhub.io/api/v1/company-news"
+        params = {
+            "symbol": ticker,
+            "from": start.isoformat(),
+            "to": today.isoformat(),
+            "token": FINNHUB_API_KEY,
+        }
+        r = http_get(url, params=params, timeout=3)
+        data = safe_json_response(r, f"NEWS Finnhub {ticker}")
+        if not isinstance(data, list):
+            return []
+        headlines = []
+        for item in data[:12]:
+            headline = clean_text(item.get("headline") or item.get("summary") or "")
+            if headline and strict_ticker_in_text(ticker, headline) and not is_junk_news_text(headline, ticker):
+                headlines.append(headline)
+        if headlines:
+            print(f"[NEWS FAST] Finnhub {ticker}: {headlines[0][:100]}")
+        return dedupe_headlines_fast(headlines)[:8]
+    except Exception as e:
+        print(f"[NEWS ERROR] Finnhub {ticker}: {e}")
+        return []
+
+
+def fetch_benzinga_news(ticker):
+    """Optional premium source. Only runs when BENZINGA_API_KEY is set."""
+    if not BENZINGA_API_KEY:
+        return []
+    try:
+        url = "https://api.benzinga.com/api/v2/news"
+        params = {
+            "token": BENZINGA_API_KEY,
+            "tickers": ticker,
+            "items": 10,
+            "displayOutput": "full",
+        }
+        r = http_get(url, params=params, timeout=3)
+        data = safe_json_response(r, f"NEWS Benzinga {ticker}")
+        if not isinstance(data, list):
+            return []
+        headlines = []
+        for item in data[:10]:
+            headline = clean_text(item.get("title") or "")
+            if headline and not is_junk_news_text(headline, ticker):
+                headlines.append(headline)
+        if headlines:
+            print(f"[NEWS FAST] Benzinga {ticker}: {headlines[0][:100]}")
+        return dedupe_headlines_fast(headlines)[:8]
+    except Exception as e:
+        print(f"[NEWS ERROR] Benzinga {ticker}: {e}")
+        return []
+
+
+def rank_news_candidates(headlines, ticker):
+    ranked = []
+    for h in dedupe_headlines_fast(headlines):
+        c = classify_news(h, ticker)
+        # Fresh, real catalysts should beat generic snippets. Stale/junk cannot win.
+        if c.get("quality") in {"JUNK", "STALE"}:
+            c["score"] = min(safe_float(c.get("score", 0)), 1)
+        if c.get("quality") == "STRONG":
+            c["score"] = min(10, safe_float(c.get("score", 0)) + 0.5)
+        ranked.append(c)
+    ranked.sort(key=lambda x: safe_float(x.get("score", 0)), reverse=True)
+    return ranked
+
+
 def get_best_news(ticker):
     cached = cached_get(NEWS_CACHE, ticker)
     if cached:
@@ -2012,26 +2112,36 @@ def get_best_news(ticker):
 
     all_headlines = []
 
-    # Yahoo first, then PR sources.
-    for fn in [scrape_yahoo_news, scrape_prnewswire, scrape_globenewswire]:
-        headlines = fn(ticker)
-        for h in headlines:
-            if h not in all_headlines:
-                all_headlines.append(h)
+    # v34.6: API/PR sources run in parallel first. Yahoo is last-resort only
+    # because it rate-limits and often returns stale quote-card junk.
+    fast_sources = [fetch_finnhub_company_news, fetch_benzinga_news, scrape_prnewswire, scrape_globenewswire]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fn, ticker): fn.__name__ for fn in fast_sources}
+        for fut in as_completed(futures, timeout=7):
+            name = futures[fut]
+            try:
+                all_headlines.extend(fut.result() or [])
+            except Exception as e:
+                print(f"[NEWS ERROR] {ticker} {name}: {e}")
 
-    if not all_headlines:
+    ranked = rank_news_candidates(all_headlines, ticker)
+    if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
+        best = ranked[0]
+        print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
+        return cached_set(NEWS_CACHE, ticker, best)
+
+    # Fallback only if fast sources did not find a real catalyst.
+    yahoo_headlines = scrape_yahoo_news(ticker)
+    if yahoo_headlines:
+        all_headlines.extend(yahoo_headlines)
+        ranked = rank_news_candidates(all_headlines, ticker)
+
+    if not ranked:
         news = classify_news("", ticker)
         print(f"[NEWS] {ticker}: NO NEWS")
         return cached_set(NEWS_CACHE, ticker, news)
 
-    ranked = []
-    for h in all_headlines:
-        c = classify_news(h, ticker)
-        ranked.append(c)
-
-    ranked.sort(key=lambda x: x["score"], reverse=True)
     best = ranked[0]
-
     print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10)")
     return cached_set(NEWS_CACHE, ticker, best)
 
