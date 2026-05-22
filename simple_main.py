@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.2 — candle fallback stack + quote fallback + RVOL phase/tier upgrade"
+BOOT_MARKER = "elite scanner v34.3 — balanced premarket continuation + stale-news guard"
 
 # ============================================================
 # ENV
@@ -1825,6 +1825,32 @@ def strict_ticker_in_text(ticker, text):
     return re.search(rf"\b{re.escape(t)}\b", raw, flags=re.IGNORECASE) is not None
 
 
+def is_stale_news_text(headline):
+    """Block old/stale headlines from being scored as live catalysts."""
+    raw = clean_text(headline)
+    if not raw:
+        return False
+    h = f" {raw.lower()} "
+
+    stale_patterns = [
+        r"\b2024\b", r"\b2023\b", r"\b2022\b",
+        r"\bjan(?:uary)?\s+\d{1,2},\s*2025\b",
+        r"\bfeb(?:ruary)?\s+\d{1,2},\s*2025\b",
+        r"\bmar(?:ch)?\s+\d{1,2},\s*2025\b",
+        r"\bapr(?:il)?\s+\d{1,2},\s*2025\b",
+        r"\bmay\s+\d{1,2},\s*2025\b",
+        r"\bjun(?:e)?\s+\d{1,2},\s*2025\b",
+        r"\bjul(?:y)?\s+\d{1,2},\s*2025\b",
+        r"\baug(?:ust)?\s+\d{1,2},\s*2025\b",
+        r"\bsep(?:t|tember)?\s+\d{1,2},\s*2025\b",
+        r"\boct(?:ober)?\s+\d{1,2},\s*2025\b",
+        r"\bnov(?:ember)?\s+\d{1,2},\s*2025\b",
+        r"\bdec(?:ember)?\s+\d{1,2},\s*2025\b",
+        r"\b\d+\s+(?:month|months|mo|mos|year|years|yr|yrs)\s+ago\b",
+    ]
+    return any(re.search(pat, h, flags=re.IGNORECASE) for pat in stale_patterns)
+
+
 def classify_news(headline, ticker=None):
     h_raw = clean_text(headline)
     h = f" {h_raw.lower()} "
@@ -1837,6 +1863,16 @@ def classify_news(headline, ticker=None):
             "label": "❌ NO CONFIRMED NEWS",
             "explain": "No fresh catalyst found",
             "headline": "",
+        }
+
+    if is_stale_news_text(h_raw):
+        return {
+            "score": 1,
+            "quality": "STALE",
+            "category": "Stale / Old News",
+            "label": "🕒 STALE NEWS",
+            "explain": "Old headline/date detected — not a live catalyst",
+            "headline": h_raw,
         }
 
     if is_junk_news_text(h_raw, ticker):
@@ -2201,42 +2237,57 @@ def detect_second_leg(candles, structure, coil):
 
 def detect_momentum_decay(candles, structure):
     risks = []
-    score_penalty = 0
+    score_penalty = 0.0
 
     above_vwap = bool(get_struct(structure, "above_vwap", False))
     bad_structure = bool(get_struct(structure, "bad_structure", False))
     big_upper_wick = bool(get_struct(structure, "big_upper_wick", False))
     raw_decay = bool(get_struct(structure, "momentum_decay", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    breakout = bool(get_struct(structure, "breakout", False))
 
     recent_vol = safe_int(get_struct(structure, "recent_volume", 0))
     previous_vol = safe_int(get_struct(structure, "previous_volume", 0))
 
+    premarket = is_premarket_session()
+    holding_continuation = above_vwap and (near_high or breakout)
+
     if not above_vwap:
         risks.append("Lost VWAP / reclaim needed")
-        score_penalty += 1.5
+        score_penalty += 1.2 if premarket else 1.5
 
     if previous_vol > 0 and recent_vol < previous_vol * 0.60:
         risks.append("Momentum decay / volume fading")
-        score_penalty += 1.0
+        # Premarket often has uneven 1-min volume; do not over-punish leaders still holding highs.
+        if premarket and holding_continuation:
+            score_penalty += 0.35
+        elif premarket:
+            score_penalty += 0.60
+        else:
+            score_penalty += 1.0
 
     if bad_structure:
         risks.append("Bad structure / failed momentum")
-        score_penalty += 1.5
+        score_penalty += 0.85 if (premarket and holding_continuation) else 1.5
 
     if big_upper_wick:
         risks.append("Big upper wick / possible trap")
-        score_penalty += 1.0
+        score_penalty += 0.50 if premarket else 1.0
 
     if raw_decay and "Momentum decay / volume fading" not in risks:
         risks.append("Momentum decay / wait for reclaim")
-        score_penalty += 1.0
+        score_penalty += 0.35 if premarket else 1.0
+
+    # Do not mark a premarket leader as fully fading if it is still above VWAP and near highs.
+    detected = bool(risks)
+    if premarket and holding_continuation and score_penalty <= 0.85:
+        detected = False
 
     return {
-        "detected": bool(risks),
+        "detected": detected,
         "penalty": score_penalty,
         "risks": risks,
     }
-
 
 def detect_exhaustion(candles, structure, price):
     candles = finalized_candles(candles)
@@ -2265,25 +2316,29 @@ def detect_exhaustion(candles, structure, price):
         if upper / rng > 0.45:
             upper_wick_count += 1
 
-    if distance_from_vwap >= 18:
+    premarket = is_premarket_session()
+
+    # Premarket leaders are often naturally extended. Treat extension as awareness unless
+    # the chart is also rejecting/far off highs.
+    if distance_from_vwap >= (28 if premarket else 18):
         return {
             "detected": True,
             "risk": "Very extended from VWAP / chase risk",
-            "penalty": 1.0,
+            "penalty": 0.65 if premarket else 1.0,
         }
 
-    if distance_from_vwap >= 12 and upper_wick_count >= 2:
+    if distance_from_vwap >= (18 if premarket else 12) and upper_wick_count >= 2:
         return {
             "detected": True,
             "risk": "Extended + repeated upper wicks",
-            "penalty": 1.25,
+            "penalty": 0.85 if premarket else 1.25,
         }
 
-    if off_high >= 12:
+    if off_high >= (18 if premarket else 12):
         return {
             "detected": True,
             "risk": "Fading far off highs",
-            "penalty": 1.0,
+            "penalty": 0.75 if premarket else 1.0,
         }
 
     return {
@@ -2424,24 +2479,32 @@ def build_phase_v34(structure, coil, second_leg, exhaustion, decay, fakeout=None
     fakeout = fakeout or {}
     participation = participation or {}
 
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    strong_participation = safe_float(participation.get("score", 0)) >= 0.75
+    continuation = above_vwap and (near_high or breakout) and (higher_lows or strong_participation)
+
     if fakeout.get("detected"):
         return "⚠️ FAKEOUT / RECLAIM NEEDED"
-    if exhaustion and exhaustion.get("detected"):
-        return "⚠️ EXTENDED / RESET NEEDED"
-    if decay and decay.get("detected"):
-        return "⚠️ FADING"
     if second_leg and second_leg.get("detected"):
         return "🔥 SECOND LEG"
     if coil and coil.get("detected"):
         return "🌀 COIL / PRESSURE BUILDING"
-    if bool(get_struct(structure, "breakout", False)) and participation.get("score", 0) > 0:
+    if continuation:
+        return "🟢 RUNNER CONTINUATION"
+    if exhaustion and exhaustion.get("detected"):
+        return "⚠️ EXTENDED / RESET NEEDED"
+    if decay and decay.get("detected"):
+        return "⚠️ FADING"
+    if breakout and participation.get("score", 0) > 0:
         return "🚀 BREAKOUT HOLD"
-    if bool(get_struct(structure, "above_vwap", False)) and bool(get_struct(structure, "near_high", False)):
+    if above_vwap and near_high:
         return "🟢 IGNITION / HOLDING"
-    if bool(get_struct(structure, "above_vwap", False)):
+    if above_vwap:
         return "🟢 ABOVE VWAP"
     return "👀 RECLAIM WATCH"
-
 
 def build_trade_tier_v34(score, bias, phase, exhaustion=None, decay=None, fakeout=None, entry_score=0, structure_score=0):
     bias = bias or ""
@@ -2453,14 +2516,18 @@ def build_trade_tier_v34(score, bias, phase, exhaustion=None, decay=None, fakeou
     entry_score = safe_float(entry_score)
     structure_score = safe_float(structure_score)
 
-    if "AVOID" in bias or stuffed or (fading and score < 7.6):
+    continuation_phase = "RUNNER CONTINUATION" in phase or "SECOND LEG" in phase or "COIL" in phase or "BREAKOUT HOLD" in phase
+
+    if stuffed or "AVOID" in bias:
         return "⚠️ AVOID / WAIT"
+    if fading and not continuation_phase and score < 7.0:
+        return "⚠️ AVOID / WAIT"
+    if score >= 7.5 and entry_score >= 4.5 and structure_score >= 4.0 and ("RUNNER" in bias or continuation_phase):
+        return "🔥 TRADEABLE RUNNER"
+    if score >= 6.7 and ("RUNNER" in bias or "WATCH" in bias or continuation_phase):
+        return "🟢 RUNNER WATCH"
     if exhausted or "EXTENDED" in bias or "EXTENDED" in phase:
         return "👀 AWARENESS — EXTENDED"
-    if score >= 7.5 and entry_score >= 5.0 and structure_score >= 4.5 and "RUNNER" in bias:
-        return "🔥 TRADEABLE RUNNER"
-    if score >= 7.0 and ("RUNNER" in bias or "WATCH" in bias):
-        return "🟢 RUNNER WATCH"
     return "👀 MARKET WATCH"
 
 
@@ -2600,24 +2667,25 @@ def simple_market_label(gain, float_shares, volume, score, entry_score, structur
 
     is_low_float = 0 < float_shares <= 20_000_000
     huge_volume = volume >= 20_000_000
+    premarket = is_premarket_session()
 
+    # In premarket, true leaders can be extended but still valid continuation watches.
     if gain >= 50 and (is_low_float or huge_volume):
-        if exhausted or fading or entry_score < 4:
-            return "🔥 MARKET LEADER — EXTENDED"
-        if score >= 7 or (entry_score >= 6 and structure_score >= 4):
+        if score >= 7.0 or (premarket and entry_score >= 4.5 and structure_score >= 3.5):
             return "🟢 RUNNER"
+        if exhausted or fading or entry_score < 3.5:
+            return "🔥 MARKET LEADER — EXTENDED"
         return "🔥 MARKET LEADER"
 
     if gain >= RUNNER_MIN_GAIN:
-        if exhausted or fading or entry_score < 4:
-            return "🔥 MARKET LEADER — EXTENDED"
-        if score >= 7:
+        if score >= 7.0 or (premarket and entry_score >= 4.5 and structure_score >= 3.5):
             return "🟢 RUNNER"
+        if exhausted or fading or entry_score < 3.5:
+            return "🔥 MARKET LEADER — EXTENDED"
         if score >= 5:
             return "👀 WATCH"
 
     return "⚠️ AVOID"
-
 
 def simple_leader_reasons(gain, float_info, volume, news_score):
     reasons = []
@@ -3234,11 +3302,11 @@ def calc_entry_score_v3310(structure, coil, second_leg, exhaustion, decay):
         reasons.append("second-leg setup")
 
     if exhaustion and exhaustion.get("detected"):
-        score -= 2.0
+        score -= 1.0 if is_premarket_session() else 2.0
         if exhaustion.get("risk"):
             reasons.append(exhaustion.get("risk"))
     if decay and decay.get("detected"):
-        score -= 1.5
+        score -= 0.75 if is_premarket_session() else 1.5
 
     return clamp(score), dedupe(reasons)
 
@@ -3290,7 +3358,12 @@ def calc_total_score_v3310(structure_score, volume_score, entry_score, news_scor
     if safe_float(structure_score) >= 3.0 and safe_float(entry_score) >= 3.0:
         score += safe_float((float_info or {}).get("boost", 0))
 
-    score -= safe_float(risk_penalty) * 0.20
+    score -= safe_float(risk_penalty) * (0.12 if is_premarket_session() else 0.20)
+
+    # Continuation-friendly floor: high-gain, low-float, liquid leaders should not be buried
+    # purely because they are extended premarket. Alerts still require tier/score/cooldown.
+    if is_premarket_session() and safe_float(gain) >= 50:
+        score += 0.45
 
     if regime:
         score += safe_float(regime.get("score_adjust", 0))
@@ -3408,7 +3481,7 @@ def analyze_candidate(candidate, regime):
     # True tiny/low-float leaders stay visible even when extended.
     # This does NOT force alerts; should_alert still controls alerts.
     if gain >= 50 and 0 < float_shares <= 25_000_000:
-        score = max(score, 5.5)
+        score = max(score, 6.6 if is_premarket_session() and entry_score >= 4.0 else 5.5)
 
     bias = simple_market_label(
         gain=gain,
