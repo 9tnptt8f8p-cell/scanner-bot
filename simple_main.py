@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.7 — compact alerts + news rank + dilution awareness only"
+BOOT_MARKER = "elite scanner v35.0 — elite leader floors + softer fade + no high-score avoid"
 
 # ============================================================
 # ENV
@@ -2533,7 +2533,7 @@ def detect_momentum_decay(candles, structure):
 
     if not above_vwap:
         risks.append("Lost VWAP / reclaim needed")
-        score_penalty += 1.2 if premarket else 1.5
+        score_penalty += 0.8 if premarket else 1.0
 
     if previous_vol > 0 and recent_vol < previous_vol * 0.60:
         risks.append("Momentum decay / volume fading")
@@ -2541,21 +2541,21 @@ def detect_momentum_decay(candles, structure):
         if premarket and holding_continuation:
             score_penalty += 0.35
         elif premarket:
-            score_penalty += 0.60
+            score_penalty += 0.45
         else:
-            score_penalty += 1.0
+            score_penalty += 0.65
 
     if bad_structure:
         risks.append("Bad structure / failed momentum")
-        score_penalty += 0.85 if (premarket and holding_continuation) else 1.5
+        score_penalty += 0.55 if (premarket and holding_continuation) else 0.85
 
     if big_upper_wick:
         risks.append("Big upper wick / possible trap")
-        score_penalty += 0.50 if premarket else 1.0
+        score_penalty += 0.35 if premarket else 0.65
 
     if raw_decay and "Momentum decay / volume fading" not in risks:
         risks.append("Momentum decay / wait for reclaim")
-        score_penalty += 0.35 if premarket else 1.0
+        score_penalty += 0.25 if premarket else 0.65
 
     # Do not mark a premarket leader as fully fading if it is still above VWAP and near highs.
     detected = bool(risks)
@@ -2797,14 +2797,18 @@ def build_trade_tier_v34(score, bias, phase, exhaustion=None, decay=None, fakeou
 
     continuation_phase = "RUNNER CONTINUATION" in phase or "SECOND LEG" in phase or "COIL" in phase or "BREAKOUT HOLD" in phase
 
-    if stuffed or "AVOID" in bias:
-        return "⚠️ AVOID / WAIT"
-    if fading and not continuation_phase and score < 7.0:
-        return "⚠️ AVOID / WAIT"
-    if score >= 7.5 and entry_score >= 4.5 and structure_score >= 4.0 and ("RUNNER" in bias or continuation_phase):
-        return "🔥 TRADEABLE"
-    if score >= 6.7 and ("RUNNER" in bias or "WATCH" in bias or continuation_phase):
+    # v35.0: high score means quality. Do not label 8–10 scores as AVOID just because
+    # entry is extended/stuffed; that is entry-risk, not ticker-quality.
+    if score >= 8.0 and ("RUNNER" in bias or continuation_phase or entry_score >= 3.5):
+        return "🔥 TRADEABLE" if entry_score >= 4.0 and structure_score >= 3.5 else "🟢 RUNNER WATCH"
+    if score >= 7.0 and ("RUNNER" in bias or "WATCH" in bias or continuation_phase):
         return "🟢 RUNNER WATCH"
+
+    # Only true broken/low-score names get AVOID.
+    if (stuffed or "AVOID" in bias) and score < 6.5:
+        return "⚠️ AVOID / WAIT"
+    if fading and not continuation_phase and score < 6.5:
+        return "⚠️ AVOID / WAIT"
     if exhausted or "EXTENDED" in bias or "EXTENDED" in phase:
         return "👀 AWARENESS — EXTENDED"
     return "👀 MARKET WATCH"
@@ -3489,6 +3493,45 @@ def apply_elite_leader_gate_fix(result):
     result["elite_leader"] = True
     return result
 
+
+
+def apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness=None, daily_context=None):
+    """
+    v35.0: keep QTEX-style day leaders visible even after normal pullbacks.
+    This does not blindly mark them as clean entries; it prevents the score from
+    collapsing below alert/watch range while they still show leader-quality traits.
+    """
+    score = safe_float(score)
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+    float_shares = safe_int(float_shares)
+    structure = structure or {}
+    freshness = freshness or {}
+    daily_context = daily_context or {}
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    still_alive = above_vwap or near_high or breakout or higher_lows
+    low_or_unknown_float = float_shares <= 0 or float_shares <= 40_000_000
+
+    fresh_or_daily = safe_float(freshness.get("score", 0)) >= 0.5 or safe_float(daily_context.get("score", 0)) >= 1.0
+
+    # Explosive day leader floor: QTEX-type move.
+    if still_alive and low_or_unknown_float and gain >= 75 and volume >= 10_000_000:
+        score = max(score, 7.6 if fresh_or_daily else 7.2)
+
+    # Strong low-float continuation floor: GOVX/KIDZ/MTVA-type move.
+    if still_alive and low_or_unknown_float and gain >= 40 and volume >= 10_000_000:
+        score = max(score, 7.0)
+
+    # Real second-leg/daily breakout with alertable gain should not say AVOID.
+    if still_alive and gain >= RUNNER_MIN_GAIN and volume >= 1_000_000 and fresh_or_daily:
+        score = max(score, 7.0)
+
+    return clamp(score)
+
 def should_alert(result):
     ticker = result["ticker"]
 
@@ -3998,6 +4041,7 @@ def analyze_candidate(candidate, regime):
     score += safe_float(participation.get("score", 0))
     score += safe_float(freshness.get("score", 0))
     score += safe_float(daily_context.get("score", 0))
+    score = apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness, daily_context)
     score = clamp(score)
 
     # v33.12 ranking visibility floor:
@@ -4016,6 +4060,12 @@ def analyze_candidate(candidate, regime):
         exhaustion=exhaustion,
         decay=decay,
     )
+
+    # v35.0: score is quality; avoid is reserved for genuinely broken/low-quality names.
+    if score >= 8.0 and (bias == "⚠️ AVOID" or "AVOID" in bias):
+        bias = "🟢 RUNNER"
+    elif score >= 7.0 and (bias == "⚠️ AVOID" or "AVOID" in bias):
+        bias = "🟢 RUNNER WATCH"
 
     phase = build_phase_v3310(structure, coil, second_leg, exhaustion, decay, fakeout=fakeout, participation=participation)
     trade_tier = build_trade_tier_v34(score, bias, phase, exhaustion, decay, fakeout, entry_score, structure_score)
