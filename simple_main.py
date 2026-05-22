@@ -24,13 +24,14 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v33.16 — full rewrite yahoo-safe loop-fixed"
+BOOT_MARKER = "elite scanner v34.1 — quote fallback stack + RVOL phase/tier upgrade"
 
 # ============================================================
 # ENV
 # ============================================================
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
@@ -93,6 +94,7 @@ SHORT_CACHE_TTL_SECONDS = 120
 
 PROFILE_CACHE = {}
 QUOTE_CACHE = {}
+LAST_GOOD_QUOTES = {}
 NEWS_CACHE = {}
 SEC_CACHE = {}
 CANDLE_CACHE = {}
@@ -150,7 +152,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v33.16 yahoo-safe loop-fixed", 200
+    return "scanner alive — v34.1 quote fallback stack + RVOL phase/tier upgrade", 200
 
 
 @app.route("/health")
@@ -1103,42 +1105,172 @@ def get_candidates():
 # LIVE QUOTE / PROFILE
 # ============================================================
 
-def get_finnhub_quote(ticker):
-    cached = cached_get(QUOTE_CACHE, ticker, ttl=SHORT_CACHE_TTL_SECONDS)
-    if cached:
-        return cached
+def normalize_quote(price=0, gain=0, volume=0, source="none", stale=False, reason=""):
+    return {
+        "price": safe_float(price),
+        "gain": safe_float(gain),
+        "volume": safe_int(volume),
+        "source": source,
+        "stale": bool(stale),
+        "reason": reason,
+    }
 
-    quote = {"price": 0.0, "gain": 0.0, "volume": 0, "source": "none"}
 
+def quote_is_valid(quote, ticker=""):
+    """Reject bad API prints before they can break scoring."""
+    if not isinstance(quote, dict):
+        return False
+
+    price = safe_float(quote.get("price"))
+    gain = safe_float(quote.get("gain"))
+
+    if price <= 0:
+        return False
+    if price < 0.01 or price > 10000:
+        return False
+    # API glitch protection. True runners can be wild, but +/-900% is usually bad data.
+    if gain <= -95 or gain >= 900:
+        return False
+    return True
+
+
+def remember_good_quote(ticker, quote):
+    if quote_is_valid(quote, ticker):
+        LAST_GOOD_QUOTES[ticker] = (time.time(), quote)
+    return quote
+
+
+def get_last_good_quote(ticker, max_age=600):
+    item = LAST_GOOD_QUOTES.get(ticker)
+    if not item:
+        return None
+    ts, quote = item
+    age = time.time() - ts
+    if age > max_age:
+        return None
+    q = dict(quote)
+    q["stale"] = True
+    q["source"] = f"last-good/{quote.get('source', 'unknown')}"
+    q["reason"] = f"all quote sources failed; using {int(age)}s old quote"
+    return q
+
+
+def get_finnhub_quote_raw(ticker):
     if not FINNHUB_API_KEY:
-        return quote
+        return normalize_quote(source="Finnhub", reason="missing FINNHUB_API_KEY")
 
     try:
         url = "https://finnhub.io/api/v1/quote"
         r = http_get(url, params={"symbol": ticker, "token": FINNHUB_API_KEY}, timeout=4)
-        data = r.json()
+        data = safe_json_response(r, f"QUOTE Finnhub {ticker}")
+        if not data:
+            return normalize_quote(source="Finnhub", reason="empty/non-json response")
 
         price = safe_float(data.get("c"))
         prev_close = safe_float(data.get("pc"))
-        gain = 0.0
-
-        if price > 0 and prev_close > 0:
-            gain = ((price - prev_close) / prev_close) * 100
-
-        quote = {
-            "price": price,
-            "gain": gain,
-            "volume": 0,
-            "source": "Finnhub",
-        }
-
-        print(f"[LIVE] {ticker} {fmt_money(price)} {gain:.1f}%")
-        return cached_set(QUOTE_CACHE, ticker, quote)
-
+        gain = ((price - prev_close) / prev_close) * 100 if price > 0 and prev_close > 0 else 0.0
+        return normalize_quote(price=price, gain=gain, volume=0, source="Finnhub")
     except Exception as e:
-        print(f"[QUOTE ERROR] {ticker}: {e}")
-        return quote
+        print(f"[QUOTE ERROR] {ticker}: Finnhub {e}")
+        return normalize_quote(source="Finnhub", reason=str(e))
 
+
+def get_yahoo_quote_raw(ticker):
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        r = http_get(url, params={"symbols": ticker, "formatted": "false"}, timeout=5)
+        data = safe_json_response(r, f"QUOTE Yahoo {ticker}")
+        if not data:
+            return normalize_quote(source="Yahoo", reason="empty/non-json response")
+
+        rows = data.get("quoteResponse", {}).get("result", [])
+        if not rows:
+            return normalize_quote(source="Yahoo", reason="symbol not returned")
+
+        q = rows[0]
+        price = (
+            q.get("regularMarketPrice")
+            or q.get("postMarketPrice")
+            or q.get("preMarketPrice")
+        )
+        gain = (
+            q.get("regularMarketChangePercent")
+            or q.get("postMarketChangePercent")
+            or q.get("preMarketChangePercent")
+            or 0
+        )
+        volume = (
+            q.get("regularMarketVolume")
+            or q.get("postMarketVolume")
+            or q.get("preMarketVolume")
+            or 0
+        )
+        return normalize_quote(price=price, gain=gain, volume=volume, source="Yahoo")
+    except Exception as e:
+        print(f"[QUOTE ERROR] {ticker}: Yahoo {e}")
+        return normalize_quote(source="Yahoo", reason=str(e))
+
+
+def get_twelvedata_quote_raw(ticker):
+    if not TWELVEDATA_API_KEY:
+        return normalize_quote(source="TwelveData", reason="missing TWELVEDATA_API_KEY")
+
+    try:
+        url = "https://api.twelvedata.com/quote"
+        r = http_get(url, params={"symbol": ticker, "apikey": TWELVEDATA_API_KEY}, timeout=5)
+        data = safe_json_response(r, f"QUOTE TwelveData {ticker}")
+        if not data or data.get("status") == "error":
+            return normalize_quote(source="TwelveData", reason=clean_text(data.get("message", "error")) if isinstance(data, dict) else "empty response")
+
+        price = data.get("close") or data.get("price")
+        percent_change = data.get("percent_change") or data.get("percentChange") or 0
+        volume = data.get("volume") or 0
+        return normalize_quote(price=price, gain=percent_change, volume=volume, source="TwelveData")
+    except Exception as e:
+        print(f"[QUOTE ERROR] {ticker}: TwelveData {e}")
+        return normalize_quote(source="TwelveData", reason=str(e))
+
+
+def get_live_quote(ticker):
+    """
+    v34.1 quote stack:
+    Finnhub primary -> Yahoo fallback -> TwelveData optional fallback -> last-good quote.
+    This prevents price=0 / gain=0 API failures from collapsing the scan.
+    """
+    cached = cached_get(QUOTE_CACHE, ticker, ttl=SHORT_CACHE_TTL_SECONDS)
+    if cached:
+        return cached
+
+    sources = [
+        ("Finnhub", get_finnhub_quote_raw),
+        ("Yahoo", get_yahoo_quote_raw),
+        ("TwelveData", get_twelvedata_quote_raw),
+    ]
+
+    errors = []
+    for label, fn in sources:
+        quote = fn(ticker)
+        if quote_is_valid(quote, ticker):
+            if label != "Finnhub":
+                print(f"[QUOTE FALLBACK] {ticker}: using {label}")
+            print(f"[LIVE] {ticker} {fmt_money(quote.get('price'))} {safe_float(quote.get('gain')):.1f}% src={quote.get('source')}")
+            remember_good_quote(ticker, quote)
+            return cached_set(QUOTE_CACHE, ticker, quote)
+        errors.append(f"{label}:{quote.get('reason', 'invalid quote')}")
+        print(f"[QUOTE BAD] {ticker}: {label} invalid ({quote.get('reason', 'bad data')})")
+
+    last_good = get_last_good_quote(ticker)
+    if last_good and quote_is_valid(last_good, ticker):
+        print(f"[QUOTE FALLBACK] {ticker}: using stale last-good quote ({last_good.get('reason')})")
+        return cached_set(QUOTE_CACHE, ticker, last_good)
+
+    print(f"[QUOTE FAIL] {ticker}: " + " | ".join(errors))
+    return normalize_quote(source="none", reason="all quote sources failed")
+
+
+# Backward-compatible name so older code paths still work.
+def get_finnhub_quote(ticker):
+    return get_live_quote(ticker)
 
 def get_profile(ticker):
     cached = cached_get(PROFILE_CACHE, ticker)
@@ -2121,6 +2253,132 @@ def detect_halt_risk(price, gain, float_shares, candles):
     }
 
 
+# ============================================================
+# v34 PARTICIPATION / FAKEOUT / TIER ENGINE
+# Adds relative-volume style participation without needing a paid avg-volume feed.
+# ============================================================
+
+def calc_participation_score_v34(candles, total_volume=0):
+    candles = finalized_candles(candles)
+    reasons = []
+    if not candles or len(candles) < 10:
+        return {"score": 0.0, "rvol_proxy": 0.0, "label": "", "reasons": []}
+
+    recent = candles[-5:]
+    baseline = candles[:-5]
+    recent_avg = sum(candle_volume(c) for c in recent) / max(1, len(recent))
+    base_avg = sum(candle_volume(c) for c in baseline) / max(1, len(baseline))
+    rvol_proxy = recent_avg / base_avg if base_avg > 0 else 0.0
+
+    score = 0.0
+    label = ""
+
+    if rvol_proxy >= 5.0:
+        score += 2.0
+        label = f"🔥 RVOL proxy {rvol_proxy:.1f}x"
+        reasons.append(label)
+    elif rvol_proxy >= 3.0:
+        score += 1.5
+        label = f"🔥 RVOL proxy {rvol_proxy:.1f}x"
+        reasons.append(label)
+    elif rvol_proxy >= 1.8:
+        score += 1.0
+        label = f"🟢 Volume expanding {rvol_proxy:.1f}x"
+        reasons.append(label)
+    elif rvol_proxy < 0.65 and len(candles) >= 20:
+        score -= 0.75
+        label = f"⚠️ Volume fading {rvol_proxy:.1f}x"
+        reasons.append(label)
+
+    total_volume = safe_int(total_volume)
+    if total_volume >= 50_000_000:
+        score += 0.6
+    elif total_volume >= 10_000_000:
+        score += 0.35
+
+    return {
+        "score": clamp(score, -1.0, 2.5),
+        "rvol_proxy": rvol_proxy,
+        "label": label,
+        "reasons": dedupe(reasons),
+    }
+
+
+def detect_fakeout_v34(candles, structure):
+    candles = finalized_candles(candles)
+    if not candles or len(candles) < 12:
+        return {"detected": False, "penalty": 0.0, "risk": "", "label": ""}
+
+    breakout_level = safe_float(get_struct(structure, "breakout_level", 0))
+    last = candles[-1]
+    prev = candles[-2]
+    price = candle_close(last)
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+
+    open_ = safe_float(last.get("open"))
+    high = candle_high(last)
+    low = candle_low(last)
+    rng = max(0.0001, high - low)
+    upper_wick = high - max(open_, price)
+    red_close = price < open_
+
+    failed_breakout = bool(breakout_level and price < breakout_level * 0.995 and high > breakout_level * 1.005)
+    wick_rejection = upper_wick / rng >= 0.50 and red_close
+    lost_vwap_after_breakout = breakout and not above_vwap
+    lower_close = candle_close(last) < candle_close(prev) * 0.985
+
+    if failed_breakout or (wick_rejection and lower_close) or lost_vwap_after_breakout:
+        risk = "Fakeout/stuff candle risk — wait for reclaim/hold"
+        return {"detected": True, "penalty": 1.25, "risk": risk, "label": "⚠️ FAKEOUT RISK"}
+
+    return {"detected": False, "penalty": 0.0, "risk": "", "label": ""}
+
+
+def build_phase_v34(structure, coil, second_leg, exhaustion, decay, fakeout=None, participation=None):
+    fakeout = fakeout or {}
+    participation = participation or {}
+
+    if fakeout.get("detected"):
+        return "⚠️ FAKEOUT / RECLAIM NEEDED"
+    if exhaustion and exhaustion.get("detected"):
+        return "⚠️ EXTENDED / RESET NEEDED"
+    if decay and decay.get("detected"):
+        return "⚠️ FADING"
+    if second_leg and second_leg.get("detected"):
+        return "🔥 SECOND LEG"
+    if coil and coil.get("detected"):
+        return "🌀 COIL / PRESSURE BUILDING"
+    if bool(get_struct(structure, "breakout", False)) and participation.get("score", 0) > 0:
+        return "🚀 BREAKOUT HOLD"
+    if bool(get_struct(structure, "above_vwap", False)) and bool(get_struct(structure, "near_high", False)):
+        return "🟢 IGNITION / HOLDING"
+    if bool(get_struct(structure, "above_vwap", False)):
+        return "🟢 ABOVE VWAP"
+    return "👀 RECLAIM WATCH"
+
+
+def build_trade_tier_v34(score, bias, phase, exhaustion=None, decay=None, fakeout=None, entry_score=0, structure_score=0):
+    bias = bias or ""
+    phase = phase or ""
+    exhausted = bool(exhaustion.get("detected")) if isinstance(exhaustion, dict) else False
+    fading = bool(decay.get("detected")) if isinstance(decay, dict) else False
+    stuffed = bool(fakeout.get("detected")) if isinstance(fakeout, dict) else False
+    score = safe_float(score)
+    entry_score = safe_float(entry_score)
+    structure_score = safe_float(structure_score)
+
+    if "AVOID" in bias or stuffed or (fading and score < 7.6):
+        return "⚠️ AVOID / WAIT"
+    if exhausted or "EXTENDED" in bias or "EXTENDED" in phase:
+        return "👀 AWARENESS — EXTENDED"
+    if score >= 7.5 and entry_score >= 5.0 and structure_score >= 4.5 and "RUNNER" in bias:
+        return "🔥 TRADEABLE RUNNER"
+    if score >= 7.0 and ("RUNNER" in bias or "WATCH" in bias):
+        return "🟢 RUNNER WATCH"
+    return "👀 MARKET WATCH"
+
+
 
 # ============================================================
 # LEADERSHIP ENGINE — v33.3
@@ -2563,8 +2821,14 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
         return False
 
-    if result["bias"] == "⚠️ AVOID":
-        print(f"[NO ALERT] {ticker}: avoid bias")
+    tier = result.get("trade_tier", "")
+    if result["bias"] == "⚠️ AVOID" or "AVOID" in tier:
+        print(f"[NO ALERT] {ticker}: avoid/wait tier")
+        return False
+
+    # v34: extended market leaders stay visible in ranking but only alert if truly exceptional.
+    if "AWARENESS" in tier and result["score"] < 8.5:
+        print(f"[NO ALERT] {ticker}: awareness/extended tier under 8.5")
         return False
 
     ok, reason = meaningful_change_since_alert(ticker, result["price"], result["score"], result["bias"])
@@ -2588,6 +2852,17 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    tier = result.get("trade_tier", "")
+    if "TRADEABLE RUNNER" in tier:
+        if result.get("second_leg", {}).get("detected"):
+            return "🔥 TRADEABLE RUNNER — SECOND LEG"
+        if result.get("coil", {}).get("detected"):
+            return "🔥 TRADEABLE RUNNER — COIL"
+        return "🔥 TRADEABLE RUNNER"
+    if "AWARENESS" in tier:
+        return "👀 MARKET LEADER — EXTENDED"
+    if "AVOID" in tier:
+        return "⚠️ AVOID / WAIT"
     if "MARKET LEADER — EXTENDED" in result["bias"]:
         return "🔥 MARKET LEADER — EXTENDED"
     if "MARKET LEADER" in result["bias"]:
@@ -2656,6 +2931,7 @@ def normalize_alert_fields(result):
     result["price"] = safe_float(result.get("price", 0))
     result["gain"] = safe_float(result.get("gain", 0))
     result["bias"] = result.get("bias") or "🤔 UNCLEAR"
+    result["trade_tier"] = result.get("trade_tier") or "👀 MARKET WATCH"
     result["phase"] = result.get("phase") or "⚪ NEUTRAL"
     result["entry"] = result.get("entry") or "👀 WATCH"
     result["reasons"] = result.get("reasons") or []
@@ -2667,6 +2943,8 @@ def normalize_alert_fields(result):
     result["second_leg"] = result.get("second_leg") or {"detected": False}
     result["decay"] = result.get("decay") or {"detected": False, "risks": []}
     result["exhaustion"] = result.get("exhaustion") or {"detected": False, "risk": ""}
+    result["fakeout"] = result.get("fakeout") or {"detected": False, "risk": "", "label": ""}
+    result["participation"] = result.get("participation") or {"score": 0, "rvol_proxy": 0, "label": "", "reasons": []}
 
     news_score = safe_float(result.get("news_score", news.get("score", 0)))
     news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
@@ -2722,6 +3000,7 @@ def build_alert(result):
         header,
         "",
         f"Catalyst: {news_score:.0f}/10 {news_label} — {news_explain}",
+        f"Tier: {result.get('trade_tier', '👀 MARKET WATCH')}",
         f"State: {result['bias']}",
         f"Phase: {result['phase']}",
         "",
@@ -2748,6 +3027,12 @@ def build_alert(result):
 
     if result.get("sec", {}).get("has_risk"):
         awareness.append(result.get("sec", {}).get("label"))
+
+    if result.get("fakeout", {}).get("label"):
+        awareness.append(result.get("fakeout", {}).get("label"))
+
+    if result.get("participation", {}).get("label") and "fading" in result.get("participation", {}).get("label", "").lower():
+        awareness.append(result.get("participation", {}).get("label"))
 
     if result.get("regime", {}).get("label") == "❄️ COLD / THIN MOMENTUM MARKET":
         awareness.append("Cold market — be extra selective")
@@ -2928,20 +3213,9 @@ def calc_total_score_v3310(structure_score, volume_score, entry_score, news_scor
     return clamp(score)
 
 
-def build_phase_v3310(structure, coil, second_leg, exhaustion, decay):
-    if exhaustion and exhaustion.get("detected"):
-        return "⚠️ EXTENDED"
-    if decay and decay.get("detected"):
-        return "⚠️ FADING"
-    if second_leg and second_leg.get("detected"):
-        return "🔥 SECOND LEG"
-    if coil and coil.get("detected"):
-        return "🌀 COIL"
-    if bool(get_struct(structure, "above_vwap", False)) and bool(get_struct(structure, "near_high", False)):
-        return "🟢 IGNITION / HOLDING"
-    if bool(get_struct(structure, "above_vwap", False)):
-        return "🟢 ABOVE VWAP"
-    return "👀 RECLAIM WATCH"
+def build_phase_v3310(structure, coil, second_leg, exhaustion, decay, fakeout=None, participation=None):
+    # v34 wrapper keeps old function name stable while using upgraded phase logic.
+    return build_phase_v34(structure, coil, second_leg, exhaustion, decay, fakeout=fakeout, participation=participation)
 
 
 def build_entry_v3310(bias, structure, coil, second_leg, entry_score):
@@ -2970,13 +3244,17 @@ def analyze_candidate(candidate, regime):
     if gain <= 0:
         return None
 
-    live = get_finnhub_quote(ticker)
+    live = get_live_quote(ticker)
     live_price = safe_float(live.get("price"))
     live_gain = safe_float(live.get("gain"))
     if live_price > 0:
         price = live_price
     if live_gain > 0:
         gain = live_gain
+    live_volume = safe_int(live.get("volume"))
+    if live_volume > 0:
+        volume = max(volume, live_volume)
+    quote_stale = bool(live.get("stale"))
 
     profile = get_profile(ticker)
     float_shares = safe_int(profile.get("float"))
@@ -2993,6 +3271,8 @@ def analyze_candidate(candidate, regime):
     )
     if not ok:
         return None
+    if quote_stale:
+        fast_warnings.append("stale quote fallback — confirm price before entry")
 
     print(f"[PIPELINE] {ticker}: passed fast filter — running deep scan")
 
@@ -3010,6 +3290,8 @@ def analyze_candidate(candidate, regime):
     second_leg = detect_second_leg(candles, structure, coil)
     decay = detect_momentum_decay(candles, structure)
     exhaustion = detect_exhaustion(candles, structure, price)
+    fakeout = detect_fakeout_v34(candles, structure)
+    participation = calc_participation_score_v34(candles, volume)
     halt_risk = detect_halt_risk(price, gain, float_shares, candles)
 
     float_info = classify_float(float_shares)
@@ -3021,6 +3303,7 @@ def analyze_candidate(candidate, regime):
     volume_score, volume_reasons = calc_volume_score_v3310(volume)
     entry_score, entry_reasons = calc_entry_score_v3310(structure, coil, second_leg, exhaustion, decay)
     risk_penalty, risk_reasons = calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings)
+    risk_penalty += safe_float(fakeout.get("penalty", 0))
 
     score = calc_total_score_v3310(
         structure_score=structure_score,
@@ -3032,6 +3315,9 @@ def analyze_candidate(candidate, regime):
         float_info=float_info,
         regime=regime,
     )
+
+    # v34 participation boost/penalty after base score.
+    score += safe_float(participation.get("score", 0))
 
     # v33.12 ranking visibility floor:
     # True tiny/low-float leaders stay visible even when extended.
@@ -3050,7 +3336,8 @@ def analyze_candidate(candidate, regime):
         decay=decay,
     )
 
-    phase = build_phase_v3310(structure, coil, second_leg, exhaustion, decay)
+    phase = build_phase_v3310(structure, coil, second_leg, exhaustion, decay, fakeout=fakeout, participation=participation)
+    trade_tier = build_trade_tier_v34(score, bias, phase, exhaustion, decay, fakeout, entry_score, structure_score)
     entry = build_entry_v3310(bias, structure, coil, second_leg, entry_score)
 
     reasons = []
@@ -3059,9 +3346,12 @@ def analyze_candidate(candidate, regime):
     reasons.extend(simple_leader_reasons(gain, float_info, volume, news_score))
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
+    reasons.extend(participation.get("reasons", []))
     reasons.extend(entry_reasons)
 
     risks.extend(risk_reasons)
+    if fakeout.get("risk"):
+        risks.append(fakeout.get("risk"))
     if sec.get("label"):
         risks.append(sec.get("label"))
     if float_info.get("risk") and float_info.get("tier") in ["TINY", "ELITE", "UNKNOWN"]:
@@ -3073,7 +3363,7 @@ def analyze_candidate(candidate, regime):
     risks = dedupe(risks)
 
     print(
-        f"[RANK] {ticker} {score:.1f}/10 {bias} "
+        f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
         f"+{gain:.1f}% {float_info.get('label', '')} Phase={phase}"
     )
 
@@ -3088,6 +3378,7 @@ def analyze_candidate(candidate, regime):
         "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
         "score": score,
         "bias": bias,
+        "trade_tier": trade_tier,
         "phase": phase,
         "entry": entry,
         "reasons": reasons,
@@ -3105,6 +3396,8 @@ def analyze_candidate(candidate, regime):
         "second_leg": second_leg,
         "decay": decay,
         "exhaustion": exhaustion,
+        "fakeout": fakeout,
+        "participation": participation,
         "halt_risk": halt_risk,
         "source": source,
     }
