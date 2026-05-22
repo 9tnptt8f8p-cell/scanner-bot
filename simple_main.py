@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v35.0 — elite leader floors + softer fade + no high-score avoid"
+BOOT_MARKER = "elite scanner v36.0 — IN PLAY alerts only"
 
 # ============================================================
 # ENV
@@ -3532,6 +3532,98 @@ def apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, fr
 
     return clamp(score)
 
+def is_in_play_alert(result):
+    """
+    v36 hard alert filter: Telegram alerts are ONLY for names with a clean active entry now.
+    Market leaders, extended watches, lost-VWAP reclaim watches, and weak-news coils stay log-only.
+    """
+    ticker = result.get("ticker", "UNKNOWN")
+    structure = result.get("structure") or {}
+    entry = str(result.get("entry", "")).lower()
+    phase = str(result.get("phase", "")).lower()
+    tier = str(result.get("trade_tier", "")).lower()
+    bias = str(result.get("bias", "")).lower()
+    risk_text = " ".join(result.get("risks", []) or []).lower()
+
+    score = safe_float(result.get("score"))
+    gain = safe_float(result.get("gain"))
+    news_score = safe_float(result.get("news_score", (result.get("news") or {}).get("score", 0)))
+    entry_score = safe_float(result.get("entry_score", 0))
+    structure_score = safe_float(result.get("structure_score", 0))
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+
+    coil = result.get("coil") or {}
+    second_leg = result.get("second_leg") or {}
+    decay = result.get("decay") or {}
+    exhaustion = result.get("exhaustion") or {}
+    fakeout = result.get("fakeout") or {}
+
+    if gain < RUNNER_MIN_GAIN:
+        return False, f"gain {gain:.1f}% below hard alert floor {RUNNER_MIN_GAIN:.0f}%"
+
+    if score < ALERT_MIN_SCORE:
+        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
+
+    # No more awareness alerts. If it is not an entry, it does not hit the phone.
+    blocked_words = [
+        "no clean entry", "wait for reset", "wait for reclaim", "reclaim needed",
+        "not an entry", "do not chase", "avoid chase", "watchlist only",
+    ]
+    if any(w in entry for w in blocked_words):
+        return False, "not in play — no clean entry"
+
+    if any(w in tier for w in ["awareness", "market leader", "extended", "avoid", "watch"]):
+        return False, f"not in play — tier is {result.get('trade_tier', '')}"
+
+    if any(w in bias for w in ["market leader", "extended", "avoid", "watchlist", "reclaim watch"]):
+        return False, f"not in play — bias is {result.get('bias', '')}"
+
+    if any(w in phase for w in ["reclaim needed", "reset needed", "fakeout", "fading", "extended"]):
+        return False, f"not in play — phase is {result.get('phase', '')}"
+
+    if not above_vwap:
+        return False, "not in play — below/lost VWAP"
+
+    if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
+        return False, "not in play — VWAP reclaim needed"
+
+    if fakeout.get("detected"):
+        return False, "not in play — fakeout/stuff risk"
+
+    if exhaustion.get("detected"):
+        return False, "not in play — extended/exhaustion risk"
+
+    if decay.get("detected") and not second_leg.get("detected"):
+        return False, "not in play — momentum decay"
+
+    if entry_score and entry_score < 6.5:
+        return False, f"not in play — entry score {entry_score:.1f} too low"
+
+    if structure_score and structure_score < 4.5:
+        return False, f"not in play — structure score {structure_score:.1f} too low"
+
+    active_setup = bool(
+        second_leg.get("detected")
+        or breakout
+        or (coil.get("detected") and near_high and higher_lows and entry_score >= 7.0)
+        or ("vwap hold" in entry and near_high and higher_lows and entry_score >= 7.0)
+        or ("higher-low" in entry and near_high and higher_lows and entry_score >= 7.0)
+    )
+
+    if not active_setup:
+        return False, "not in play — no active breakout/coil/second-leg/VWAP-hold setup"
+
+    # Weak C/D/no-news alerts must have a real technical trigger, not just above VWAP + higher lows.
+    if news_score < 5.0 and not (second_leg.get("detected") or breakout):
+        return False, "not in play — weak news without breakout/second leg"
+
+    return True, "in play"
+
+
 def should_alert(result):
     ticker = result["ticker"]
 
@@ -3539,29 +3631,9 @@ def should_alert(result):
         print(f"[NO ALERT] {ticker}: already sent this cycle")
         return False
 
-    # v33 hard rule: never alert any name under 27% on the day.
-    alert_gain_floor = RUNNER_MIN_GAIN
-    if result["gain"] < alert_gain_floor:
-        print(f"[NO ALERT] {ticker}: gain {result['gain']:.1f}% below hard alert floor {alert_gain_floor:.0f}%")
-        return False
-
-    if result["score"] < ALERT_MIN_SCORE:
-        print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below 8.0 alert floor")
-        return False
-
-    result = apply_elite_leader_gate_fix(result)
-    tier = result.get("trade_tier", "")
-    elite_leader = bool(result.get("elite_leader"))
-
-    # v34.9: do not block elite day leaders just because entry quality says wait/extended.
-    # AVOID should mean broken/low-quality, not simply "do not chase this candle."
-    if not elite_leader and (result["bias"] == "⚠️ AVOID" or "AVOID" in tier):
-        print(f"[NO ALERT] {ticker}: avoid/wait tier")
-        return False
-
-    # Extended market leaders stay visible; only alert if exceptional enough.
-    if ("AWARENESS" in tier or "EXTENDED" in tier) and result["score"] < 8.5 and not elite_leader:
-        print(f"[NO ALERT] {ticker}: awareness/extended tier under 8.5")
+    in_play, play_reason = is_in_play_alert(result)
+    if not in_play:
+        print(f"[BLOCK] {ticker}: {play_reason}")
         return False
 
     ok, reason = meaningful_change_since_alert(ticker, result["price"], result["score"], result["bias"])
@@ -3569,7 +3641,7 @@ def should_alert(result):
         print(f"[COOLDOWN] {ticker}: {reason}")
         return False
 
-    print(f"[ALERT OK] {ticker}: {reason}")
+    print(f"[ALERT OK] {ticker}: IN PLAY — {reason}")
     LAST_ALERT[ticker] = {
         "time": time.time(),
         "price": result["price"],
@@ -3585,39 +3657,19 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
-    result = apply_elite_leader_gate_fix(result)
-    tier = result.get("trade_tier", "")
-    if "TRADEABLE" in tier:
-        if result.get("second_leg", {}).get("detected"):
-            return "🔥 SECOND LEG"
-        if result.get("coil", {}).get("detected"):
-            return "🔥 COIL"
-        return "🔥 TRADEABLE"
-    if result.get("elite_leader") or "AWARENESS" in tier or "MARKET LEADER — EXTENDED" in tier:
-        return "👀 MARKET LEADER — EXTENDED"
-    if "AVOID" in tier:
-        return "⚠️ AVOID / WAIT"
-    if "MARKET LEADER — EXTENDED" in result["bias"]:
-        return "🔥 MARKET LEADER — EXTENDED"
-    if "MARKET LEADER" in result["bias"]:
-        return "🔥 MARKET LEADER"
-    if "LEADER / EXTENDED" in result["bias"]:
-        return "🔥 MARKET LEADER — EXTENDED"
-    if "MARKET LEADER" in result["bias"]:
-        return "🔥 MARKET LEADER"
-    if "RUNNER" in result["bias"]:
-        if result["second_leg"]["detected"]:
-            return "🔥 SECOND LEG"
-        if result["coil"]["detected"]:
-            return "🔥 COIL BREAKOUT"
-        return "🔥 RUNNER"
-
-    if "WATCH" in result["bias"]:
-        if result["coil"]["detected"]:
-            return "👀 WATCH — COIL"
-        return "👀 WATCH"
-
-    return "⚠️ AVOID"
+    # v36: if it hits Telegram, the name is IN PLAY. No more MARKET LEADER / WATCH titles.
+    if result.get("second_leg", {}).get("detected"):
+        return "🔥 IN PLAY — SECOND LEG"
+    if result.get("coil", {}).get("detected"):
+        return "🌀 IN PLAY — COIL BREAKOUT"
+    if bool(get_struct(result.get("structure", {}), "breakout", False)):
+        return "🚀 IN PLAY — BREAKOUT"
+    entry = str(result.get("entry", "")).lower()
+    if "vwap hold" in entry:
+        return "🟢 IN PLAY — VWAP HOLD"
+    if "higher-low" in entry or "higher low" in entry:
+        return "📈 IN PLAY — HIGHER LOW"
+    return "🔥 IN PLAY"
 
 
 def main_risk_sentence(result):
@@ -4126,6 +4178,9 @@ def analyze_candidate(candidate, regime):
         "market_cap": market_cap,
         "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
         "score": score,
+        "entry_score": entry_score,
+        "structure_score": structure_score,
+        "volume_score": volume_score,
         "bias": bias,
         "trade_tier": trade_tier,
         "phase": phase,
