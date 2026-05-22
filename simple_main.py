@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.1 — quote fallback stack + RVOL phase/tier upgrade"
+BOOT_MARKER = "elite scanner v34.2 — candle fallback stack + quote fallback + RVOL phase/tier upgrade"
 
 # ============================================================
 # ENV
@@ -98,6 +98,9 @@ LAST_GOOD_QUOTES = {}
 NEWS_CACHE = {}
 SEC_CACHE = {}
 CANDLE_CACHE = {}
+LAST_GOOD_CANDLES = {}
+YAHOO_CANDLE_BLOCK_UNTIL = 0
+YAHOO_CANDLE_429_COUNT = 0
 MARKET_REGIME_CACHE = {}
 
 LAST_ALERT = {}
@@ -1325,6 +1328,39 @@ def normalize_candle(o, h, l, c, v, ts=None):
     }
 
 
+def valid_candle_list(candles, min_count=3):
+    if not candles or not isinstance(candles, list):
+        return False
+    good = 0
+    for c in candles:
+        if isinstance(c, dict) and candle_close(c) > 0 and candle_high(c) > 0 and candle_low(c) > 0:
+            good += 1
+    return good >= min_count
+
+
+def remember_good_candles(ticker, candles, source="unknown"):
+    if valid_candle_list(candles, min_count=5):
+        LAST_GOOD_CANDLES[ticker] = {
+            "ts": time.time(),
+            "candles": candles,
+            "source": source,
+        }
+    return candles
+
+
+def get_last_good_candles(ticker, max_age_seconds=900):
+    item = LAST_GOOD_CANDLES.get(ticker)
+    if not item:
+        return []
+    age = time.time() - item.get("ts", 0)
+    candles = item.get("candles") or []
+    if age <= max_age_seconds and valid_candle_list(candles, min_count=5):
+        print(f"[CANDLES FALLBACK] {ticker}: using last good {len(candles)} candles from {item.get('source', 'cache')} age={int(age)}s")
+        return candles
+    LAST_GOOD_CANDLES.pop(ticker, None)
+    return []
+
+
 def get_alpaca_candles(ticker):
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return []
@@ -1348,17 +1384,26 @@ def get_alpaca_candles(ticker):
         }
 
         r = http_get(url, params=params, headers=headers, timeout=6)
-        data = r.json()
-        bars = data.get("bars", [])
+        data = safe_json_response(r, f"CANDLES Alpaca {ticker}")
+        if not isinstance(data, dict):
+            return []
+
+        bars = data.get("bars") or []
+        if not isinstance(bars, list):
+            print(f"[ALPACA ERROR] {ticker}: bars not list")
+            return []
 
         candles = []
         for b in bars:
-            candles.append(normalize_candle(
-                b.get("o"), b.get("h"), b.get("l"), b.get("c"), b.get("v"), b.get("t")
-            ))
+            if not isinstance(b, dict):
+                continue
+            c = normalize_candle(b.get("o"), b.get("h"), b.get("l"), b.get("c"), b.get("v"), b.get("t"))
+            if candle_close(c) > 0 and candle_high(c) > 0 and candle_low(c) > 0:
+                candles.append(c)
 
         if candles:
             print(f"[CANDLES] {ticker}: Alpaca {len(candles)}")
+            remember_good_candles(ticker, candles, "Alpaca")
         return candles
 
     except Exception as e:
@@ -1367,44 +1412,79 @@ def get_alpaca_candles(ticker):
 
 
 def get_yahoo_candles(ticker):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(ticker)}"
-        params = {"interval": "1m", "range": "1d"}
-        r = http_get(url, params=params, timeout=6)
-        data = r.json()
+    global YAHOO_CANDLE_BLOCK_UNTIL, YAHOO_CANDLE_429_COUNT
 
-        result = data.get("chart", {}).get("result", [])
+    now = time.time()
+    if now < YAHOO_CANDLE_BLOCK_UNTIL:
+        wait_left = int(YAHOO_CANDLE_BLOCK_UNTIL - now)
+        print(f"[YAHOO CANDLES BLOCKED] {ticker}: cooling down {wait_left}s after rate limit")
+        return []
+
+    try:
+        # Tiny throttle keeps Render from hammering Yahoo across many leaders in one cycle.
+        time.sleep(0.20)
+
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(ticker)}"
+        params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/chart",
+        }
+        r = http_get(url, params=params, headers=headers, timeout=6)
+
+        text = getattr(r, "text", "") or ""
+        if getattr(r, "status_code", 0) == 429 or "Too Many Requests" in text:
+            YAHOO_CANDLE_429_COUNT += 1
+            cooldown = min(300, 45 * YAHOO_CANDLE_429_COUNT)
+            YAHOO_CANDLE_BLOCK_UNTIL = time.time() + cooldown
+            print(f"[YAHOO CANDLES 429] {ticker}: blocking Yahoo candle calls for {cooldown}s")
+            return []
+
+        data = safe_json_response(r, f"CANDLES Yahoo {ticker}")
+        if not isinstance(data, dict):
+            return []
+
+        chart = data.get("chart") or {}
+        error = chart.get("error")
+        if error:
+            print(f"[YAHOO CANDLES ERROR] {ticker}: {error}")
+            return []
+
+        result = chart.get("result") or []
         if not result:
             return []
 
-        node = result[0]
-        timestamps = node.get("timestamp", [])
-        quote = node.get("indicators", {}).get("quote", [{}])[0]
+        node = result[0] or {}
+        timestamps = node.get("timestamp") or []
+        indicators = node.get("indicators") or {}
+        quote_list = indicators.get("quote") or []
+        quote = quote_list[0] if quote_list and isinstance(quote_list[0], dict) else {}
 
-        opens = quote.get("open", [])
-        highs = quote.get("high", [])
-        lows = quote.get("low", [])
-        closes = quote.get("close", [])
-        volumes = quote.get("volume", [])
+        opens = quote.get("open") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
+        closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
 
         candles = []
-        for i, ts in enumerate(timestamps):
+        max_len = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
+        for i in range(max_len):
             try:
-                o = opens[i] if i < len(opens) else None
-                h = highs[i] if i < len(highs) else None
-                l = lows[i] if i < len(lows) else None
-                c = closes[i] if i < len(closes) else None
+                o, h, l, c = opens[i], highs[i], lows[i], closes[i]
                 v = volumes[i] if i < len(volumes) else 0
-
                 if None in [o, h, l, c]:
                     continue
-
-                candles.append(normalize_candle(o, h, l, c, v, ts))
+                candle = normalize_candle(o, h, l, c, v, timestamps[i])
+                if candle_close(candle) > 0 and candle_high(candle) > 0 and candle_low(candle) > 0:
+                    candles.append(candle)
             except Exception:
                 continue
 
         if candles:
+            YAHOO_CANDLE_429_COUNT = 0
             print(f"[CANDLES] {ticker}: Yahoo {len(candles)}")
+            remember_good_candles(ticker, candles, "Yahoo")
         return candles
 
     except Exception as e:
@@ -1418,11 +1498,16 @@ def get_candles(ticker):
         return cached
 
     candles = get_alpaca_candles(ticker)
-    if not candles:
-        print(f"[DATA FALLBACK] {ticker}: Alpaca failed — using Yahoo")
+    if not valid_candle_list(candles, min_count=5):
+        print(f"[DATA FALLBACK] {ticker}: Alpaca failed/weak — using Yahoo")
         candles = get_yahoo_candles(ticker)
 
-    return cached_set(CANDLE_CACHE, ticker, candles)
+    if not valid_candle_list(candles, min_count=5):
+        candles = get_last_good_candles(ticker)
+
+    if candles:
+        cached_set(CANDLE_CACHE, ticker, candles)
+    return candles or []
 
 
 # ============================================================
