@@ -104,6 +104,8 @@ LAST_GOOD_CANDLES = {}
 YAHOO_CANDLE_BLOCK_UNTIL = 0
 YAHOO_CANDLE_429_COUNT = 0
 MARKET_REGIME_CACHE = {}
+DAILY_CONTEXT_CACHE = {}
+FRESHNESS_STATE = {}
 
 LAST_ALERT = {}
 LAST_EARLY_ALERT = {}
@@ -3003,6 +3005,197 @@ def simple_leader_reasons(gain, float_info, volume, news_score):
     return dedupe(reasons)
 
 
+
+# ============================================================
+# FRESHNESS + DAILY CONTEXT ENGINE v34.8
+# Keeps alerts clean while ranking fresh QTEX-style names higher.
+# ============================================================
+
+def trading_day_key():
+    return now_et().strftime("%Y-%m-%d")
+
+
+def _fresh_key(ticker):
+    return f"{trading_day_key()}:{ticker.upper().strip()}"
+
+
+def calc_freshness_boost(ticker, price, gain, volume, structure):
+    """
+    Rank fresh names higher without creating new alert categories.
+    This favors first-discovery leaders, gain acceleration, volume expansion,
+    and fresh highs. It penalizes recycled/re-alerted names lightly.
+    """
+    key = _fresh_key(ticker)
+    prev = FRESHNESS_STATE.get(key)
+    score = 0.0
+    reasons = []
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    recent_vol = safe_int(get_struct(structure, "recent_volume", 0))
+    previous_vol = safe_int(get_struct(structure, "previous_volume", 0))
+
+    if not prev:
+        if gain >= 50:
+            score += 1.00
+            reasons.append("fresh high-percent leader")
+        elif gain >= RUNNER_MIN_GAIN:
+            score += 0.65
+            reasons.append("fresh runner candidate")
+    else:
+        prev_gain = safe_float(prev.get("gain"))
+        prev_price = safe_float(prev.get("price"))
+        prev_volume = safe_int(prev.get("volume"))
+
+        gain_delta = gain - prev_gain
+        if gain_delta >= 20:
+            score += 1.20
+            reasons.append("rapid gain acceleration")
+        elif gain_delta >= 10:
+            score += 0.85
+            reasons.append("gain accelerating")
+        elif gain_delta >= 5:
+            score += 0.35
+
+        if prev_price > 0 and price >= prev_price * 1.05:
+            score += 0.70
+            reasons.append("fresh price expansion")
+        elif prev_price > 0 and price >= prev_price * 1.03:
+            score += 0.35
+
+        if prev_volume > 0 and volume >= prev_volume * 1.75:
+            score += 0.50
+            reasons.append("volume expanding vs prior scan")
+
+    if recent_vol and previous_vol and recent_vol >= previous_vol * 1.50:
+        score += 0.45
+        reasons.append("recent volume ignition")
+
+    if above_vwap and near_high and gain >= RUNNER_MIN_GAIN:
+        score += 0.35
+        reasons.append("fresh high/VWAP pressure")
+
+    # Recycled names can still run, but new names should outrank stale repeaters.
+    if ticker in LAST_ALERT:
+        score -= 0.35
+
+    FRESHNESS_STATE[key] = {
+        "time": time.time(),
+        "price": price,
+        "gain": gain,
+        "volume": volume,
+    }
+
+    return {"score": clamp(score, -1.0, 2.75), "reasons": dedupe(reasons)}
+
+
+def get_yahoo_daily_candles(ticker):
+    cached = cached_get(DAILY_CONTEXT_CACHE, ticker, ttl=900)
+    if cached:
+        return cached
+
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(ticker)}"
+        params = {"interval": "1d", "range": "1y", "includePrePost": "false"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/chart",
+        }
+        r = http_get(url, params=params, headers=headers, timeout=6)
+        data = safe_json_response(r, f"DAILY Yahoo {ticker}")
+        if not isinstance(data, dict):
+            return []
+
+        result = ((data.get("chart") or {}).get("result") or [])
+        if not result:
+            return []
+        node = result[0] or {}
+        timestamps = node.get("timestamp") or []
+        quote = (((node.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
+        closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
+
+        candles = []
+        max_len = min(len(timestamps), len(highs), len(lows), len(closes))
+        for i in range(max_len):
+            h, l, c = highs[i], lows[i], closes[i]
+            if None in [h, l, c]:
+                continue
+            candles.append({
+                "time": timestamps[i],
+                "high": safe_float(h),
+                "low": safe_float(l),
+                "close": safe_float(c),
+                "volume": safe_int(volumes[i] if i < len(volumes) else 0),
+            })
+
+        if candles:
+            print(f"[DAILY] {ticker}: Yahoo {len(candles)} daily bars")
+            return cached_set(DAILY_CONTEXT_CACHE, ticker, candles)
+    except Exception as e:
+        print(f"[DAILY ERROR] {ticker}: {e}")
+
+    return []
+
+
+def calc_daily_context(ticker, price):
+    """
+    Lightweight daily-chart context. No new categories; only score/ranking support
+    plus one short alert line when there is a true daily breakout/52W high.
+    """
+    candles = get_yahoo_daily_candles(ticker)
+    if not candles or len(candles) < 20 or price <= 0:
+        return {"score": 0.0, "label": "", "reasons": [], "risk": ""}
+
+    # Exclude the current/last daily bar so intraday price can be compared to prior resistance.
+    prior = candles[:-1] if len(candles) > 1 else candles
+    highs = [safe_float(c.get("high")) for c in prior if safe_float(c.get("high")) > 0]
+    if not highs:
+        return {"score": 0.0, "label": "", "reasons": [], "risk": ""}
+
+    high_52w = max(highs[-252:]) if len(highs) >= 60 else max(highs)
+    high_6m = max(highs[-126:]) if len(highs) >= 126 else max(highs)
+    high_3m = max(highs[-63:]) if len(highs) >= 63 else max(highs)
+    high_20d = max(highs[-20:])
+
+    score = 0.0
+    label = ""
+    reasons = []
+    risk = ""
+
+    if high_52w > 0 and price >= high_52w * 1.002:
+        score += 1.50
+        label = "52W high breakout"
+        reasons.append("52W high breakout")
+    elif high_6m > 0 and price >= high_6m * 1.002:
+        score += 1.05
+        label = "6M daily breakout"
+        reasons.append("6M daily breakout")
+    elif high_3m > 0 and price >= high_3m * 1.002:
+        score += 0.70
+        label = "3M daily breakout"
+        reasons.append("3M daily breakout")
+    elif high_20d > 0 and price >= high_20d * 1.002:
+        score += 0.40
+        label = "20D daily breakout"
+        reasons.append("20D daily breakout")
+
+    # Early daily breakouts get a small reward; very extended breakouts get awareness only.
+    breakout_level = high_52w if "52W" in label else high_6m if "6M" in label else high_3m if "3M" in label else high_20d
+    if label and breakout_level > 0:
+        extension = (price / breakout_level) - 1.0
+        if extension <= 0.08:
+            score += 0.35
+            reasons.append("near daily breakout level")
+        elif extension >= 0.35:
+            risk = "Extended above daily breakout"
+
+    # If price is under nearby resistance, don't punish hard; just withhold breakout boost.
+    return {"score": clamp(score, 0.0, 2.0), "label": label, "reasons": dedupe(reasons), "risk": risk}
+
 # ============================================================
 # SCORING ENGINE
 # ============================================================
@@ -3422,6 +3615,9 @@ def build_alert(result):
         setup_bits.append("above VWAP")
     if bool(get_struct(result.get("structure", {}), "higher_lows", False)):
         setup_bits.append("higher lows")
+    daily_label = (result.get("daily_context") or {}).get("label", "")
+    if daily_label:
+        setup_bits.append(daily_label)
 
     risk_items = []
     sec_short = compact_dilution_label(result.get("sec"))
@@ -3710,6 +3906,8 @@ def analyze_candidate(candidate, regime):
     news = get_best_news(ticker)
     news_score = safe_float(news.get("score", 0))
     sec = check_sec_filings(ticker)
+    freshness = calc_freshness_boost(ticker, price, gain, volume, structure)
+    daily_context = calc_daily_context(ticker, price)
 
     structure_score, structure_reasons = calc_structure_score_v3310(structure, coil, second_leg)
     volume_score, volume_reasons = calc_volume_score_v3310(volume)
@@ -3728,8 +3926,11 @@ def analyze_candidate(candidate, regime):
         regime=regime,
     )
 
-    # v34 participation boost/penalty after base score.
+    # v34 participation + v34.8 fresh-name/daily-context boosts after base score.
     score += safe_float(participation.get("score", 0))
+    score += safe_float(freshness.get("score", 0))
+    score += safe_float(daily_context.get("score", 0))
+    score = clamp(score)
 
     # v33.12 ranking visibility floor:
     # True tiny/low-float leaders stay visible even when extended.
@@ -3759,6 +3960,8 @@ def analyze_candidate(candidate, regime):
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
     reasons.extend(participation.get("reasons", []))
+    reasons.extend(freshness.get("reasons", []))
+    reasons.extend(daily_context.get("reasons", []))
     reasons.extend(entry_reasons)
 
     risks.extend(risk_reasons)
@@ -3770,13 +3973,16 @@ def analyze_candidate(candidate, regime):
         risks.append(float_info.get("risk"))
     if halt_risk.get("label"):
         risks.append(halt_risk.get("label"))
+    if daily_context.get("risk"):
+        risks.append(daily_context.get("risk"))
 
     reasons = dedupe(reasons)
     risks = dedupe(risks)
 
     print(
         f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
-        f"+{gain:.1f}% {float_info.get('label', '')} Phase={phase}"
+        f"+{gain:.1f}% {float_info.get('label', '')} "
+        f"Fresh={safe_float(freshness.get('score', 0)):.1f} Daily={daily_context.get('label', '')} Phase={phase}"
     )
 
     return {
@@ -3811,6 +4017,8 @@ def analyze_candidate(candidate, regime):
         "fakeout": fakeout,
         "participation": participation,
         "halt_risk": halt_risk,
+        "freshness": freshness,
+        "daily_context": daily_context,
         "source": source,
     }
 
@@ -3832,7 +4040,7 @@ def print_top_ranked(results):
         return
 
     top = " | ".join(
-        f"{r['ticker']} {r['score']:.1f}/10 {r['bias'].replace('🟢 ', '').replace('👀 ', '').replace('⚠️ ', '')} +{r['gain']:.1f}% {r.get('float_info', {}).get('label', '')}"
+        f"{r['ticker']} {r['score']:.1f}/10 {r['bias'].replace('🟢 ', '').replace('👀 ', '').replace('⚠️ ', '')} +{r['gain']:.1f}% {r.get('float_info', {}).get('label', '')} {(r.get('daily_context') or {}).get('label', '')}"
         for r in results[:5]
     )
     print(f"[SCAN] Top ranked: {top}")
