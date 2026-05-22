@@ -80,7 +80,7 @@ LOW_FLOAT_GOOD = 20_000_000
 LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
-ALERT_MIN_SCORE = 7.0
+ALERT_MIN_SCORE = 8.0
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 4
 SCAN_SLEEP = 90
@@ -3499,7 +3499,7 @@ def apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, fr
     """
     v35.0: keep QTEX-style day leaders visible even after normal pullbacks.
     This does not blindly mark them as clean entries; it prevents the score from
-    collapsing below alert/watch range while they still show leader-quality traits.
+    collapsing below alert range while they still show elite leader-quality traits.
     """
     score = safe_float(score)
     gain = safe_float(gain)
@@ -3520,7 +3520,7 @@ def apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, fr
 
     # Explosive day leader floor: QTEX-type move.
     if still_alive and low_or_unknown_float and gain >= 75 and volume >= 10_000_000:
-        score = max(score, 7.6 if fresh_or_daily else 7.2)
+        score = max(score, 8.0 if fresh_or_daily else 7.5)
 
     # Strong low-float continuation floor: GOVX/KIDZ/MTVA-type move.
     if still_alive and low_or_unknown_float and gain >= 40 and volume >= 10_000_000:
@@ -3546,7 +3546,7 @@ def should_alert(result):
         return False
 
     if result["score"] < ALERT_MIN_SCORE:
-        print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below floor")
+        print(f"[NO ALERT] {ticker}: score {result['score']:.1f} below 8.0 alert floor")
         return False
 
     result = apply_elite_leader_gate_fix(result)
