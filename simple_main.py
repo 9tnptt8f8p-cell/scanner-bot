@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.6 — fast parallel news + advanced dilution + clean alerts"
+BOOT_MARKER = "elite scanner v34.7 — compact alerts + news rank + dilution awareness only"
 
 # ============================================================
 # ENV
@@ -1754,6 +1754,63 @@ WEAK_NEWS_PATTERNS = {
     "Product": ["launches", "unveils", "introduces"],
 }
 
+
+def news_rank_from_score_quality(score, quality, category=""):
+    """Simple trader-facing news rank: A+ matters, C is weak/speculative, D/F is junk/trap."""
+    score = safe_float(score)
+    q = (quality or "").upper()
+    cat = (category or "").lower()
+
+    if q in ["NEGATIVE"] or "offering" in cat:
+        return "F", "Dilution/news trap"
+    if q in ["JUNK", "STALE"]:
+        return "D", "Junk/stale news"
+    if q == "NONE" or score <= 0:
+        return "D", "No confirmed catalyst"
+    if score >= 9:
+        return "A+", "Elite catalyst"
+    if score >= 8:
+        return "A", "Strong catalyst"
+    if score >= 5:
+        return "B", "Decent catalyst"
+    if score >= 3:
+        return "C", "Weak/speculative"
+    return "D", "Low-quality news"
+
+
+def compact_news_line(news):
+    news = news or {}
+    rank = news.get("rank") or news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))[0]
+    meaning = news.get("rank_meaning") or news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))[1]
+    category = news.get("category") or "Catalyst"
+    if rank in ["A+", "A", "B"]:
+        return f"NEWS: {rank} — {category}"
+    if rank == "C":
+        return f"NEWS: C — {meaning}"
+    return f"NEWS: {rank} — {meaning}"
+
+
+def compact_dilution_label(sec):
+    """Dilution is awareness only. Only call out same-day/very fresh offering as urgent."""
+    if not isinstance(sec, dict) or not sec.get("has_risk"):
+        return ""
+
+    severity = sec.get("severity", "")
+    forms = "/".join((sec.get("forms") or [])[:3])
+    age = sec.get("filing_age_days")
+    category = (sec.get("category") or "").lower()
+    atm = bool(sec.get("atm_active"))
+
+    if severity == "HIGH" and age is not None and age <= 1:
+        return f"Offering risk TODAY ({forms or 'filing'})"
+    if severity == "HIGH" and (atm or "atm" in category or "sales agreement" in category):
+        return "Company can sell shares anytime"
+    if severity in ["HIGH", "MEDIUM"]:
+        return "Financing ability on file"
+    if severity == "LOW":
+        return "SEC filings on file"
+    return ""
+
 # Some tickers are normal English words. Do not treat lowercase prose like
 # "ramp up revenue" or "fly higher" as ticker-specific news.
 COMMON_WORD_TICKERS = {
@@ -1854,7 +1911,7 @@ def is_stale_news_text(headline):
     return any(re.search(pat, h, flags=re.IGNORECASE) for pat in stale_patterns)
 
 
-def classify_news(headline, ticker=None):
+def classify_news_raw(headline, ticker=None):
     h_raw = clean_text(headline)
     h = f" {h_raw.lower()} "
 
@@ -1940,6 +1997,14 @@ def classify_news(headline, ticker=None):
         "headline": h_raw,
     }
 
+
+def classify_news(headline, ticker=None):
+    news = classify_news_raw(headline, ticker)
+    rank, meaning = news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))
+    news["rank"] = rank
+    news["rank_meaning"] = meaning
+    news["compact_line"] = compact_news_line(news)
+    return news
 
 def extract_headlines_from_soup(soup, ticker):
     text = clean_text(soup.get_text(" "))
@@ -2213,13 +2278,18 @@ def matched_terms(lower_text, terms):
 
 
 def build_dilution_label(severity, category, forms, terms, age_bucket):
+    # Trader-focused: dilution is awareness only, not a score killer.
     form_txt = "/".join(forms[:3]) if forms else "filing"
-    if severity == "HIGH":
-        return f"🚨 ACTIVE DILUTION RISK — {category} ({form_txt}, {age_bucket})"
-    if severity == "MEDIUM":
-        return f"⚠️ SHELF/ATM RISK — {category} ({form_txt}, {age_bucket})"
+    cat = (category or "").lower()
+
+    if severity == "HIGH" and "today" in str(age_bucket).lower():
+        return f"Offering risk TODAY ({form_txt})"
+    if severity == "HIGH" and ("atm" in cat or "sales agreement" in cat):
+        return "Company can sell shares anytime"
+    if severity in ["HIGH", "MEDIUM"]:
+        return "Financing ability on file"
     if severity == "LOW":
-        return f"🟡 SEC AWARENESS — {category} ({form_txt}, {age_bucket})"
+        return "SEC filings on file"
     return ""
 
 
@@ -2730,7 +2800,7 @@ def build_trade_tier_v34(score, bias, phase, exhaustion=None, decay=None, fakeou
     if fading and not continuation_phase and score < 7.0:
         return "⚠️ AVOID / WAIT"
     if score >= 7.5 and entry_score >= 4.5 and structure_score >= 4.0 and ("RUNNER" in bias or continuation_phase):
-        return "🔥 TRADEABLE RUNNER"
+        return "🔥 TRADEABLE"
     if score >= 6.7 and ("RUNNER" in bias or "WATCH" in bias or continuation_phase):
         return "🟢 RUNNER WATCH"
     if exhausted or "EXTENDED" in bias or "EXTENDED" in phase:
@@ -3215,10 +3285,10 @@ def alert_title(result):
     tier = result.get("trade_tier", "")
     if "TRADEABLE RUNNER" in tier:
         if result.get("second_leg", {}).get("detected"):
-            return "🔥 TRADEABLE RUNNER — SECOND LEG"
+            return "🔥 SECOND LEG"
         if result.get("coil", {}).get("detected"):
-            return "🔥 TRADEABLE RUNNER — COIL"
-        return "🔥 TRADEABLE RUNNER"
+            return "🔥 COIL"
+        return "🔥 TRADEABLE"
     if "AWARENESS" in tier:
         return "👀 MARKET LEADER — EXTENDED"
     if "AVOID" in tier:
@@ -3233,9 +3303,9 @@ def alert_title(result):
         return "🔥 MARKET LEADER"
     if "RUNNER" in result["bias"]:
         if result["second_leg"]["detected"]:
-            return "🔥 RUNNER — SECOND LEG"
+            return "🔥 SECOND LEG"
         if result["coil"]["detected"]:
-            return "🔥 RUNNER — COIL BREAKOUT"
+            return "🔥 COIL BREAKOUT"
         return "🔥 RUNNER"
 
     if "WATCH" in result["bias"]:
@@ -3330,82 +3400,62 @@ def build_alert(result):
     result = normalize_alert_fields(result)
     title = alert_title(result)
 
-    # v33.14 hotfix: never let a missing news_explain/news field crash alerts.
     news = result.get("news") or {}
-    news_score = safe_float(result.get("news_score", news.get("score", 0)))
-    news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
-    news_headline = result.get("news_headline") or news.get("headline") or ""
-    news_explain = (
-        result.get("news_explain")
-        or news.get("explain")
-        or news_headline
-        or "No catalyst details available"
-    )
-    if news_explain == news_label:
-        news_explain = news_headline or "No catalyst details available"
+    news_line = compact_news_line(news)
 
-    # Store normalized safe values back into result for downstream code/logging.
-    result["news_score"] = news_score
-    result["news_label"] = news_label
-    result["news_headline"] = news_headline
-    result["news_explain"] = news_explain
+    header = f"{result['ticker']} | {result['score']:.1f} | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
 
-    header = f"{result['ticker']} | {result['score']:.1f}/10 | {fmt_money(result['price'])} | +{result['gain']:.1f}%"
+    stat_bits = []
     if SHOW_FLOAT and result.get("float"):
-        header += f" | {result.get('float_info', {}).get('label') or ('Float ' + fmt_big_num(result['float']))}"
+        label = result.get("float_info", {}).get("label") or f"Float {fmt_big_num(result['float'])}"
+        # Strip repeated noisy words but keep tiny/low-float edge.
+        stat_bits.append(label.replace("🔥 ", "🔥 ").replace("🟢 ", "").replace("🟡 ", ""))
+    if result.get("volume"):
+        stat_bits.append(f"{fmt_big_num(result.get('volume'))} vol")
 
-    lines = [
-        title,
-        "",
-        header,
-        "",
-        f"Catalyst: {news_score:.0f}/10 {news_label} — {news_explain}",
-        f"Tier: {result.get('trade_tier', '👀 MARKET WATCH')}",
-        f"State: {result['bias']}",
-        f"Phase: {result['phase']}",
-        "",
-        "Why:",
-    ]
+    setup_bits = []
+    if result.get("second_leg", {}).get("detected"):
+        setup_bits.append("second leg")
+    if result.get("coil", {}).get("detected"):
+        setup_bits.append("coil")
+    if bool(get_struct(result.get("structure", {}), "above_vwap", False)):
+        setup_bits.append("above VWAP")
+    if bool(get_struct(result.get("structure", {}), "higher_lows", False)):
+        setup_bits.append("higher lows")
 
-    for reason in result["reasons"][:5]:
-        lines.append(f"• {reason}")
+    risk_items = []
+    sec_short = compact_dilution_label(result.get("sec"))
+    if sec_short:
+        risk_items.append(sec_short)
 
-    lines.extend([
-        "",
-        f"Entry: {result['entry']}",
-        f"Risk: {main_risk_sentence(result)}",
-        f"Bias: {result['bias']}",
-    ])
+    main_risk = main_risk_sentence(result)
+    if main_risk and "no major" not in main_risk.lower():
+        # Avoid duplicating the same dilution line.
+        if not sec_short or main_risk.lower() != sec_short.lower():
+            risk_items.append(main_risk)
 
-    # Add only high-value awareness, not clutter.
-    awareness = []
-    if result.get("halt_risk", {}).get("label"):
-        awareness.append(result.get("halt_risk", {}).get("label"))
+    lines = [title, "", header]
 
-    if result.get("float_info", {}).get("risk"):
-        awareness.append(result.get("float_info", {}).get("risk"))
+    if stat_bits:
+        lines.append(" | ".join(dedupe(stat_bits)[:3]))
 
-    if result.get("sec", {}).get("has_risk"):
-        awareness.append(result.get("sec", {}).get("label"))
+    lines.extend(["", news_line])
 
-    if result.get("fakeout", {}).get("label"):
-        awareness.append(result.get("fakeout", {}).get("label"))
+    if setup_bits:
+        lines.append("✅ " + " + ".join(dedupe(setup_bits)[:4]))
 
-    if result.get("participation", {}).get("label") and "fading" in result.get("participation", {}).get("label", "").lower():
-        awareness.append(result.get("participation", {}).get("label"))
+    lines.append("")
+    lines.append(f"Entry: {result['entry']}")
 
-    if result.get("regime", {}).get("label") == "❄️ COLD / THIN MOMENTUM MARKET":
-        awareness.append("Cold market — be extra selective")
+    if risk_items:
+        lines.append(f"Risk: {' | '.join(dedupe(risk_items)[:2])}")
+    else:
+        lines.append("Risk: clean for now")
 
-    if awareness:
+    if SHOW_HEADLINE and (news.get("headline") or result.get("headline")):
+        headline = news.get("headline") or result.get("headline")
         lines.append("")
-        lines.append("Awareness:")
-        for item in dedupe(awareness)[:3]:
-            lines.append(f"• {item}")
-
-    if SHOW_HEADLINE and result.get("headline"):
-        lines.append("")
-        lines.append(f"Headline: {result['headline'][:220]}")
+        lines.append(f"Headline: {headline[:220]}")
 
     return "\n".join(lines)
 
@@ -3533,15 +3583,9 @@ def calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings=Non
         if exhaustion.get("risk"):
             reasons.append(exhaustion.get("risk"))
 
-    sec_severity = sec.get("severity", "") if isinstance(sec, dict) else ""
-    sec_risk_score = safe_float(sec.get("risk_score", 0.0)) if isinstance(sec, dict) else 0.0
-    # Dilution is awareness first. Only same-day/active terms should noticeably drag score.
-    if sec_severity == "HIGH":
-        penalty += min(0.9, 0.25 + sec_risk_score * 0.18)
-    elif sec_severity == "MEDIUM":
-        penalty += min(0.45, 0.15 + sec_risk_score * 0.12)
-    elif sec_severity == "LOW":
-        penalty += 0.05
+    # Dilution / SEC filings are awareness only.
+    # Do NOT subtract score for dilution; many real runners have S-1/424B/ATM/warrants on file.
+    # The alert will still show whether the company can offer/sell shares.
 
     halt_label = halt_risk.get("label", "") if isinstance(halt_risk, dict) else ""
     if halt_label:
