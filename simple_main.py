@@ -24,7 +24,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v34.3 — balanced premarket continuation + stale-news guard"
+BOOT_MARKER = "elite scanner v34.4 — advanced dilution tiers + balanced continuation"
 
 # ============================================================
 # ENV
@@ -2037,20 +2037,80 @@ def get_best_news(ticker):
 
 
 # ============================================================
-# SEC / DILUTION ENGINE
+# SEC / DILUTION ENGINE — v34.4 ADVANCED TIERS
 # ============================================================
 
-DILUTION_TERMS = [
-    "at-the-market", "atm offering", "equity distribution agreement",
-    "sales agreement", "registered direct", "public offering",
-    "private placement", "securities purchase agreement",
-    "warrant", "warrants", "convertible", "convertible note",
-    "shelf registration", "resale prospectus", "form s-1", "form s-3",
-    "424b3", "424b5", "f-1", "f-3",
+# Active dilution = can create near-term sell pressure into spikes.
+ACTIVE_DILUTION_TERMS = [
+    "registered direct", "public offering", "private placement", "best efforts offering",
+    "securities purchase agreement", "priced an offering", "pricing of its offering",
+    "announces pricing", "institutional investors", "pre-funded warrant",
+    "common warrants", "placement agent warrants", "convertible note", "convertible notes",
 ]
 
-SHELF_FORMS = ["S-1", "S-3", "F-1", "F-3", "424B3", "424B5"]
-SEC_FORMS_TO_DETECT = ["424B3", "424B5", "S-1", "S-3", "F-1", "F-3", "8-K", "6-K"]
+ATM_TERMS = [
+    "at-the-market", "atm offering", "equity distribution agreement", "sales agreement",
+    "may sell shares", "from time to time", "sales agent", "offer and sell shares",
+]
+
+WARRANT_TERMS = [
+    "warrant", "warrants", "exercise price", "exercisable", "pre-funded warrants",
+    "common warrants", "placement agent warrants", "warrant shares",
+]
+
+SHELF_TERMS = [
+    "shelf registration", "resale prospectus", "prospectus supplement", "may offer from time to time",
+    "selling stockholders", "registration statement", "form s-3", "form f-3", "form s-1", "form f-1",
+]
+
+DILUTION_TERMS = list(dict.fromkeys(ACTIVE_DILUTION_TERMS + ATM_TERMS + WARRANT_TERMS + SHELF_TERMS))
+
+ACTIVE_FORMS = ["424B5", "424B4", "FWP"]
+SHELF_FORMS = ["S-1", "S-3", "F-1", "F-3", "424B3", "424B5", "POS AM"]
+SEC_FORMS_TO_DETECT = ["424B3", "424B4", "424B5", "S-1", "S-3", "F-1", "F-3", "8-K", "6-K", "POS AM", "FWP"]
+
+
+def sec_filing_dates_from_text(text):
+    """Extract visible EDGAR dates from browse page text and return newest-first dates."""
+    dates = []
+    for m in re.finditer(r"(20\d{2}-\d{2}-\d{2})", text or ""):
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            dates.append(d)
+        except Exception:
+            continue
+    return sorted(set(dates), reverse=True)
+
+
+def age_bucket_for_sec(days):
+    if days is None:
+        return "unknown age", 0.0
+    if days <= 1:
+        return "today/1d", 1.2
+    if days <= 7:
+        return "≤7d", 1.0
+    if days <= 30:
+        return "≤30d", 0.7
+    if days <= 90:
+        return "≤90d", 0.35
+    if days <= 180:
+        return "≤180d", 0.1
+    return ">180d/stale", -0.25
+
+
+def matched_terms(lower_text, terms):
+    return [term for term in terms if term.lower() in lower_text]
+
+
+def build_dilution_label(severity, category, forms, terms, age_bucket):
+    form_txt = "/".join(forms[:3]) if forms else "filing"
+    if severity == "HIGH":
+        return f"🚨 ACTIVE DILUTION RISK — {category} ({form_txt}, {age_bucket})"
+    if severity == "MEDIUM":
+        return f"⚠️ SHELF/ATM RISK — {category} ({form_txt}, {age_bucket})"
+    if severity == "LOW":
+        return f"🟡 SEC AWARENESS — {category} ({form_txt}, {age_bucket})"
+    return ""
 
 
 def check_sec_filings(ticker):
@@ -2061,9 +2121,15 @@ def check_sec_filings(ticker):
     risk = {
         "has_risk": False,
         "severity": "NONE",
+        "category": "Clean / no obvious dilution",
         "label": "",
         "forms": [],
         "terms": [],
+        "filing_age_days": None,
+        "freshness": "unknown age",
+        "risk_score": 0.0,
+        "atm_active": False,
+        "warrant_overhang": False,
     }
 
     try:
@@ -2083,43 +2149,74 @@ def check_sec_filings(ticker):
         text = clean_text(r.text)
         lower = text.lower()
 
+        filing_dates = sec_filing_dates_from_text(text)
+        age_days = None
+        if filing_dates:
+            age_days = (now_et().date() - filing_dates[0]).days
+        age_bucket, freshness_boost = age_bucket_for_sec(age_days)
+
         forms = []
         for form in SEC_FORMS_TO_DETECT:
             if form.lower() in lower:
                 forms.append(form)
+        forms = dedupe(forms)
 
-        terms = []
-        for term in DILUTION_TERMS:
-            if term in lower:
-                terms.append(term)
+        active_terms = matched_terms(lower, ACTIVE_DILUTION_TERMS)
+        atm_terms = matched_terms(lower, ATM_TERMS)
+        warrant_terms = matched_terms(lower, WARRANT_TERMS)
+        shelf_terms = matched_terms(lower, SHELF_TERMS)
+        all_terms = dedupe(active_terms + atm_terms + warrant_terms + shelf_terms)
 
-        if terms and any(term in terms for term in [
-            "registered direct", "public offering", "private placement",
-            "securities purchase agreement", "warrant", "warrants",
-            "convertible", "atm offering", "at-the-market",
-        ]):
-            risk.update({
-                "has_risk": True,
-                "severity": "HIGH",
-                "label": "🚨 CONFIRMED DILUTION RISK: offering/warrants/financing language found",
-                "forms": forms[:6],
-                "terms": terms[:6],
-            })
-        elif forms and any(f in SHELF_FORMS for f in forms):
-            risk.update({
-                "has_risk": True,
-                "severity": "MEDIUM",
-                "label": "⚠️ DILUTION RISK BUILDING: shelf/prospectus filing found",
-                "forms": forms[:6],
-                "terms": terms[:6],
-            })
+        has_active_form = any(f in ACTIVE_FORMS for f in forms)
+        has_shelf_form = any(f in SHELF_FORMS for f in forms)
+        atm_active = bool(atm_terms)
+        warrant_overhang = bool(warrant_terms and any(x in lower for x in ["exercise price", "exercisable", "warrant shares", "pre-funded"]))
+
+        base_score = 0.0
+        category = "Clean / no obvious dilution"
+        severity = "NONE"
+
+        if active_terms or has_active_form:
+            category = "offering/financing language"
+            severity = "HIGH"
+            base_score = 3.0
+        elif atm_active:
+            category = "ATM/sales agreement available"
+            severity = "HIGH" if age_days is not None and age_days <= 30 else "MEDIUM"
+            base_score = 2.4
+        elif warrant_overhang:
+            category = "warrant overhang"
+            severity = "MEDIUM"
+            base_score = 2.0
+        elif shelf_terms or has_shelf_form:
+            category = "shelf/resale capacity"
+            severity = "MEDIUM"
+            base_score = 1.5
         elif forms:
+            category = "recent SEC filings only"
+            severity = "LOW"
+            base_score = 0.6
+
+        # Freshness matters. Old shelf filings become awareness, not panic.
+        risk_score = max(0.0, base_score + freshness_boost)
+        if age_days is not None and age_days > 180 and severity in ["HIGH", "MEDIUM"]:
+            severity = "LOW"
+            category = f"older {category}"
+            risk_score = min(risk_score, 0.8)
+
+        if severity != "NONE":
             risk.update({
                 "has_risk": True,
-                "severity": "LOW",
-                "label": "🟡 SEC FILINGS PRESENT: recent filings found",
+                "severity": severity,
+                "category": category,
+                "label": build_dilution_label(severity, category, forms, all_terms, age_bucket),
                 "forms": forms[:6],
-                "terms": terms[:6],
+                "terms": all_terms[:8],
+                "filing_age_days": age_days,
+                "freshness": age_bucket,
+                "risk_score": round(risk_score, 2),
+                "atm_active": atm_active,
+                "warrant_overhang": warrant_overhang,
             })
 
         print(f"[SEC] {ticker}: {risk['label'] or 'clean/no obvious filing risk'}")
@@ -3326,12 +3423,15 @@ def calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings=Non
         if exhaustion.get("risk"):
             reasons.append(exhaustion.get("risk"))
 
-    sec_label = sec.get("label", "") if isinstance(sec, dict) else ""
     sec_severity = sec.get("severity", "") if isinstance(sec, dict) else ""
+    sec_risk_score = safe_float(sec.get("risk_score", 0.0)) if isinstance(sec, dict) else 0.0
+    # Dilution is awareness first. Only same-day/active terms should noticeably drag score.
     if sec_severity == "HIGH":
-        penalty += 1.0
+        penalty += min(0.9, 0.25 + sec_risk_score * 0.18)
     elif sec_severity == "MEDIUM":
-        penalty += 0.5
+        penalty += min(0.45, 0.15 + sec_risk_score * 0.12)
+    elif sec_severity == "LOW":
+        penalty += 0.05
 
     halt_label = halt_risk.get("label", "") if isinstance(halt_risk, dict) else ""
     if halt_label:
