@@ -126,6 +126,25 @@ SHOW_FLOAT = True
 SHOW_HEADLINE = False
 SHOW_VERBOSE_DEBUG = True
 
+# ============================================================
+# v36.12 LIVE SPEED MODE
+# ============================================================
+# Keep discovery wide, but do not let slow news/SEC/daily calls block every ticker.
+LIVE_SPEED_MODE = True
+MAX_DEEP_SCAN_NAMES = 35
+MAX_NEWS_NAMES_PER_CYCLE = 14
+MAX_SEC_NAMES_PER_CYCLE = 10
+ENABLE_PRNEWSWIRE_INTRADAY = False
+NEWS_FAST_TIMEOUT = 1.2
+NEWS_PARALLEL_TIMEOUT = 2.4
+GLOBE_TIMEOUT = 1.4
+YAHOO_NEWS_TIMEOUT = 1.2
+SEC_FAST_TIMEOUT = 2.0
+DAILY_CONTEXT_MIN_GAIN = 18.0
+
+NEWS_CALLS_THIS_CYCLE = 0
+SEC_CALLS_THIS_CYCLE = 0
+
 
 # ============================================================
 # v33.2 MULTI-SOURCE LEADER DISCOVERY
@@ -1619,7 +1638,7 @@ def get_alpaca_candles(ticker):
             "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
         }
 
-        r = http_get(url, params=params, headers=headers, timeout=6)
+        r = http_get(url, params=params, headers=headers, timeout=SEC_FAST_TIMEOUT)
         data = safe_json_response(r, f"CANDLES Alpaca {ticker}")
         if not isinstance(data, dict):
             return []
@@ -1667,7 +1686,7 @@ def get_yahoo_candles(ticker):
             "Accept": "application/json,text/plain,*/*",
             "Referer": f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/chart",
         }
-        r = http_get(url, params=params, headers=headers, timeout=6)
+        r = http_get(url, params=params, headers=headers, timeout=SEC_FAST_TIMEOUT)
 
         text = getattr(r, "text", "") or ""
         if getattr(r, "status_code", 0) == 429 or "Too Many Requests" in text:
@@ -2268,7 +2287,7 @@ def extract_headlines_from_soup(soup, ticker):
 def scrape_yahoo_news(ticker):
     try:
         url = f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/news"
-        r = http_get(url, timeout=3)
+        r = http_get(url, timeout=YAHOO_NEWS_TIMEOUT)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2282,7 +2301,7 @@ def scrape_prnewswire(ticker):
     try:
         url = "https://www.prnewswire.com/search/news/"
         params = {"keyword": ticker}
-        r = http_get(url, params=params, timeout=1.25)
+        r = http_get(url, params=params, timeout=NEWS_FAST_TIMEOUT)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2296,7 +2315,7 @@ def scrape_prnewswire(ticker):
 def scrape_globenewswire(ticker):
     try:
         url = f"https://www.globenewswire.com/search/keyword/{quote_plus(ticker)}"
-        r = http_get(url, timeout=2)
+        r = http_get(url, timeout=GLOBE_TIMEOUT)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2344,7 +2363,7 @@ def fetch_finnhub_company_news(ticker):
             "to": today.isoformat(),
             "token": FINNHUB_API_KEY,
         }
-        r = http_get(url, params=params, timeout=3)
+        r = http_get(url, params=params, timeout=NEWS_FAST_TIMEOUT)
         data = safe_json_response(r, f"NEWS Finnhub {ticker}")
         if not isinstance(data, list):
             return []
@@ -2373,7 +2392,7 @@ def fetch_benzinga_news(ticker):
             "items": 10,
             "displayOutput": "full",
         }
-        r = http_get(url, params=params, timeout=3)
+        r = http_get(url, params=params, timeout=NEWS_FAST_TIMEOUT)
         data = safe_json_response(r, f"NEWS Benzinga {ticker}")
         if not isinstance(data, list):
             return []
@@ -2405,24 +2424,36 @@ def rank_news_candidates(headlines, ticker):
 
 
 def get_best_news(ticker):
+    global NEWS_CALLS_THIS_CYCLE
+
     cached = cached_get(NEWS_CACHE, ticker)
     if cached:
         return cached
 
+    if LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_NEWS_NAMES_PER_CYCLE:
+        news = classify_news("", ticker)
+        news["explain"] = "Skipped news lookup in speed mode"
+        print(f"[NEWS SKIP] {ticker}: speed-mode news cap reached")
+        return cached_set(NEWS_CACHE, ticker, news)
+
+    NEWS_CALLS_THIS_CYCLE += 1
     all_headlines = []
 
-    # v36.11: prioritize fast/clean sources first. PRNewswire is slow and often
-    # times out, so it is a LAST fallback only after Finnhub/Benzinga/Globe/Yahoo
-    # fail to find a real catalyst.
+    # v36.12 speed mode: fast sources only first. PRNewswire is disabled intraday
+    # unless the faster sources fail AND speed mode is off, because repeated 2s
+    # PR timeouts were slowing the whole scanner cycle.
     fast_sources = [fetch_finnhub_company_news, fetch_benzinga_news, scrape_globenewswire]
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(fn, ticker): fn.__name__ for fn in fast_sources}
-        for fut in as_completed(futures, timeout=5):
-            name = futures[fut]
-            try:
-                all_headlines.extend(fut.result() or [])
-            except Exception as e:
-                print(f"[NEWS ERROR] {ticker} {name}: {e}")
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(fn, ticker): fn.__name__ for fn in fast_sources}
+            for fut in as_completed(futures, timeout=NEWS_PARALLEL_TIMEOUT):
+                name = futures[fut]
+                try:
+                    all_headlines.extend(fut.result(timeout=0.1) or [])
+                except Exception as e:
+                    print(f"[NEWS ERROR] {ticker} {name}: {e}")
+    except Exception as e:
+        print(f"[NEWS TIMEBOX] {ticker}: fast news timebox hit ({e})")
 
     ranked = rank_news_candidates(all_headlines, ticker)
     if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
@@ -2430,7 +2461,7 @@ def get_best_news(ticker):
         print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
         return cached_set(NEWS_CACHE, ticker, best)
 
-    # Yahoo next; PRNewswire last. This prevents PR timeouts from dragging every cycle.
+    # Yahoo is a quick fallback. PRNewswire is last and disabled intraday in speed mode.
     yahoo_headlines = scrape_yahoo_news(ticker)
     if yahoo_headlines:
         all_headlines.extend(yahoo_headlines)
@@ -2440,10 +2471,13 @@ def get_best_news(ticker):
             print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
             return cached_set(NEWS_CACHE, ticker, best)
 
-    pr_headlines = scrape_prnewswire(ticker)
-    if pr_headlines:
-        all_headlines.extend(pr_headlines)
-        ranked = rank_news_candidates(all_headlines, ticker)
+    if not (LIVE_SPEED_MODE and ENABLE_PRNEWSWIRE_INTRADAY is False):
+        pr_headlines = scrape_prnewswire(ticker)
+        if pr_headlines:
+            all_headlines.extend(pr_headlines)
+            ranked = rank_news_candidates(all_headlines, ticker)
+    else:
+        print(f"[PR SKIP] {ticker}: disabled intraday speed mode")
 
     if not ranked:
         news = classify_news("", ticker)
@@ -2569,7 +2603,7 @@ def check_sec_filings(ticker):
             "Accept-Encoding": "gzip, deflate",
         }
 
-        r = http_get(url, params=params, headers=headers, timeout=6)
+        r = http_get(url, params=params, headers=headers, timeout=SEC_FAST_TIMEOUT)
         text = clean_text(r.text)
         lower = text.lower()
 
@@ -3348,7 +3382,7 @@ def get_yahoo_daily_candles(ticker):
             "Accept": "application/json,text/plain,*/*",
             "Referer": f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/chart",
         }
-        r = http_get(url, params=params, headers=headers, timeout=6)
+        r = http_get(url, params=params, headers=headers, timeout=SEC_FAST_TIMEOUT)
         data = safe_json_response(r, f"DAILY Yahoo {ticker}")
         if not isinstance(data, dict):
             return []
@@ -4292,6 +4326,54 @@ def build_alert(result):
     return "\n".join(lines)
 
 
+
+
+def blank_news(ticker=""):
+    news = classify_news("", ticker)
+    news["explain"] = "Skipped in speed mode"
+    return news
+
+
+def blank_sec_result():
+    return {
+        "has_risk": False,
+        "severity": "NONE",
+        "category": "Skipped / speed mode",
+        "label": "",
+        "forms": [],
+        "terms": [],
+        "filing_age_days": None,
+        "freshness": "skipped",
+        "risk_score": 0.0,
+        "atm_active": False,
+        "warrant_overhang": False,
+    }
+
+
+def needs_full_research(gain, volume, float_shares, second_leg=None, structure=None, freshness=None):
+    """Only spend slow news/SEC/daily calls on names that can realistically matter."""
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+    float_shares = safe_int(float_shares)
+    second_leg_detected = bool((second_leg or {}).get("detected"))
+    above_vwap = bool(get_struct(structure or {}, "above_vwap", False))
+    fresh_score = safe_float((freshness or {}).get("score", 0))
+
+    return bool(
+        gain >= 25
+        or volume >= 5_000_000
+        or fresh_score >= 1.0
+        or (0 < float_shares <= 20_000_000 and gain >= 15 and above_vwap)
+        or (second_leg_detected and gain >= 18)
+    )
+
+
+def should_check_sec(gain, news_score, float_shares, full_research):
+    if not full_research:
+        return False
+    return bool(gain >= 25 or news_score >= 8 or (0 < safe_int(float_shares) <= 20_000_000))
+
+
 # ============================================================
 # CANDIDATE ANALYSIS PIPELINE
 # ============================================================
@@ -4541,11 +4623,37 @@ def analyze_candidate(candidate, regime):
     halt_risk = detect_halt_risk(price, gain, float_shares, candles)
 
     float_info = classify_float(float_shares)
-    news = get_best_news(ticker)
-    news_score = safe_float(news.get("score", 0))
-    sec = check_sec_filings(ticker)
     freshness = calc_freshness_boost(ticker, price, gain, volume, structure)
-    daily_context = calc_daily_context(ticker, price)
+
+    full_research = needs_full_research(
+        gain=gain,
+        volume=volume,
+        float_shares=float_shares,
+        second_leg=second_leg,
+        structure=structure,
+        freshness=freshness,
+    )
+
+    if full_research:
+        news = get_best_news(ticker)
+    else:
+        news = blank_news(ticker)
+        print(f"[NEWS SKIP] {ticker}: weak candidate speed skip")
+
+    news_score = safe_float(news.get("score", 0))
+
+    global SEC_CALLS_THIS_CYCLE
+    if should_check_sec(gain, news_score, float_shares, full_research) and SEC_CALLS_THIS_CYCLE < MAX_SEC_NAMES_PER_CYCLE:
+        SEC_CALLS_THIS_CYCLE += 1
+        sec = check_sec_filings(ticker)
+    else:
+        sec = blank_sec_result()
+        print(f"[SEC SKIP] {ticker}: speed-mode SEC skip")
+
+    if full_research or gain >= DAILY_CONTEXT_MIN_GAIN:
+        daily_context = calc_daily_context(ticker, price)
+    else:
+        daily_context = {"score": 0.0, "label": "", "reason": "skipped speed mode"}
 
     structure_score, structure_reasons = calc_structure_score_v3310(structure, coil, second_leg)
     volume_score, volume_reasons = calc_volume_score_v3310(volume)
@@ -4797,10 +4905,16 @@ def run_scanner():
                 continue
 
             SENT_THIS_CYCLE.clear()
+            global NEWS_CALLS_THIS_CYCLE, SEC_CALLS_THIS_CYCLE
+            NEWS_CALLS_THIS_CYCLE = 0
+            SEC_CALLS_THIS_CYCLE = 0
 
             print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
 
             candidates = get_candidates()
+            if LIVE_SPEED_MODE and len(candidates) > MAX_DEEP_SCAN_NAMES:
+                print(f"[SPEED] limiting deep scan {len(candidates)} -> {MAX_DEEP_SCAN_NAMES} names")
+                candidates = candidates[:MAX_DEEP_SCAN_NAMES]
             regime = estimate_market_regime(candidates)
 
             print(f"[REGIME] {regime['label']} — {regime['description']}")
