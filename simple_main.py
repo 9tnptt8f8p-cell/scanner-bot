@@ -52,8 +52,8 @@ PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
 OPEN_SCAN_MIN_GAIN = 8.0
 HARD_MIN_GAIN = 8.0                 # regular-hours hard floor
 PREMARKET_HARD_MIN_GAIN = 8.0       # fixed: do not kill 18-24% premarket leaders
-ALERT_MIN_GAIN = 20.0                # v36.2: elite runners can alert at 20%+ instead of waiting for 27%+
-PREMARKET_ALERT_MIN_GAIN = 20.0      # v36.2: catch clean premarket/open drive leaders earlier
+ALERT_MIN_GAIN = 25.0                # v36.6: Telegram alerts require 25%+ gain
+PREMARKET_ALERT_MIN_GAIN = 25.0      # v36.6: premarket alerts also require 25%+ gain
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
 MIN_FAST_VOLUME = 75_000             # fixed: premarket liquidity can be thinner
@@ -67,7 +67,7 @@ EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 # v33 PURE LEADER UNIVERSE — NO WATCHLISTS
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0       # internal discovery only
-RUNNER_MIN_GAIN = 20.0         # v36.2: hard Telegram floor lowered so ASPI/CPSH-style leaders are not late
+RUNNER_MIN_GAIN = 25.0         # v36.6: hard Telegram floor = 25%+
 SMALL_CAP_IDEAL = 300_000_000
 SMALL_CAP_MAX = 1_500_000_000
 BIG_CAP_SOURCE_SKIP = 3_000_000_000
@@ -81,7 +81,7 @@ LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 8.0
-EARLY_OPEN_DRIVE_GAIN = 12.0          # v36.4: allow clean early open-drive runners before 20% full alert floor
+EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 5
 SCAN_SLEEP = 60
@@ -123,7 +123,7 @@ SHOW_VERBOSE_DEBUG = True
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0
 RUNNER_MIN_GAIN = 20.0
-ALERT_MIN_GAIN = 20.0
+ALERT_MIN_GAIN = 25.0
 
 LEADER_SOURCE_LIMIT = 180
 MAX_RAW_LEADER_POOL = 450
@@ -141,8 +141,8 @@ SOURCE_MIN_VOLUME = 50_000
 # v33.2.1 MULTI-SOURCE LEADER DISCOVERY CONSTANTS
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0
-RUNNER_MIN_GAIN = 20.0
-ALERT_MIN_GAIN = 20.0
+RUNNER_MIN_GAIN = 25.0
+ALERT_MIN_GAIN = 25.0
 LEADER_SOURCE_LIMIT = 180
 MAX_RAW_LEADER_POOL = 450
 SOURCE_MAX_MARKET_CAP = 3_000_000_000
@@ -481,11 +481,9 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
     if volume and volume < min_vol:
         reasons.append(f"volume under {fmt_big_num(min_vol)}")
 
-    # Only hard-skip huge/heavy names. Normal float/cap over target becomes awareness.
-    if float_shares and float_shares > EXTREME_FLOAT_SKIP:
-        reasons.append(f"extreme float over {fmt_big_num(EXTREME_FLOAT_SKIP)}")
-    elif float_shares and float_shares > MAX_FLOAT:
-        warnings.append(f"float over ideal {fmt_big_num(MAX_FLOAT)}")
+    # v36.6: float is awareness only. Never skip or penalize for float.
+    if float_shares and float_shares > MAX_FLOAT:
+        warnings.append(f"large float {fmt_big_num(float_shares)}")
 
     if market_cap and market_cap > EXTREME_MARKET_CAP_SKIP:
         reasons.append(f"extreme market cap over {fmt_big_num(EXTREME_MARKET_CAP_SKIP)}")
@@ -507,18 +505,19 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
 # ============================================================
 
 def classify_float(float_shares):
+    """v36.6: float is display/awareness only. No boost, no penalty, no skip."""
     f = safe_int(float_shares)
     if f <= 0:
-        return {"tier": "UNKNOWN", "boost": 0.0, "label": "⚠️ Float unknown", "risk": "Float/profile data missing"}
+        return {"tier": "UNKNOWN", "boost": 0.0, "label": "⚠️ Float unknown", "risk": ""}
     if f <= LOW_FLOAT_TINY:
-        return {"tier": "TINY", "boost": 0.85, "label": f"🔥 TINY FLOAT {fmt_big_num(f)}", "risk": "Tiny float — explosive but halt/chop risk higher"}
+        return {"tier": "TINY", "boost": 0.0, "label": f"🔥 TINY FLOAT {fmt_big_num(f)}", "risk": ""}
     if f <= LOW_FLOAT_ELITE:
-        return {"tier": "ELITE", "boost": 0.65, "label": f"🔥 LOW FLOAT {fmt_big_num(f)}", "risk": "Low float momentum name — size carefully"}
+        return {"tier": "ELITE", "boost": 0.0, "label": f"🔥 LOW FLOAT {fmt_big_num(f)}", "risk": ""}
     if f <= LOW_FLOAT_GOOD:
-        return {"tier": "GOOD", "boost": 0.40, "label": f"🟢 LOW FLOAT {fmt_big_num(f)}", "risk": "Low float can accelerate quickly"}
+        return {"tier": "GOOD", "boost": 0.0, "label": f"🟢 LOW FLOAT {fmt_big_num(f)}", "risk": ""}
     if f <= LOW_FLOAT_ACCEPTABLE:
-        return {"tier": "ACCEPTABLE", "boost": 0.15, "label": f"🟡 Float {fmt_big_num(f)}", "risk": ""}
-    return {"tier": "HIGH", "boost": -0.10, "label": f"Float {fmt_big_num(f)}", "risk": "Higher float — needs stronger volume"}
+        return {"tier": "ACCEPTABLE", "boost": 0.0, "label": f"🟡 Float {fmt_big_num(f)}", "risk": ""}
+    return {"tier": "HIGH", "boost": 0.0, "label": f"Float {fmt_big_num(f)}", "risk": ""}
 
 
 def leader_gain_boost(gain):
@@ -849,9 +848,7 @@ def source_pass_item(item):
     if market_cap and market_cap > SOURCE_MAX_MARKET_CAP:
         return False
 
-    if float_shares and float_shares > SOURCE_MAX_FLOAT:
-        return False
-
+    # v36.6: do not source-filter by float. Let volume + price action decide.
     return True
 
 
@@ -3370,10 +3367,7 @@ def build_bias(score, structure_score, entry_score, news, risks, second_leg, dec
     elif sec.get("severity") in ["MEDIUM", "LOW"]:
         score -= 0.05
 
-    # Float/cap are quality awareness only unless extreme. Large-cap movers can
-    # still be useful market leaders, but they should not be treated like low-float rockets.
-    if float_shares and float_shares > MAX_FLOAT:
-        score -= 0.20 if is_cold_regime(regime) else 0.35
+    # v36.6: float is awareness only. Market cap remains a light quality awareness nudge.
     if market_cap and market_cap > MAX_MARKET_CAP:
         score -= 0.15 if is_cold_regime(regime) else 0.30
 
@@ -3658,7 +3652,7 @@ def is_in_play_alert(result):
     # like RUNNER WATCH block it.
     elite_active_setup = bool(
         score >= ALERT_MIN_SCORE
-        and gain >= 20.0
+        and gain >= RUNNER_MIN_GAIN
         and above_vwap
         and (
             second_leg.get("detected")
@@ -3681,10 +3675,10 @@ def is_in_play_alert(result):
     )
 
     # v36.4: simple clean-entry override. Do not let old text labels block
-    # a 7+ score runner that is above VWAP and already over the 20% floor.
+    # a 7+ score runner that is above VWAP and already over the 25% floor.
     clean_entry_override = bool(
         score >= ALERT_MIN_SCORE
-        and gain >= 20.0
+        and gain >= RUNNER_MIN_GAIN
         and above_vwap
         and not fakeout.get("detected")
         and not exhaustion.get("detected")
@@ -3707,8 +3701,8 @@ def is_in_play_alert(result):
         return True, "early open drive"
 
     if open_drive:
-        if gain < 20:
-            return False, f"open drive blocked — gain {gain:.1f}% below 20% floor"
+        if gain < RUNNER_MIN_GAIN:
+            return False, f"open drive blocked — gain {gain:.1f}% below {RUNNER_MIN_GAIN:.0f}% floor"
         if score < ALERT_MIN_SCORE:
             return False, f"open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
         if not above_vwap:
@@ -4148,9 +4142,7 @@ def calc_total_score_v3310(structure_score, volume_score, entry_score, news_scor
     gain_boost, _ = leader_gain_boost(gain)
     score += gain_boost
 
-    # Low float boost only if the chart is not totally broken.
-    if safe_float(structure_score) >= 3.0 and safe_float(entry_score) >= 3.0:
-        score += safe_float((float_info or {}).get("boost", 0))
+    # v36.6: no float boost/penalty. Volume + price action decide.
 
     score -= safe_float(risk_penalty) * (0.12 if is_premarket_session() else 0.20)
 
