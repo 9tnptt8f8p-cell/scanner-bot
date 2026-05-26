@@ -752,6 +752,9 @@ def get_yahoo_custom_percent_gainers():
         except Exception as e:
             print(f"[GAINERS ERROR] {label}: {e}")
 
+    if not all_results:
+        print("[YAHOO FALLBACK] custom screener empty — using predefined leaders + external sources")
+
     return merge_source_items(all_results)
 
 
@@ -1045,10 +1048,12 @@ def merge_leader_sources(items):
         gain = safe_float(x.get("gain"))
         volume = safe_int(x.get("volume"))
         cap = safe_int(x.get("market_cap"))
-        source_count = len(x.get("sources", []))
+        sources = x.get("sources", []) or []
+        source_count = len(sources)
+        stockanalysis_bonus = 1 if "StockAnalysis" in sources else 0
         small_cap_bonus = 1 if (cap and cap <= SOURCE_MAX_MARKET_CAP) or not cap else 0
         leader_bonus = 3 if gain >= 50 else 2 if gain >= 27 else 1 if gain >= 15 else 0
-        return (leader_bonus, gain, source_count, small_cap_bonus, volume)
+        return (leader_bonus, stockanalysis_bonus, gain, source_count, small_cap_bonus, volume)
 
     out.sort(key=sort_key, reverse=True)
 
@@ -2051,7 +2056,7 @@ def extract_headlines_from_soup(soup, ticker):
 def scrape_yahoo_news(ticker):
     try:
         url = f"https://finance.yahoo.com/quote/{quote_plus(ticker)}/news"
-        r = http_get(url, timeout=5)
+        r = http_get(url, timeout=3)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2065,7 +2070,7 @@ def scrape_prnewswire(ticker):
     try:
         url = "https://www.prnewswire.com/search/news/"
         params = {"keyword": ticker}
-        r = http_get(url, params=params, timeout=5)
+        r = http_get(url, params=params, timeout=2)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2079,7 +2084,7 @@ def scrape_prnewswire(ticker):
 def scrape_globenewswire(ticker):
     try:
         url = f"https://www.globenewswire.com/search/keyword/{quote_plus(ticker)}"
-        r = http_get(url, timeout=5)
+        r = http_get(url, timeout=2)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -3582,9 +3587,8 @@ def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, m
     liquid_enough = volume >= 750_000 or recent_vol >= 250_000
     small_enough = (not market_cap or market_cap <= 500_000_000) and (not float_shares or float_shares <= 80_000_000)
 
-    detected = bool(
-        gain >= 20
-        and liquid_enough
+    clean_open_drive_structure = bool(
+        liquid_enough
         and volume_expanding
         and small_enough
         and above_vwap
@@ -3595,13 +3599,17 @@ def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, m
         and not decay.get("detected")
     )
 
+    detected = bool(gain >= 20 and clean_open_drive_structure)
+    early_detected = bool(gain >= EARLY_OPEN_DRIVE_GAIN and clean_open_drive_structure)
+
     return {
         "detected": detected,
-        "label": "🚨 OPEN DRIVE RUNNER" if detected else "",
+        "early_detected": early_detected,
+        "label": "🚨 OPEN DRIVE RUNNER" if detected else ("⚡ EARLY OPEN DRIVE" if early_detected else ""),
         "recent_volume": recent_vol,
         "previous_volume": prev_vol,
         "volume_expanding": volume_expanding,
-        "reason": "open drive: gain + volume expansion + VWAP + highs" if detected else "",
+        "reason": "open drive: gain + volume expansion + VWAP + highs" if detected else ("early open drive: volume expansion + VWAP + highs" if early_detected else ""),
         "higher_lows": higher_lows,
     }
 
@@ -3636,12 +3644,14 @@ def is_in_play_alert(result):
     exhaustion = result.get("exhaustion") or {}
     fakeout = result.get("fakeout") or {}
     open_drive = bool(result.get("open_drive_runner"))
+    early_open_drive = bool(result.get("early_open_drive"))
 
-    # v36.2: sync rank engine with entry validator. If the score engine already
-    # says this is an elite live runner and the chart is above VWAP with an active
-    # phase, do not let older tier/entry wording block it.
+    # v36.3: sync rank engine with entry validator. If the score engine already
+    # says this is a live runner/watch and the chart is above VWAP with coil,
+    # second-leg, breakout, or open-drive structure, do not let old tier text
+    # like RUNNER WATCH block it.
     elite_active_setup = bool(
-        score >= 9.0
+        score >= 7.0
         and gain >= 20.0
         and above_vwap
         and (
@@ -3659,6 +3669,19 @@ def is_in_play_alert(result):
         and "below vwap" not in risk_text
         and "reclaim needed" not in risk_text
     )
+
+    if early_open_drive and not open_drive:
+        if gain < EARLY_OPEN_DRIVE_GAIN:
+            return False, f"early open drive blocked — gain {gain:.1f}% below {EARLY_OPEN_DRIVE_GAIN:.0f}% floor"
+        if score < ALERT_MIN_SCORE:
+            return False, f"early open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
+        if not above_vwap:
+            return False, "early open drive blocked — below/lost VWAP"
+        if not (breakout or near_high):
+            return False, "early open drive blocked — not near highs"
+        if fakeout.get("detected") or exhaustion.get("detected") or decay.get("detected"):
+            return False, "early open drive blocked — fakeout/exhaustion/decay"
+        return True, "early open drive"
 
     if open_drive:
         if gain < 20:
@@ -3780,6 +3803,8 @@ def alert_title(result):
     # v36.1: open-drive ignition gets its own clean title.
     if result.get("open_drive_runner"):
         return "🚨 OPEN DRIVE RUNNER"
+    if result.get("early_open_drive"):
+        return "⚡ EARLY OPEN DRIVE"
     # v36: if it hits Telegram, the name is IN PLAY. No more MARKET LEADER / WATCH titles.
     if result.get("second_leg", {}).get("detected"):
         return "🔥 IN PLAY — SECOND LEG"
@@ -3854,8 +3879,9 @@ def normalize_alert_fields(result):
     result["exhaustion"] = result.get("exhaustion") or {"detected": False, "risk": ""}
     result["fakeout"] = result.get("fakeout") or {"detected": False, "risk": "", "label": ""}
     result["participation"] = result.get("participation") or {"score": 0, "rvol_proxy": 0, "label": "", "reasons": []}
-    result["open_drive"] = result.get("open_drive") or {"detected": False, "label": "", "reason": ""}
+    result["open_drive"] = result.get("open_drive") or {"detected": False, "early_detected": False, "label": "", "reason": ""}
     result["open_drive_runner"] = bool(result.get("open_drive_runner") or result["open_drive"].get("detected"))
+    result["early_open_drive"] = bool(result.get("early_open_drive") or result["open_drive"].get("early_detected"))
 
     news_score = safe_float(result.get("news_score", news.get("score", 0)))
     news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
@@ -4235,6 +4261,9 @@ def analyze_candidate(candidate, regime):
     if open_drive.get("detected"):
         score += 1.5
         score = max(score, 7.0)
+    elif open_drive.get("early_detected"):
+        score += 1.0
+        score = max(score, 7.0)
 
     score = apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness, daily_context)
     score = clamp(score)
@@ -4270,7 +4299,7 @@ def analyze_candidate(candidate, regime):
     risks = []
 
     reasons.extend(simple_leader_reasons(gain, float_info, volume, news_score))
-    if open_drive.get("detected"):
+    if open_drive.get("detected") or open_drive.get("early_detected"):
         reasons.append(open_drive.get("reason") or "open drive momentum")
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
@@ -4300,7 +4329,7 @@ def analyze_candidate(candidate, regime):
         "trade_tier": trade_tier, "phase": phase, "structure": structure,
         "news_score": news_score, "news": news,
         "daily_context": daily_context, "freshness": freshness,
-        "open_drive": open_drive, "open_drive_runner": bool(open_drive.get("detected")),
+        "open_drive": open_drive, "open_drive_runner": bool(open_drive.get("detected")), "early_open_drive": bool(open_drive.get("early_detected")),
     }
     preview_result = apply_elite_leader_gate_fix(preview_result)
     trade_tier = preview_result.get("trade_tier", trade_tier)
@@ -4354,6 +4383,7 @@ def analyze_candidate(candidate, regime):
         "elite_leader": elite_leader,
         "open_drive": open_drive,
         "open_drive_runner": bool(open_drive.get("detected")),
+        "early_open_drive": bool(open_drive.get("early_detected")),
         "source": source,
     }
 
@@ -4362,7 +4392,7 @@ def sort_results(results):
     return sorted(
         results,
         key=lambda r: (
-            bool(r.get("open_drive_runner")),
+            bool(r.get("open_drive_runner") or r.get("early_open_drive")),
             safe_float(r.get("score", 0)),
             safe_float(r.get("gain", 0)) + min(25, safe_int(r.get("volume", 0)) / 500_000),
             safe_int(r.get("volume", 0)),
