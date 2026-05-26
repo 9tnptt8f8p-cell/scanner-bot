@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.7 — 8+ / 25% alerts + super momentum override"
+BOOT_MARKER = "elite scanner v36.9 — fresh discovery + VWAP-safe elite alerts"
 
 # ============================================================
 # ENV
@@ -47,9 +47,9 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 # ============================================================
 
 # Universe / fast pass
-SCAN_MIN_GAIN = 8.0                  # scanner can view wider universe internally
-PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
-OPEN_SCAN_MIN_GAIN = 8.0
+SCAN_MIN_GAIN = 5.0                  # scanner can view wider universe internally
+PREMARKET_SCAN_MIN_GAIN = 5.0        # do not starve premarket candidate pool
+OPEN_SCAN_MIN_GAIN = 5.0
 HARD_MIN_GAIN = 8.0                 # regular-hours hard floor
 PREMARKET_HARD_MIN_GAIN = 8.0       # fixed: do not kill 18-24% premarket leaders
 ALERT_MIN_GAIN = 25.0                # v36.6: Telegram alerts require 25%+ gain
@@ -66,7 +66,7 @@ EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 # ============================================================
 # v33 PURE LEADER UNIVERSE — NO WATCHLISTS
 # ============================================================
-DISCOVERY_MIN_GAIN = 8.0       # internal discovery only
+DISCOVERY_MIN_GAIN = 5.0       # internal discovery only
 RUNNER_MIN_GAIN = 25.0         # v36.6: hard Telegram floor = 25%+
 SMALL_CAP_IDEAL = 300_000_000
 SMALL_CAP_MAX = 1_500_000_000
@@ -129,7 +129,7 @@ SHOW_VERBOSE_DEBUG = True
 # ============================================================
 # v33.2 MULTI-SOURCE LEADER DISCOVERY
 # ============================================================
-DISCOVERY_MIN_GAIN = 8.0
+DISCOVERY_MIN_GAIN = 5.0
 RUNNER_MIN_GAIN = 20.0
 ALERT_MIN_GAIN = 25.0
 
@@ -142,13 +142,13 @@ SOURCE_MAX_MARKET_CAP = 3_000_000_000
 SOURCE_MAX_FLOAT = 150_000_000
 SOURCE_MIN_PRICE = 0.20
 SOURCE_MAX_PRICE = 80.00
-SOURCE_MIN_VOLUME = 50_000
+SOURCE_MIN_VOLUME = 25_000
 
 
 # ============================================================
 # v33.2.1 MULTI-SOURCE LEADER DISCOVERY CONSTANTS
 # ============================================================
-DISCOVERY_MIN_GAIN = 8.0
+DISCOVERY_MIN_GAIN = 5.0
 RUNNER_MIN_GAIN = 25.0
 ALERT_MIN_GAIN = 25.0
 LEADER_SOURCE_LIMIT = 250
@@ -157,7 +157,7 @@ SOURCE_MAX_MARKET_CAP = 3_000_000_000
 SOURCE_MAX_FLOAT = 150_000_000
 SOURCE_MIN_PRICE = 0.20
 SOURCE_MAX_PRICE = 80.00
-SOURCE_MIN_VOLUME = 50_000
+SOURCE_MIN_VOLUME = 25_000
 
 # ============================================================
 # FLASK KEEPALIVE
@@ -391,9 +391,9 @@ def dynamic_scan_sleep():
     if session == "PREMARKET":
         return 35
     if session == "MIDDAY":
-        return 30
+        return 25
     if session == "POWER HOUR":
-        return 30
+        return 20
     return SCAN_SLEEP
 
 
@@ -857,7 +857,7 @@ def source_pass_item(item):
     if volume and volume < SOURCE_MIN_VOLUME:
         return False
 
-    if market_cap and market_cap > SOURCE_MAX_MARKET_CAP:
+    if market_cap and market_cap > SOURCE_MAX_MARKET_CAP and gain < RUNNER_MIN_GAIN:
         return False
 
     # v36.6: do not source-filter by float. Let volume + price action decide.
@@ -946,7 +946,7 @@ def get_finviz_smallcap_gainers():
     url = "https://finviz.com/screener.ashx"
     params = {
         "v": "111",
-        "f": "cap_smallover,sh_avgvol_o100,sh_price_u80,ta_change_u5",
+        "f": "sh_avgvol_o100,sh_price_u80,ta_change_u5",
         "o": "-change",
     }
     results = []
@@ -1025,6 +1025,59 @@ def get_marketwatch_gainers():
     return results
 
 
+
+
+def get_tradingview_gainers():
+    """
+    v36.9 extra discovery source.
+    TradingView's scanner often catches fresh small-cap movers before Yahoo's
+    custom screener wakes up. Discovery only; alerts still require 8+/25%/VWAP.
+    """
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "filter": [
+            {"left": "type", "operation": "equal", "right": "stock"},
+            {"left": "subtype", "operation": "in_range", "right": ["common", "foreign-issuer", "preferred"]},
+            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
+            {"left": "change", "operation": "greater", "right": DISCOVERY_MIN_GAIN},
+            {"left": "close", "operation": "greater", "right": SOURCE_MIN_PRICE},
+            {"left": "close", "operation": "less", "right": SOURCE_MAX_PRICE},
+            {"left": "volume", "operation": "greater", "right": SOURCE_MIN_VOLUME},
+        ],
+        "options": {"lang": "en"},
+        "markets": ["america"],
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "close", "change", "volume", "market_cap_basic"],
+        "sort": {"sortBy": "change", "sortOrder": "desc"},
+        "range": [0, LEADER_SOURCE_LIMIT],
+    }
+
+    results = []
+    try:
+        r = http_post(url, payload=payload, timeout=8)
+        data = safe_json_response(r, "GAINERS TradingView")
+        rows = (data or {}).get("data") or []
+        for row in rows:
+            d = row.get("d") or []
+            if len(d) < 4:
+                continue
+            ticker = str(d[0] or "").upper().strip()
+            item = normalize_leader_item(
+                ticker=ticker,
+                price=safe_float(d[1] if len(d) > 1 else 0),
+                gain=safe_float(d[2] if len(d) > 2 else 0),
+                volume=safe_int(d[3] if len(d) > 3 else 0),
+                market_cap=safe_int(d[4] if len(d) > 4 else 0),
+                source="TradingView",
+            )
+            if source_pass_item(item):
+                results.append(item)
+        print(f"[GAINERS] TradingView returned {len(results)} filtered leaders")
+    except Exception as e:
+        print(f"[GAINERS ERROR] TradingView: {e}")
+    return results
+
+
 def merge_leader_sources(items):
     merged = {}
 
@@ -1086,6 +1139,8 @@ def get_multi_source_leaders():
         print(f"[GAINERS ERROR] Yahoo source stack: {e}")
 
     sources.extend(get_stockanalysis_gainers())
+    sources.extend(get_tradingview_gainers())
+    sources.extend(get_nasdaq_gainers())
     sources.extend(get_finviz_smallcap_gainers())
     sources.extend(get_marketwatch_gainers())
 
@@ -3430,9 +3485,24 @@ def build_bias(score, structure_score, entry_score, news, risks, second_leg, dec
     elif sec.get("severity") in ["MEDIUM", "LOW"]:
         score -= 0.05
 
-    # v36.6: float is awareness only. Market cap remains a light quality awareness nudge.
-    if market_cap and market_cap > MAX_MARKET_CAP:
-        score -= 0.15 if is_cold_regime(regime) else 0.30
+    # v36.9 calibration:
+    # - Tiny/low-float second-leg runners deserve a small quality nudge.
+    # - Huge-float / multi-billion cap movers can still pass, but should not outrank
+    #   clean small-cap runners unless the setup is truly exceptional.
+    if float_shares and float_shares <= LOW_FLOAT_ELITE and (second_leg.get("detected") or coil.get("detected")):
+        score += 0.35
+    elif float_shares and float_shares <= LOW_FLOAT_GOOD and second_leg.get("detected"):
+        score += 0.20
+
+    if float_shares and float_shares > 300_000_000:
+        score -= 1.00
+    elif float_shares and float_shares > 150_000_000:
+        score -= 0.60
+
+    if market_cap and market_cap > 2_000_000_000:
+        score -= 0.80
+    elif market_cap and market_cap > MAX_MARKET_CAP:
+        score -= 0.35
 
     # Cold market should tighten a little, not bury every setup.
     if is_cold_regime(regime):
@@ -3772,6 +3842,16 @@ def is_in_play_alert(result):
         (score >= ALERT_MIN_SCORE or super_momo_override)
         and gain >= ALERT_HARD_MIN_GAIN
         and above_vwap
+        and (
+            second_leg.get("detected")
+            or breakout
+            or (coil.get("detected") and (near_high or higher_lows))
+            or open_drive
+            or early_open_drive
+            or ("second leg" in phase)
+            or ("breakout" in phase)
+            or ("runner continuation" in phase and (near_high or higher_lows))
+        )
         and not fakeout.get("detected")
         and not exhaustion.get("detected")
         and "lost vwap" not in risk_text
@@ -3833,6 +3913,14 @@ def is_in_play_alert(result):
     if any(w in entry for w in blocked_words):
         return False, "not in play — no clean entry"
 
+    # VWAP safety comes before stale label checks. A monster leader under VWAP
+    # stays WATCH only until reclaim/hold confirms.
+    if not above_vwap:
+        return False, "not in play — below/lost VWAP"
+
+    if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
+        return False, "not in play — VWAP reclaim needed"
+
     # v36.8: do not let stale RUNNER WATCH wording block a monster that is
     # already top-ranked, over the 25% floor, above VWAP, and structurally active.
     elite_runner_override = bool(
@@ -3856,12 +3944,6 @@ def is_in_play_alert(result):
     if any(w in phase for w in ["reclaim needed", "reset needed", "fakeout", "fading", "extended"]):
         return False, f"not in play — phase is {result.get('phase', '')}"
 
-    if not above_vwap:
-        return False, "not in play — below/lost VWAP"
-
-    if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
-        return False, "not in play — VWAP reclaim needed"
-
     if fakeout.get("detected"):
         return False, "not in play — fakeout/stuff risk"
 
@@ -3883,6 +3965,7 @@ def is_in_play_alert(result):
         or (coil.get("detected") and near_high and higher_lows and entry_score >= 7.0)
         or ("vwap hold" in entry and near_high and higher_lows and entry_score >= 7.0)
         or ("higher-low" in entry and near_high and higher_lows and entry_score >= 7.0)
+        or ("runner continuation" in phase and near_high and higher_lows and entry_score >= 7.0)
     )
 
     if not active_setup:
