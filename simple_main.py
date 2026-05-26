@@ -1101,22 +1101,32 @@ def get_tradingview_gainers():
 
 def get_webull_gainers():
     """
-    v36.10 discovery-only Webull hot-gainers source.
-    Purpose: catch ultra-fresh microcap movers that Yahoo/StockAnalysis/TradingView
-    can miss intraday. This only feeds the candidate pool. Telegram alerts still
-    require the normal 8+ score, 25%+ gain, VWAP/entry checks, cooldowns, and risk gates.
+    v36.11 stable Webull discovery source.
+
+    Webull is optional discovery only:
+    - no duplicate endpoint retries
+    - no scanner slowdown if Webull rejects the request
+    - no hard dependency on Webull response shape
+    - alerts still require the normal deep-scan validation
     """
-    urls = [
-        # Region 6 = US. sortType=3 has historically mapped to % gainers on this endpoint.
-        "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list?deviceId=scannerbot&globalTickerId=0&sortType=3&pageSize=100",
-        # Backup shape sometimes used by Webull clients.
-        "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list?deviceId=scannerbot&sortType=3&pageSize=100",
-    ]
+    url = "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list"
+    params = {
+        "deviceId": "scannerbot",
+        "sortType": 3,
+        "pageSize": 100,
+    }
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 scannerbot/1.0",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
         "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Origin": "https://app.webull.com",
         "Referer": "https://app.webull.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
     def _pick(obj, keys, default=0):
@@ -1125,72 +1135,106 @@ def get_webull_gainers():
                 return obj.get(key)
         return default
 
+    def _extract_rows(data):
+        if not isinstance(data, dict):
+            return []
+
+        node = data.get("data")
+
+        if isinstance(node, dict):
+            rows = (
+                node.get("list")
+                or node.get("rankList")
+                or node.get("items")
+                or node.get("data")
+                or []
+            )
+            if isinstance(rows, list):
+                return rows
+
+        if isinstance(node, list):
+            return node
+
+        rows = data.get("list") or data.get("rankList") or data.get("items") or []
+        return rows if isinstance(rows, list) else []
+
     results = []
     seen = set()
 
-    for url in urls:
-        try:
-            r = http_get(url, headers=headers, timeout=5)
-            if getattr(r, "status_code", 0) != 200:
-                print(f"[WEBULL] failed status={getattr(r, 'status_code', 'NA')}")
+    try:
+        r = http_get(url, params=params, headers=headers, timeout=4)
+
+        if getattr(r, "status_code", 0) != 200:
+            # Webull commonly rejects cloud requests with 417.
+            # Keep this quiet and let Yahoo/TradingView/StockAnalysis carry discovery.
+            print(f"[WEBULL] unavailable status={getattr(r, 'status_code', 'NA')} — skipped")
+            return []
+
+        data = safe_json_response(r, "GAINERS Webull")
+        rows = _extract_rows(data)
+
+        if not rows:
+            print("[WEBULL] empty leaderboard — skipped")
+            return []
+
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
 
-            data = safe_json_response(r, "GAINERS Webull")
-            if not isinstance(data, dict):
+            ticker = str(_pick(row, ["symbol", "disSymbol"], "")).upper().strip()
+
+            raw_ticker = row.get("ticker")
+            if not ticker and isinstance(raw_ticker, dict):
+                ticker = str(_pick(raw_ticker, ["symbol", "disSymbol"], "")).upper().strip()
+            elif not ticker and isinstance(raw_ticker, str):
+                ticker = raw_ticker.upper().strip()
+
+            if not ticker or ticker in seen or is_bad_ticker(ticker):
                 continue
 
-            rows = []
-            node = data.get("data")
-            if isinstance(node, dict):
-                rows = node.get("list") or node.get("rankList") or node.get("items") or []
-            elif isinstance(node, list):
-                rows = node
-            if not rows:
-                rows = data.get("list") or data.get("rankList") or []
+            raw_gain = _pick(
+                row,
+                ["changeRatio", "changeRate", "changePercent", "pctChange", "change"],
+                0,
+            )
+            gain = safe_float(raw_gain)
 
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
+            # Webull often returns ratio form like 0.312 for +31.2%.
+            if 0 < abs(gain) <= 3:
+                gain *= 100
 
-                ticker = str(_pick(row, ["symbol", "ticker", "disSymbol"], "")).upper().strip()
-                if not ticker and isinstance(row.get("ticker"), dict):
-                    ticker = str(_pick(row.get("ticker"), ["symbol", "disSymbol"], "")).upper().strip()
-                if not ticker or ticker in seen or is_bad_ticker(ticker):
-                    continue
+            price = safe_float(_pick(row, ["close", "price", "lastPrice", "pPrice", "tradePrice"], 0))
+            volume = safe_int(_pick(row, ["volume", "vol", "turnoverVolume"], 0))
+            market_cap = safe_int(_pick(row, ["marketValue", "marketCap", "totalMarketValue"], 0))
 
-                price = safe_float(_pick(row, ["close", "price", "lastPrice", "pPrice", "tradePrice"], 0))
-                volume = safe_int(_pick(row, ["volume", "vol", "turnoverVolume"], 0))
-                market_cap = safe_int(_pick(row, ["marketValue", "marketCap", "totalMarketValue"], 0))
+            # Discovery only. Do not let bad/missing Webull fields create junk.
+            if gain < DISCOVERY_MIN_GAIN:
+                continue
+            if price and (price < SOURCE_MIN_PRICE or price > SOURCE_MAX_PRICE):
+                continue
+            if volume and volume < SOURCE_MIN_VOLUME:
+                continue
 
-                raw_gain = _pick(row, ["changeRatio", "changeRate", "changePercent", "pctChange", "change"], 0)
-                gain = safe_float(raw_gain)
-                # Webull often returns ratio form like 0.312 for +31.2%.
-                if 0 < abs(gain) <= 3:
-                    gain *= 100
+            item = normalize_leader_item(
+                ticker=ticker,
+                price=price,
+                gain=gain,
+                volume=volume,
+                market_cap=market_cap,
+                source="Webull",
+            )
 
-                item = normalize_leader_item(
-                    ticker=ticker,
-                    price=price,
-                    gain=gain,
-                    volume=volume,
-                    market_cap=market_cap,
-                    source="Webull",
-                )
+            seen.add(ticker)
+            if source_pass_item(item) or gain >= dynamic_hard_min_gain():
+                results.append(item)
 
-                # Slightly wider than source_pass_item so fresh names enter discovery early,
-                # but still no alert unless the deep scan validates them.
-                if gain >= 5 and (not price or SOURCE_MIN_PRICE <= price <= SOURCE_MAX_PRICE) and (not volume or volume >= 50_000):
-                    seen.add(ticker)
-                    if source_pass_item(item) or gain >= 8:
-                        results.append(item)
+        print(f"[GAINERS] Webull returned {len(results)} filtered leaders")
+        return results
 
-            if results:
-                break
-        except Exception as e:
-            print(f"[WEBULL ERROR] {e}")
+    except Exception as e:
+        print(f"[WEBULL ERROR] {e}")
+        return []
 
-    print(f"[GAINERS] Webull returned {len(results)} filtered leaders")
-    return results
 
 def merge_leader_sources(items):
     merged = {}
