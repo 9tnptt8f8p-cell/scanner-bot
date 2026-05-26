@@ -86,9 +86,12 @@ SUPER_MOMO_MIN_SCORE = 7.5            # v36.7: monster momentum can bypass only 
 SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
 EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
-MAX_GAINERS = 120
+MAX_GAINERS = 180                 # v36.8: wider fresh-mover pool so BRAI-style ignitions are not missed
 MAX_ALERTS_PER_CYCLE = 5
-SCAN_SLEEP = 60
+SCAN_SLEEP = 45
+FRESH_MOVER_MIN_GAIN = 25.0
+FRESH_MOVER_ACCEL_GAIN = 10.0
+FRESH_MOVER_SCAN_BOOST = 2.5
 
 ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN_SECONDS = 600
@@ -97,7 +100,7 @@ EARLY_RE_ALERT_NEW_HIGH_MULTIPLIER = 1.03
 
 # Caches
 CACHE_TTL_SECONDS = 1800
-SHORT_CACHE_TTL_SECONDS = 120
+SHORT_CACHE_TTL_SECONDS = 60
 
 PROFILE_CACHE = {}
 QUOTE_CACHE = {}
@@ -111,6 +114,7 @@ YAHOO_CANDLE_429_COUNT = 0
 MARKET_REGIME_CACHE = {}
 DAILY_CONTEXT_CACHE = {}
 FRESHNESS_STATE = {}
+FRESH_LEADER_STATE = {}
 
 LAST_ALERT = {}
 LAST_EARLY_ALERT = {}
@@ -129,8 +133,8 @@ DISCOVERY_MIN_GAIN = 8.0
 RUNNER_MIN_GAIN = 20.0
 ALERT_MIN_GAIN = 25.0
 
-LEADER_SOURCE_LIMIT = 180
-MAX_RAW_LEADER_POOL = 450
+LEADER_SOURCE_LIMIT = 250
+MAX_RAW_LEADER_POOL = 700
 
 # Source-layer small-cap focus. Unknown cap is allowed because small-cap feeds
 # often have incomplete data and the quote/profile step can verify later.
@@ -147,8 +151,8 @@ SOURCE_MIN_VOLUME = 50_000
 DISCOVERY_MIN_GAIN = 8.0
 RUNNER_MIN_GAIN = 25.0
 ALERT_MIN_GAIN = 25.0
-LEADER_SOURCE_LIMIT = 180
-MAX_RAW_LEADER_POOL = 450
+LEADER_SOURCE_LIMIT = 250
+MAX_RAW_LEADER_POOL = 700
 SOURCE_MAX_MARKET_CAP = 3_000_000_000
 SOURCE_MAX_FLOAT = 150_000_000
 SOURCE_MIN_PRICE = 0.20
@@ -387,7 +391,9 @@ def dynamic_scan_sleep():
     if session == "PREMARKET":
         return 35
     if session == "MIDDAY":
-        return 60
+        return 30
+    if session == "POWER HOUR":
+        return 30
     return SCAN_SLEEP
 
 
@@ -728,6 +734,8 @@ def get_yahoo_custom_percent_gainers():
         (27.0, 50_000, SMALL_CAP_MAX, 80.0, "Yahoo smallcap 27pct liquid"),
         (15.0, 100_000, SMALL_CAP_MAX, 40.0, "Yahoo smallcap 15pct lowprice"),
         (8.0, 250_000, SMALL_CAP_MAX, 25.0, "Yahoo smallcap 8pct volume"),
+        (25.0, 50_000, None, 80.0, "Yahoo anycap 25pct fresh backup"),
+        (15.0, 250_000, None, 80.0, "Yahoo anycap 15pct liquid backup"),
         (50.0, 0, None, 500.0, "Yahoo anycap 50pct backup"),
     ]
 
@@ -1087,6 +1095,53 @@ def get_multi_source_leaders():
 
 
 
+def calc_fresh_leader_scan_boost(item):
+    """
+    v36.8 source-layer fresh mover injector.
+    This does not send an alert by itself. It only pushes brand-new or
+    rapidly accelerating leaders higher into the deep-scan queue so names
+    like BRAI are less likely to be missed between refreshes.
+    """
+    ticker = str(item.get("ticker", "")).upper().strip()
+    if not ticker:
+        return 0.0
+
+    key = _fresh_key(ticker) if "_fresh_key" in globals() else f"{trading_day_key()}:{ticker}"
+    gain = safe_float(item.get("gain"))
+    price = safe_float(item.get("price"))
+    volume = safe_int(item.get("volume"))
+    prev = FRESH_LEADER_STATE.get(key)
+
+    boost = 0.0
+    if not prev:
+        if gain >= 50:
+            boost += 3.0
+        elif gain >= FRESH_MOVER_MIN_GAIN:
+            boost += FRESH_MOVER_SCAN_BOOST
+    else:
+        prev_gain = safe_float(prev.get("gain"))
+        prev_price = safe_float(prev.get("price"))
+        prev_volume = safe_int(prev.get("volume"))
+
+        gain_delta = gain - prev_gain
+        if gain_delta >= 20:
+            boost += 3.0
+        elif gain_delta >= FRESH_MOVER_ACCEL_GAIN:
+            boost += 2.0
+        elif gain_delta >= 5:
+            boost += 1.0
+
+        if prev_price > 0 and price >= prev_price * 1.05:
+            boost += 1.0
+        if prev_volume > 0 and volume >= prev_volume * 1.75:
+            boost += 0.75
+
+    FRESH_LEADER_STATE[key] = {"time": time.time(), "gain": gain, "price": price, "volume": volume}
+    if boost >= 2.0:
+        print(f"[FRESH INJECT] {ticker}: source boost {boost:.1f} gain={gain:.1f}% vol={fmt_big_num(volume)}")
+    return boost
+
+
 def get_candidates():
     raw = get_multi_source_leaders()
 
@@ -1115,8 +1170,12 @@ def get_candidates():
         existing["source"] = "+".join(sources)
 
     candidates = list(seen.values())
+    for c in candidates:
+        c["fresh_scan_boost"] = calc_fresh_leader_scan_boost(c)
+
     candidates.sort(
         key=lambda x: (
+            safe_float(x.get("fresh_scan_boost", 0)),
             safe_float(x.get("gain")) >= 50,
             safe_float(x.get("gain")) >= 27,
             safe_float(x.get("gain")),
@@ -3774,7 +3833,21 @@ def is_in_play_alert(result):
     if any(w in entry for w in blocked_words):
         return False, "not in play — no clean entry"
 
-    if any(w in tier for w in ["awareness", "market leader", "extended", "avoid", "watch"]):
+    # v36.8: do not let stale RUNNER WATCH wording block a monster that is
+    # already top-ranked, over the 25% floor, above VWAP, and structurally active.
+    elite_runner_override = bool(
+        score >= 8.5
+        and gain >= 50
+        and above_vwap
+        and (second_leg.get("detected") or breakout or near_high or "runner continuation" in phase or "above vwap" in phase)
+        and not fakeout.get("detected")
+        and not exhaustion.get("detected")
+        and "lost vwap" not in risk_text
+        and "below vwap" not in risk_text
+        and "reclaim needed" not in risk_text
+    )
+
+    if any(w in tier for w in ["awareness", "market leader", "extended", "avoid", "watch"]) and not elite_runner_override:
         return False, f"not in play — tier is {result.get('trade_tier', '')}"
 
     if any(w in bias for w in ["market leader", "extended", "avoid", "watchlist", "reclaim watch"]):
