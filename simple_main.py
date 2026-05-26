@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.1 — OPEN DRIVE runner fix"
+BOOT_MARKER = "elite scanner v36.2 — FASTER ELITE 20% OPEN DRIVE"
 
 # ============================================================
 # ENV
@@ -52,8 +52,8 @@ PREMARKET_SCAN_MIN_GAIN = 8.0        # do not starve premarket candidate pool
 OPEN_SCAN_MIN_GAIN = 8.0
 HARD_MIN_GAIN = 8.0                 # regular-hours hard floor
 PREMARKET_HARD_MIN_GAIN = 8.0       # fixed: do not kill 18-24% premarket leaders
-ALERT_MIN_GAIN = 27.0                # alerts still prefer real 25%+ movers
-PREMARKET_ALERT_MIN_GAIN = 27.0      # but allow elite premarket runners slightly early
+ALERT_MIN_GAIN = 20.0                # v36.2: elite runners can alert at 20%+ instead of waiting for 27%+
+PREMARKET_ALERT_MIN_GAIN = 20.0      # v36.2: catch clean premarket/open drive leaders earlier
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
 MIN_FAST_VOLUME = 75_000             # fixed: premarket liquidity can be thinner
@@ -67,7 +67,7 @@ EXTREME_MARKET_CAP_SKIP = 3_000_000_000
 # v33 PURE LEADER UNIVERSE — NO WATCHLISTS
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0       # internal discovery only
-RUNNER_MIN_GAIN = 27.0         # hard Telegram alert floor, no exceptions
+RUNNER_MIN_GAIN = 20.0         # v36.2: hard Telegram floor lowered so ASPI/CPSH-style leaders are not late
 SMALL_CAP_IDEAL = 300_000_000
 SMALL_CAP_MAX = 1_500_000_000
 BIG_CAP_SOURCE_SKIP = 3_000_000_000
@@ -80,10 +80,10 @@ LOW_FLOAT_GOOD = 20_000_000
 LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
-ALERT_MIN_SCORE = 8.0
+ALERT_MIN_SCORE = 7.0
 MAX_GAINERS = 120
-MAX_ALERTS_PER_CYCLE = 4
-SCAN_SLEEP = 35
+MAX_ALERTS_PER_CYCLE = 5
+SCAN_SLEEP = 60
 
 ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN_SECONDS = 600
@@ -121,8 +121,8 @@ SHOW_VERBOSE_DEBUG = True
 # v33.2 MULTI-SOURCE LEADER DISCOVERY
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0
-RUNNER_MIN_GAIN = 27.0
-ALERT_MIN_GAIN = 27.0
+RUNNER_MIN_GAIN = 20.0
+ALERT_MIN_GAIN = 20.0
 
 LEADER_SOURCE_LIMIT = 180
 MAX_RAW_LEADER_POOL = 450
@@ -140,8 +140,8 @@ SOURCE_MIN_VOLUME = 50_000
 # v33.2.1 MULTI-SOURCE LEADER DISCOVERY CONSTANTS
 # ============================================================
 DISCOVERY_MIN_GAIN = 8.0
-RUNNER_MIN_GAIN = 27.0
-ALERT_MIN_GAIN = 27.0
+RUNNER_MIN_GAIN = 20.0
+ALERT_MIN_GAIN = 20.0
 LEADER_SOURCE_LIMIT = 180
 MAX_RAW_LEADER_POOL = 450
 SOURCE_MAX_MARKET_CAP = 3_000_000_000
@@ -378,9 +378,11 @@ def dynamic_scan_sleep():
     """
     session = get_market_session_label()
     if session == "OPENING MOMENTUM":
-        return 25
+        return 20
     if session == "PREMARKET":
-        return 45
+        return 35
+    if session == "MIDDAY":
+        return 60
     return SCAN_SLEEP
 
 
@@ -3635,6 +3637,29 @@ def is_in_play_alert(result):
     fakeout = result.get("fakeout") or {}
     open_drive = bool(result.get("open_drive_runner"))
 
+    # v36.2: sync rank engine with entry validator. If the score engine already
+    # says this is an elite live runner and the chart is above VWAP with an active
+    # phase, do not let older tier/entry wording block it.
+    elite_active_setup = bool(
+        score >= 9.0
+        and gain >= 20.0
+        and above_vwap
+        and (
+            second_leg.get("detected")
+            or coil.get("detected")
+            or breakout
+            or ("second leg" in phase)
+            or ("coil" in phase)
+            or ("breakout" in phase)
+            or (near_high and higher_lows)
+        )
+        and not fakeout.get("detected")
+        and not exhaustion.get("detected")
+        and "lost vwap" not in risk_text
+        and "below vwap" not in risk_text
+        and "reclaim needed" not in risk_text
+    )
+
     if open_drive:
         if gain < 20:
             return False, f"open drive blocked — gain {gain:.1f}% below 20% floor"
@@ -3659,6 +3684,9 @@ def is_in_play_alert(result):
 
     if score < ALERT_MIN_SCORE:
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
+
+    if elite_active_setup:
+        return True, "elite active setup"
 
     # No more awareness alerts. If it is not an entry, it does not hit the phone.
     blocked_words = [
