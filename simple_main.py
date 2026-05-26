@@ -81,6 +81,7 @@ LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 7.0
+EARLY_OPEN_DRIVE_GAIN = 12.0          # v36.4: allow clean early open-drive runners before 20% full alert floor
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 5
 SCAN_SLEEP = 60
@@ -3658,11 +3659,28 @@ def is_in_play_alert(result):
             second_leg.get("detected")
             or coil.get("detected")
             or breakout
+            or open_drive
+            or early_open_drive
             or ("second leg" in phase)
+            or ("runner continuation" in phase)
+            or ("above vwap" in phase)
             or ("coil" in phase)
             or ("breakout" in phase)
             or (near_high and higher_lows)
         )
+        and not fakeout.get("detected")
+        and not exhaustion.get("detected")
+        and "lost vwap" not in risk_text
+        and "below vwap" not in risk_text
+        and "reclaim needed" not in risk_text
+    )
+
+    # v36.4: simple clean-entry override. Do not let old text labels block
+    # a 7+ score runner that is above VWAP and already over the 20% floor.
+    clean_entry_override = bool(
+        score >= 7.0
+        and gain >= 20.0
+        and above_vwap
         and not fakeout.get("detected")
         and not exhaustion.get("detected")
         and "lost vwap" not in risk_text
@@ -3709,6 +3727,11 @@ def is_in_play_alert(result):
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
     if elite_active_setup:
+        return True, "elite active setup"
+
+    # v36.4: score/structure wins over stale wording. This fixes RUNNER WATCH
+    # tier blocks on live runners like UZX/BIYA/MNTS/ECOR.
+    if elite_active_setup or clean_entry_override:
         return True, "elite active setup"
 
     # No more awareness alerts. If it is not an entry, it does not hit the phone.
