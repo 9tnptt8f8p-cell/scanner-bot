@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.9 — fresh discovery + VWAP-safe elite alerts"
+BOOT_MARKER = "elite scanner v36.10 — Webull discovery + VWAP-safe 8+/25 alerts"
 
 # ============================================================
 # ENV
@@ -1078,6 +1078,100 @@ def get_tradingview_gainers():
     return results
 
 
+
+def get_webull_gainers():
+    """
+    v36.10 discovery-only Webull hot-gainers source.
+    Purpose: catch ultra-fresh microcap movers that Yahoo/StockAnalysis/TradingView
+    can miss intraday. This only feeds the candidate pool. Telegram alerts still
+    require the normal 8+ score, 25%+ gain, VWAP/entry checks, cooldowns, and risk gates.
+    """
+    urls = [
+        # Region 6 = US. sortType=3 has historically mapped to % gainers on this endpoint.
+        "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list?deviceId=scannerbot&globalTickerId=0&sortType=3&pageSize=100",
+        # Backup shape sometimes used by Webull clients.
+        "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list?deviceId=scannerbot&sortType=3&pageSize=100",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 scannerbot/1.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Origin": "https://app.webull.com",
+        "Referer": "https://app.webull.com/",
+    }
+
+    def _pick(obj, keys, default=0):
+        for key in keys:
+            if isinstance(obj, dict) and obj.get(key) not in [None, ""]:
+                return obj.get(key)
+        return default
+
+    results = []
+    seen = set()
+
+    for url in urls:
+        try:
+            r = http_get(url, headers=headers, timeout=5)
+            if getattr(r, "status_code", 0) != 200:
+                print(f"[WEBULL] failed status={getattr(r, 'status_code', 'NA')}")
+                continue
+
+            data = safe_json_response(r, "GAINERS Webull")
+            if not isinstance(data, dict):
+                continue
+
+            rows = []
+            node = data.get("data")
+            if isinstance(node, dict):
+                rows = node.get("list") or node.get("rankList") or node.get("items") or []
+            elif isinstance(node, list):
+                rows = node
+            if not rows:
+                rows = data.get("list") or data.get("rankList") or []
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+
+                ticker = str(_pick(row, ["symbol", "ticker", "disSymbol"], "")).upper().strip()
+                if not ticker and isinstance(row.get("ticker"), dict):
+                    ticker = str(_pick(row.get("ticker"), ["symbol", "disSymbol"], "")).upper().strip()
+                if not ticker or ticker in seen or is_bad_ticker(ticker):
+                    continue
+
+                price = safe_float(_pick(row, ["close", "price", "lastPrice", "pPrice", "tradePrice"], 0))
+                volume = safe_int(_pick(row, ["volume", "vol", "turnoverVolume"], 0))
+                market_cap = safe_int(_pick(row, ["marketValue", "marketCap", "totalMarketValue"], 0))
+
+                raw_gain = _pick(row, ["changeRatio", "changeRate", "changePercent", "pctChange", "change"], 0)
+                gain = safe_float(raw_gain)
+                # Webull often returns ratio form like 0.312 for +31.2%.
+                if 0 < abs(gain) <= 3:
+                    gain *= 100
+
+                item = normalize_leader_item(
+                    ticker=ticker,
+                    price=price,
+                    gain=gain,
+                    volume=volume,
+                    market_cap=market_cap,
+                    source="Webull",
+                )
+
+                # Slightly wider than source_pass_item so fresh names enter discovery early,
+                # but still no alert unless the deep scan validates them.
+                if gain >= 5 and (not price or SOURCE_MIN_PRICE <= price <= SOURCE_MAX_PRICE) and (not volume or volume >= 50_000):
+                    seen.add(ticker)
+                    if source_pass_item(item) or gain >= 8:
+                        results.append(item)
+
+            if results:
+                break
+        except Exception as e:
+            print(f"[WEBULL ERROR] {e}")
+
+    print(f"[GAINERS] Webull returned {len(results)} filtered leaders")
+    return results
+
 def merge_leader_sources(items):
     merged = {}
 
@@ -1140,6 +1234,7 @@ def get_multi_source_leaders():
 
     sources.extend(get_stockanalysis_gainers())
     sources.extend(get_tradingview_gainers())
+    sources.extend(get_webull_gainers())
     sources.extend(get_nasdaq_gainers())
     sources.extend(get_finviz_smallcap_gainers())
     sources.extend(get_marketwatch_gainers())
