@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.5 — 8+ IN PLAY alerts only"
+BOOT_MARKER = "elite scanner v36.7 — 8+ / 25% alerts + super momentum override"
 
 # ============================================================
 # ENV
@@ -81,6 +81,10 @@ LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 8.0
+ALERT_HARD_MIN_GAIN = 25.0            # v36.7: Telegram hard floor
+SUPER_MOMO_MIN_SCORE = 7.5            # v36.7: monster momentum can bypass only the 8.0 score floor
+SUPER_MOMO_MIN_GAIN = 60.0
+SUPER_MOMO_MIN_VOLUME = 100_000_000
 EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 5
@@ -160,7 +164,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v34.1 quote fallback stack + RVOL phase/tier upgrade", 200
+    return "scanner alive — v36.7 8+/25% alerts + super momentum override", 200
 
 
 @app.route("/health")
@@ -3609,6 +3613,33 @@ def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, m
     }
 
 
+def is_super_momo_override(result):
+    """
+    v36.7: lets true monster momentum names bypass ONLY the 8.0 score floor.
+    It does NOT bypass the 25% hard gain floor, VWAP/entry safety, fakeout,
+    exhaustion, or no-clean-entry rules.
+    """
+    structure = result.get("structure") or {}
+    risk_text = " ".join(result.get("risks", []) or []).lower()
+    phase = str(result.get("phase", "")).lower()
+    score = safe_float(result.get("score"))
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+
+    bad_phase = any(w in phase for w in ["fading", "fakeout", "reclaim needed", "reset needed", "extended"])
+    bad_risk = any(w in risk_text for w in ["lost vwap", "below vwap", "reclaim", "fakeout", "exhaustion"])
+
+    return bool(
+        score >= SUPER_MOMO_MIN_SCORE
+        and gain >= SUPER_MOMO_MIN_GAIN
+        and volume >= SUPER_MOMO_MIN_VOLUME
+        and above_vwap
+        and not bad_phase
+        and not bad_risk
+    )
+
+
 def is_in_play_alert(result):
     """
     v36 hard alert filter: Telegram alerts are ONLY for names with a clean active entry now.
@@ -3641,9 +3672,11 @@ def is_in_play_alert(result):
     open_drive = bool(result.get("open_drive_runner"))
     early_open_drive = bool(result.get("early_open_drive"))
 
-    # v36.5: hard phone rule — no Telegram alert under 8.0, no exceptions.
-    # Lower scores can still rank/log, but they stay off the phone.
-    if score < ALERT_MIN_SCORE:
+    super_momo_override = is_super_momo_override(result)
+
+    # v36.7: hard phone rule stays 8.0, but monster momentum can bypass
+    # the score floor only. It still must pass 25% gain + clean-entry safety.
+    if score < ALERT_MIN_SCORE and not super_momo_override:
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
     # v36.3: sync rank engine with entry validator. If the score engine already
@@ -3651,8 +3684,8 @@ def is_in_play_alert(result):
     # second-leg, breakout, or open-drive structure, do not let old tier text
     # like RUNNER WATCH block it.
     elite_active_setup = bool(
-        score >= ALERT_MIN_SCORE
-        and gain >= RUNNER_MIN_GAIN
+        (score >= ALERT_MIN_SCORE or super_momo_override)
+        and gain >= ALERT_HARD_MIN_GAIN
         and above_vwap
         and (
             second_leg.get("detected")
@@ -3677,8 +3710,8 @@ def is_in_play_alert(result):
     # v36.4: simple clean-entry override. Do not let old text labels block
     # a 7+ score runner that is above VWAP and already over the 25% floor.
     clean_entry_override = bool(
-        score >= ALERT_MIN_SCORE
-        and gain >= RUNNER_MIN_GAIN
+        (score >= ALERT_MIN_SCORE or super_momo_override)
+        and gain >= ALERT_HARD_MIN_GAIN
         and above_vwap
         and not fakeout.get("detected")
         and not exhaustion.get("detected")
@@ -3688,9 +3721,9 @@ def is_in_play_alert(result):
     )
 
     if early_open_drive and not open_drive:
-        if gain < EARLY_OPEN_DRIVE_GAIN:
-            return False, f"early open drive blocked — gain {gain:.1f}% below {EARLY_OPEN_DRIVE_GAIN:.0f}% floor"
-        if score < ALERT_MIN_SCORE:
+        if gain < ALERT_HARD_MIN_GAIN:
+            return False, f"early open drive blocked — gain {gain:.1f}% below {ALERT_HARD_MIN_GAIN:.0f}% floor"
+        if score < ALERT_MIN_SCORE and not super_momo_override:
             return False, f"early open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
         if not above_vwap:
             return False, "early open drive blocked — below/lost VWAP"
@@ -3701,9 +3734,9 @@ def is_in_play_alert(result):
         return True, "early open drive"
 
     if open_drive:
-        if gain < RUNNER_MIN_GAIN:
-            return False, f"open drive blocked — gain {gain:.1f}% below {RUNNER_MIN_GAIN:.0f}% floor"
-        if score < ALERT_MIN_SCORE:
+        if gain < ALERT_HARD_MIN_GAIN:
+            return False, f"open drive blocked — gain {gain:.1f}% below {ALERT_HARD_MIN_GAIN:.0f}% floor"
+        if score < ALERT_MIN_SCORE and not super_momo_override:
             return False, f"open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
         if not above_vwap:
             return False, "open drive blocked — below/lost VWAP"
@@ -3719,10 +3752,10 @@ def is_in_play_alert(result):
             return False, "open drive blocked — momentum decay"
         return True, "open drive runner"
 
-    if gain < RUNNER_MIN_GAIN:
-        return False, f"gain {gain:.1f}% below hard alert floor {RUNNER_MIN_GAIN:.0f}%"
+    if gain < ALERT_HARD_MIN_GAIN:
+        return False, f"gain {gain:.1f}% below hard alert floor {ALERT_HARD_MIN_GAIN:.0f}%"
 
-    if score < ALERT_MIN_SCORE:
+    if score < ALERT_MIN_SCORE and not super_momo_override:
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
     if elite_active_setup:
