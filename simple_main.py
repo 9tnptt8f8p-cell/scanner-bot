@@ -56,8 +56,9 @@ ALERT_MIN_GAIN = 25.0                # v36.6: Telegram alerts require 25%+ gain
 PREMARKET_ALERT_MIN_GAIN = 25.0      # v36.6: premarket alerts also require 25%+ gain
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
-MIN_FAST_VOLUME = 75_000             # fixed: premarket liquidity can be thinner
+MIN_FAST_VOLUME = 25_000             # v36.11: discovery-only lowered so BRAI-style ignitions enter early
 MIN_DEEP_VOLUME = 150_000
+ALERT_MIN_VOLUME = 100_000            # phone alerts still need confirmation; discovery can be looser
 MAX_FLOAT = 80_000_000               # fixed: 40M was too nuclear in thin markets
 MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
@@ -487,7 +488,7 @@ def fast_pass_filter(ticker, price, gain, volume=0, market_cap=0, float_shares=0
         reasons.append(f"price outside {fmt_money(MIN_PRICE)}-${MAX_PRICE:.0f}")
 
     # Premarket liquidity is thinner; don't overblock names before the open.
-    min_vol = 50_000 if is_premarket_session() else MIN_FAST_VOLUME
+    min_vol = 25_000 if is_premarket_session() else MIN_FAST_VOLUME
     if volume and volume < min_vol:
         reasons.append(f"volume under {fmt_big_num(min_vol)}")
 
@@ -2281,7 +2282,7 @@ def scrape_prnewswire(ticker):
     try:
         url = "https://www.prnewswire.com/search/news/"
         params = {"keyword": ticker}
-        r = http_get(url, params=params, timeout=2)
+        r = http_get(url, params=params, timeout=1.25)
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = extract_headlines_from_soup(soup, ticker)
         if headlines:
@@ -2410,12 +2411,13 @@ def get_best_news(ticker):
 
     all_headlines = []
 
-    # v34.6: API/PR sources run in parallel first. Yahoo is last-resort only
-    # because it rate-limits and often returns stale quote-card junk.
-    fast_sources = [fetch_finnhub_company_news, fetch_benzinga_news, scrape_prnewswire, scrape_globenewswire]
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # v36.11: prioritize fast/clean sources first. PRNewswire is slow and often
+    # times out, so it is a LAST fallback only after Finnhub/Benzinga/Globe/Yahoo
+    # fail to find a real catalyst.
+    fast_sources = [fetch_finnhub_company_news, fetch_benzinga_news, scrape_globenewswire]
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(fn, ticker): fn.__name__ for fn in fast_sources}
-        for fut in as_completed(futures, timeout=7):
+        for fut in as_completed(futures, timeout=5):
             name = futures[fut]
             try:
                 all_headlines.extend(fut.result() or [])
@@ -2428,10 +2430,19 @@ def get_best_news(ticker):
         print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
         return cached_set(NEWS_CACHE, ticker, best)
 
-    # Fallback only if fast sources did not find a real catalyst.
+    # Yahoo next; PRNewswire last. This prevents PR timeouts from dragging every cycle.
     yahoo_headlines = scrape_yahoo_news(ticker)
     if yahoo_headlines:
         all_headlines.extend(yahoo_headlines)
+        ranked = rank_news_candidates(all_headlines, ticker)
+        if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
+            best = ranked[0]
+            print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
+            return cached_set(NEWS_CACHE, ticker, best)
+
+    pr_headlines = scrape_prnewswire(ticker)
+    if pr_headlines:
+        all_headlines.extend(pr_headlines)
         ranked = rank_news_candidates(all_headlines, ticker)
 
     if not ranked:
@@ -3989,6 +4000,9 @@ def is_in_play_alert(result):
     if gain < ALERT_HARD_MIN_GAIN:
         return False, f"gain {gain:.1f}% below hard alert floor {ALERT_HARD_MIN_GAIN:.0f}%"
 
+    if safe_int(result.get("volume")) < ALERT_MIN_VOLUME:
+        return False, f"volume {fmt_big_num(result.get('volume'))} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
+
     if score < ALERT_MIN_SCORE and not super_momo_override:
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
@@ -4377,11 +4391,13 @@ def calc_entry_score_v3310(structure, coil, second_leg, exhaustion, decay):
         reasons.append("second-leg setup")
 
     if exhaustion and exhaustion.get("detected"):
-        score -= 1.0 if is_premarket_session() else 2.0
+        # v36.11: exhaustion is an entry caution, not a nuclear score killer.
+        score -= 0.65 if is_premarket_session() else 1.0
         if exhaustion.get("risk"):
             reasons.append(exhaustion.get("risk"))
     if decay and decay.get("detected"):
-        score -= 0.75 if is_premarket_session() else 1.5
+        # v36.11: reduce fade penalty; strong context is handled after full scoring.
+        score -= 0.35 if is_premarket_session() else 0.75
 
     return clamp(score), dedupe(reasons)
 
@@ -4411,7 +4427,9 @@ def calc_risk_penalty_v3310(decay, exhaustion, sec, halt_risk, fast_warnings=Non
         reasons.append(halt_label)
 
     reasons.extend(fast_warnings)
-    return penalty, dedupe(reasons)
+    # v36.11: cap stacked decay/exhaustion/fakeout-style risk penalties so a
+    # real low-float/strong-news runner is not buried from one bad label.
+    return min(penalty, 2.0), dedupe(reasons)
 
 
 def calc_total_score_v3310(structure_score, volume_score, entry_score, news_score, risk_penalty, gain, float_info, regime=None):
@@ -4550,6 +4568,54 @@ def analyze_candidate(candidate, regime):
     score += safe_float(participation.get("score", 0))
     score += safe_float(freshness.get("score", 0))
     score += safe_float(daily_context.get("score", 0))
+
+    # ============================================================
+    # v36.11 BALANCED CONTEXT REPAIR
+    # Fixes EVTV/IPWR/CMND/BGDE-style cases where one FADING/EXTENDED label
+    # overpowered strong catalyst + low float + VWAP/second-leg context.
+    # Alerts still require hard 8+/25% + volume + VWAP safety below.
+    # ============================================================
+    above_vwap_ctx = bool(get_struct(structure, "above_vwap", False))
+    low_float_ctx = bool(float_shares and float_shares <= 20_000_000)
+    tiny_float_ctx = bool(float_shares and float_shares <= 5_000_000)
+    strong_news_ctx = news_score >= 8.0
+    second_leg_ctx = bool(second_leg.get("detected"))
+    continuation_ctx = bool(coil.get("detected") or second_leg_ctx or above_vwap_ctx)
+
+    if low_float_ctx:
+        score += 0.75
+    if tiny_float_ctx:
+        score += 0.75
+    if strong_news_ctx:
+        score += 0.75
+    if second_leg_ctx:
+        score += 0.75
+    if above_vwap_ctx:
+        score += 0.35
+
+    # Discovery can rank 8%+ names, but true alert-quality momentum should be
+    # gain-weighted so UPST/EOSE-style single-digit grinders do not crowd the top.
+    if gain < 10:
+        score -= 1.5
+    elif gain < 15:
+        score -= 0.75
+
+    # Big-float dampening: awareness, not a hard block.
+    if float_shares > 250_000_000:
+        score -= 1.0
+    elif float_shares > 150_000_000:
+        score -= 0.5
+
+    # If a strong runner context exists, add back part of stacked decay/exhaustion
+    # penalties. Do not protect below-VWAP/fakeout names.
+    strong_runner_context = bool(
+        (strong_news_ctx or low_float_ctx or tiny_float_ctx or second_leg_ctx or continuation_ctx)
+        and above_vwap_ctx
+        and not fakeout.get("detected")
+    )
+    if strong_runner_context:
+        protected = min(1.0, (safe_float(decay.get("penalty", 0)) + safe_float(exhaustion.get("penalty", 0))) * 0.35)
+        score += protected
 
     open_drive = detect_open_drive_runner(
         gain=gain,
