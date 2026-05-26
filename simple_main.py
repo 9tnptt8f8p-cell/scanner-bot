@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.2 — FASTER ELITE 20% OPEN DRIVE"
+BOOT_MARKER = "elite scanner v36.5 — 8+ IN PLAY alerts only"
 
 # ============================================================
 # ENV
@@ -80,7 +80,7 @@ LOW_FLOAT_GOOD = 20_000_000
 LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
-ALERT_MIN_SCORE = 7.0
+ALERT_MIN_SCORE = 8.0
 EARLY_OPEN_DRIVE_GAIN = 12.0          # v36.4: allow clean early open-drive runners before 20% full alert floor
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 5
@@ -3647,12 +3647,17 @@ def is_in_play_alert(result):
     open_drive = bool(result.get("open_drive_runner"))
     early_open_drive = bool(result.get("early_open_drive"))
 
+    # v36.5: hard phone rule — no Telegram alert under 8.0, no exceptions.
+    # Lower scores can still rank/log, but they stay off the phone.
+    if score < ALERT_MIN_SCORE:
+        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
+
     # v36.3: sync rank engine with entry validator. If the score engine already
     # says this is a live runner/watch and the chart is above VWAP with coil,
     # second-leg, breakout, or open-drive structure, do not let old tier text
     # like RUNNER WATCH block it.
     elite_active_setup = bool(
-        score >= 7.0
+        score >= ALERT_MIN_SCORE
         and gain >= 20.0
         and above_vwap
         and (
@@ -3678,7 +3683,7 @@ def is_in_play_alert(result):
     # v36.4: simple clean-entry override. Do not let old text labels block
     # a 7+ score runner that is above VWAP and already over the 20% floor.
     clean_entry_override = bool(
-        score >= 7.0
+        score >= ALERT_MIN_SCORE
         and gain >= 20.0
         and above_vwap
         and not fakeout.get("detected")
@@ -3704,8 +3709,8 @@ def is_in_play_alert(result):
     if open_drive:
         if gain < 20:
             return False, f"open drive blocked — gain {gain:.1f}% below 20% floor"
-        if score < 6.5:
-            return False, f"open drive blocked — score {score:.1f} below 6.5 floor"
+        if score < ALERT_MIN_SCORE:
+            return False, f"open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
         if not above_vwap:
             return False, "open drive blocked — below/lost VWAP"
         if not (breakout or near_high):
