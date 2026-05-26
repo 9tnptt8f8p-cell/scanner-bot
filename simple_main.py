@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.0 — IN PLAY alerts only"
+BOOT_MARKER = "elite scanner v36.1 — OPEN DRIVE runner fix"
 
 # ============================================================
 # ENV
@@ -83,7 +83,7 @@ LOW_FLOAT_ACCEPTABLE = 40_000_000
 ALERT_MIN_SCORE = 8.0
 MAX_GAINERS = 120
 MAX_ALERTS_PER_CYCLE = 4
-SCAN_SLEEP = 90
+SCAN_SLEEP = 35
 
 ALERT_COOLDOWN_SECONDS = 900
 EARLY_ALERT_COOLDOWN_SECONDS = 600
@@ -369,6 +369,19 @@ def dynamic_alert_min_gain(result=None):
     if is_premarket_session():
         return PREMARKET_ALERT_MIN_GAIN
     return ALERT_MIN_GAIN
+
+
+def dynamic_scan_sleep():
+    """
+    v36.1: faster open scans so CPSH-style ignition moves are not missed
+    between 90-second cycles.
+    """
+    session = get_market_session_label()
+    if session == "OPENING MOMENTUM":
+        return 25
+    if session == "PREMARKET":
+        return 45
+    return SCAN_SLEEP
 
 
 def is_cold_regime(regime):
@@ -3532,6 +3545,65 @@ def apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, fr
 
     return clamp(score)
 
+def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, market_cap=0, decay=None, exhaustion=None, fakeout=None):
+    """
+    v36.1 CPSH fix: catch opening-drive ignition runners before the normal
+    second-leg/coil logic fully forms. This is still safety-gated: above VWAP,
+    near highs/breakout, real volume expansion, and no fakeout/exhaustion.
+    """
+    structure = structure or {}
+    decay = decay or {}
+    exhaustion = exhaustion or {}
+    fakeout = fakeout or {}
+    candles = candles or []
+
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+    float_shares = safe_int(float_shares)
+    market_cap = safe_int(market_cap)
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    bad_structure = bool(get_struct(structure, "bad_structure", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+
+    recent_vol = safe_int(get_struct(structure, "recent_volume", 0))
+    if not recent_vol and candles:
+        recent_vol = sum(candle_volume(c) for c in candles[-3:])
+
+    prev_vol = safe_int(get_struct(structure, "previous_volume", 0))
+    if not prev_vol and len(candles) >= 6:
+        prev_vol = sum(candle_volume(c) for c in candles[-6:-3])
+
+    volume_expanding = recent_vol >= 250_000 and (prev_vol <= 0 or recent_vol >= prev_vol * 1.15)
+    liquid_enough = volume >= 750_000 or recent_vol >= 250_000
+    small_enough = (not market_cap or market_cap <= 500_000_000) and (not float_shares or float_shares <= 80_000_000)
+
+    detected = bool(
+        gain >= 20
+        and liquid_enough
+        and volume_expanding
+        and small_enough
+        and above_vwap
+        and (breakout or near_high)
+        and not bad_structure
+        and not fakeout.get("detected")
+        and not exhaustion.get("detected")
+        and not decay.get("detected")
+    )
+
+    return {
+        "detected": detected,
+        "label": "🚨 OPEN DRIVE RUNNER" if detected else "",
+        "recent_volume": recent_vol,
+        "previous_volume": prev_vol,
+        "volume_expanding": volume_expanding,
+        "reason": "open drive: gain + volume expansion + VWAP + highs" if detected else "",
+        "higher_lows": higher_lows,
+    }
+
+
 def is_in_play_alert(result):
     """
     v36 hard alert filter: Telegram alerts are ONLY for names with a clean active entry now.
@@ -3561,6 +3633,26 @@ def is_in_play_alert(result):
     decay = result.get("decay") or {}
     exhaustion = result.get("exhaustion") or {}
     fakeout = result.get("fakeout") or {}
+    open_drive = bool(result.get("open_drive_runner"))
+
+    if open_drive:
+        if gain < 20:
+            return False, f"open drive blocked — gain {gain:.1f}% below 20% floor"
+        if score < 6.5:
+            return False, f"open drive blocked — score {score:.1f} below 6.5 floor"
+        if not above_vwap:
+            return False, "open drive blocked — below/lost VWAP"
+        if not (breakout or near_high):
+            return False, "open drive blocked — not breaking out / not near highs"
+        if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
+            return False, "open drive blocked — VWAP reclaim needed"
+        if fakeout.get("detected"):
+            return False, "open drive blocked — fakeout/stuff risk"
+        if exhaustion.get("detected"):
+            return False, "open drive blocked — extended/exhaustion risk"
+        if decay.get("detected"):
+            return False, "open drive blocked — momentum decay"
+        return True, "open drive runner"
 
     if gain < RUNNER_MIN_GAIN:
         return False, f"gain {gain:.1f}% below hard alert floor {RUNNER_MIN_GAIN:.0f}%"
@@ -3657,6 +3749,9 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    # v36.1: open-drive ignition gets its own clean title.
+    if result.get("open_drive_runner"):
+        return "🚨 OPEN DRIVE RUNNER"
     # v36: if it hits Telegram, the name is IN PLAY. No more MARKET LEADER / WATCH titles.
     if result.get("second_leg", {}).get("detected"):
         return "🔥 IN PLAY — SECOND LEG"
@@ -3731,6 +3826,8 @@ def normalize_alert_fields(result):
     result["exhaustion"] = result.get("exhaustion") or {"detected": False, "risk": ""}
     result["fakeout"] = result.get("fakeout") or {"detected": False, "risk": "", "label": ""}
     result["participation"] = result.get("participation") or {"score": 0, "rvol_proxy": 0, "label": "", "reasons": []}
+    result["open_drive"] = result.get("open_drive") or {"detected": False, "label": "", "reason": ""}
+    result["open_drive_runner"] = bool(result.get("open_drive_runner") or result["open_drive"].get("detected"))
 
     news_score = safe_float(result.get("news_score", news.get("score", 0)))
     news_label = result.get("news_label") or news.get("label") or "📰 NEWS"
@@ -3770,6 +3867,8 @@ def build_alert(result):
         stat_bits.append(f"{fmt_big_num(result.get('volume'))} vol")
 
     setup_bits = []
+    if result.get("open_drive_runner"):
+        setup_bits.append("open drive")
     if result.get("second_leg", {}).get("detected"):
         setup_bits.append("second leg")
     if result.get("coil", {}).get("detected"):
@@ -4093,6 +4192,22 @@ def analyze_candidate(candidate, regime):
     score += safe_float(participation.get("score", 0))
     score += safe_float(freshness.get("score", 0))
     score += safe_float(daily_context.get("score", 0))
+
+    open_drive = detect_open_drive_runner(
+        gain=gain,
+        volume=volume,
+        structure=structure,
+        candles=candles,
+        float_shares=float_shares,
+        market_cap=market_cap,
+        decay=decay,
+        exhaustion=exhaustion,
+        fakeout=fakeout,
+    )
+    if open_drive.get("detected"):
+        score += 1.5
+        score = max(score, 7.0)
+
     score = apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness, daily_context)
     score = clamp(score)
 
@@ -4127,6 +4242,8 @@ def analyze_candidate(candidate, regime):
     risks = []
 
     reasons.extend(simple_leader_reasons(gain, float_info, volume, news_score))
+    if open_drive.get("detected"):
+        reasons.append(open_drive.get("reason") or "open drive momentum")
     reasons.extend(structure_reasons)
     reasons.extend(volume_reasons)
     reasons.extend(participation.get("reasons", []))
@@ -4155,6 +4272,7 @@ def analyze_candidate(candidate, regime):
         "trade_tier": trade_tier, "phase": phase, "structure": structure,
         "news_score": news_score, "news": news,
         "daily_context": daily_context, "freshness": freshness,
+        "open_drive": open_drive, "open_drive_runner": bool(open_drive.get("detected")),
     }
     preview_result = apply_elite_leader_gate_fix(preview_result)
     trade_tier = preview_result.get("trade_tier", trade_tier)
@@ -4206,6 +4324,8 @@ def analyze_candidate(candidate, regime):
         "freshness": freshness,
         "daily_context": daily_context,
         "elite_leader": elite_leader,
+        "open_drive": open_drive,
+        "open_drive_runner": bool(open_drive.get("detected")),
         "source": source,
     }
 
@@ -4214,8 +4334,9 @@ def sort_results(results):
     return sorted(
         results,
         key=lambda r: (
+            bool(r.get("open_drive_runner")),
             safe_float(r.get("score", 0)),
-            safe_float(r.get("gain", 0)),
+            safe_float(r.get("gain", 0)) + min(25, safe_int(r.get("volume", 0)) / 500_000),
             safe_int(r.get("volume", 0)),
         ),
         reverse=True,
@@ -4281,7 +4402,7 @@ def run_scanner():
                     sent += 1
 
             print("[SCAN] Cycle complete")
-            time.sleep(SCAN_SLEEP)
+            time.sleep(dynamic_scan_sleep())
 
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
