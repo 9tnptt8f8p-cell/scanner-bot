@@ -4725,6 +4725,30 @@ def analyze_candidate(candidate, regime):
         protected = min(1.0, (safe_float(decay.get("penalty", 0)) + safe_float(exhaustion.get("penalty", 0))) * 0.35)
         score += protected
 
+    # ============================================================
+    # v36.13 CATALYST CONFIDENCE CAP
+    # Speed mode fixed latency, but it made some no-news / skipped-news
+    # tiny-float second legs inflate to 9.5-10. Keep them visible, but
+    # reserve elite 9.5-10 territory for confirmed catalysts or true
+    # monster leaders.
+    # ============================================================
+    monster_technical_leader = bool(
+        gain >= 50
+        and volume >= 10_000_000
+        and above_vwap_ctx
+        and (second_leg_ctx or bool(get_struct(structure, "near_high", False)) or bool(get_struct(structure, "breakout", False)))
+        and not fakeout.get("detected")
+    )
+
+    if news_score < 8.0 and not monster_technical_leader:
+        score = min(score, 8.8)
+
+    if news_score <= 4.0 and gain < 35:
+        score -= 0.50
+
+    if news_score <= 0 and gain < 30:
+        score -= 0.25
+
     open_drive = detect_open_drive_runner(
         gain=gain,
         volume=volume,
@@ -4742,6 +4766,11 @@ def analyze_candidate(candidate, regime):
     elif open_drive.get("early_detected"):
         score += 1.0
         score = max(score, 7.0)
+
+    # Re-apply the non-catalyst cap after open-drive bonuses so speed-mode
+    # technical movers do not become automatic 10/10 alerts.
+    if news_score < 8.0 and not monster_technical_leader:
+        score = min(score, 8.8)
 
     score = apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness, daily_context)
     score = clamp(score)
