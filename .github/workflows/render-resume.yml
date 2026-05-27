@@ -12,5 +12,6 @@ jobs:
     steps:
       - name: Resume service
         run: |
-          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume" \
-          -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}"
+          curl -sS -w "\nHTTP_CODE=%{http_code}\n" -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Accept: application/json"
