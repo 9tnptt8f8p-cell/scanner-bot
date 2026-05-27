@@ -2,7 +2,7 @@ name: Resume Render Scanner
 
 on:
   schedule:
-    - cron: "20 11 * * 1-5"
+    - cron: "10 13 * * 1-5"
   workflow_dispatch:
 
 jobs:
