@@ -3993,8 +3993,16 @@ def is_super_momo_override(result):
 
 def is_in_play_alert(result):
     """
-    v36 hard alert filter: Telegram alerts are ONLY for names with a clean active entry now.
-    Market leaders, extended watches, lost-VWAP reclaim watches, and weak-news coils stay log-only.
+    v36.16 tight phone-alert filter.
+
+    Goal: phone alerts only when the setup is actually tradeable RIGHT NOW.
+    Logs can still rank/watch leaders, but Telegram requires:
+    - live gain >= 25%
+    - score >= 8, unless true super-momo override
+    - above VWAP
+    - clean active setup: SECOND LEG / RUNNER CONTINUATION / IGNITION / BREAKOUT HOLD
+    - no FADING / EXTENDED / RESET NEEDED / RECLAIM NEEDED / FAKEOUT labels
+    - no fakeout, exhaustion, or momentum-decay state
     """
     ticker = result.get("ticker", "UNKNOWN")
     structure = result.get("structure") or {}
@@ -4009,6 +4017,7 @@ def is_in_play_alert(result):
     news_score = safe_float(result.get("news_score", (result.get("news") or {}).get("score", 0)))
     entry_score = safe_float(result.get("entry_score", 0))
     structure_score = safe_float(result.get("structure_score", 0))
+    volume = safe_int(result.get("volume"))
 
     above_vwap = bool(get_struct(structure, "above_vwap", False))
     breakout = bool(get_struct(structure, "breakout", False))
@@ -4025,149 +4034,35 @@ def is_in_play_alert(result):
 
     super_momo_override = is_super_momo_override(result)
 
-    # v36.7: hard phone rule stays 8.0, but monster momentum can bypass
-    # the score floor only. It still must pass 25% gain + clean-entry safety.
-    if score < ALERT_MIN_SCORE and not super_momo_override:
-        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
-
-    # v36.3: sync rank engine with entry validator. If the score engine already
-    # says this is a live runner/watch and the chart is above VWAP with coil,
-    # second-leg, breakout, or open-drive structure, do not let old tier text
-    # like RUNNER WATCH block it.
-    elite_active_setup = bool(
-        (score >= ALERT_MIN_SCORE or super_momo_override)
-        and gain >= ALERT_HARD_MIN_GAIN
-        and above_vwap
-        and (
-            second_leg.get("detected")
-            or coil.get("detected")
-            or breakout
-            or open_drive
-            or early_open_drive
-            or ("second leg" in phase)
-            or ("runner continuation" in phase)
-            or ("above vwap" in phase)
-            or ("coil" in phase)
-            or ("breakout" in phase)
-            or (near_high and higher_lows)
-        )
-        and not fakeout.get("detected")
-        and not exhaustion.get("detected")
-        and "lost vwap" not in risk_text
-        and "below vwap" not in risk_text
-        and "reclaim needed" not in risk_text
-    )
-
-    # v36.4: simple clean-entry override. Do not let old text labels block
-    # a 7+ score runner that is above VWAP and already over the 25% floor.
-    clean_entry_override = bool(
-        (score >= ALERT_MIN_SCORE or super_momo_override)
-        and gain >= ALERT_HARD_MIN_GAIN
-        and above_vwap
-        and (
-            second_leg.get("detected")
-            or breakout
-            or (coil.get("detected") and (near_high or higher_lows))
-            or open_drive
-            or early_open_drive
-            or ("second leg" in phase)
-            or ("breakout" in phase)
-            or ("runner continuation" in phase and (near_high or higher_lows))
-        )
-        and not fakeout.get("detected")
-        and not exhaustion.get("detected")
-        and "lost vwap" not in risk_text
-        and "below vwap" not in risk_text
-        and "reclaim needed" not in risk_text
-    )
-
-    if early_open_drive and not open_drive:
-        if gain < ALERT_HARD_MIN_GAIN:
-            return False, f"early open drive blocked — gain {gain:.1f}% below {ALERT_HARD_MIN_GAIN:.0f}% floor"
-        if score < ALERT_MIN_SCORE and not super_momo_override:
-            return False, f"early open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
-        if not above_vwap:
-            return False, "early open drive blocked — below/lost VWAP"
-        if not (breakout or near_high):
-            return False, "early open drive blocked — not near highs"
-        if fakeout.get("detected") or exhaustion.get("detected") or decay.get("detected"):
-            return False, "early open drive blocked — fakeout/exhaustion/decay"
-        return True, "early open drive"
-
-    if open_drive:
-        if gain < ALERT_HARD_MIN_GAIN:
-            return False, f"open drive blocked — gain {gain:.1f}% below {ALERT_HARD_MIN_GAIN:.0f}% floor"
-        if score < ALERT_MIN_SCORE and not super_momo_override:
-            return False, f"open drive blocked — score {score:.1f} below {ALERT_MIN_SCORE:.1f} floor"
-        if not above_vwap:
-            return False, "open drive blocked — below/lost VWAP"
-        if not (breakout or near_high):
-            return False, "open drive blocked — not breaking out / not near highs"
-        if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
-            return False, "open drive blocked — VWAP reclaim needed"
-        if fakeout.get("detected"):
-            return False, "open drive blocked — fakeout/stuff risk"
-        if exhaustion.get("detected"):
-            return False, "open drive blocked — extended/exhaustion risk"
-        if decay.get("detected"):
-            return False, "open drive blocked — momentum decay"
-        return True, "open drive runner"
-
+    # Absolute phone-alert gates first. These stop watchlist/rank names from
+    # slipping through via old text overrides.
     if gain < ALERT_HARD_MIN_GAIN:
         return False, f"gain {gain:.1f}% below hard alert floor {ALERT_HARD_MIN_GAIN:.0f}%"
 
-    if safe_int(result.get("volume")) < ALERT_MIN_VOLUME:
-        return False, f"volume {fmt_big_num(result.get('volume'))} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
+    if volume < ALERT_MIN_VOLUME:
+        return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
 
     if score < ALERT_MIN_SCORE and not super_momo_override:
         return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
-    if elite_active_setup:
-        return True, "elite active setup"
-
-    # v36.4: score/structure wins over stale wording. This fixes RUNNER WATCH
-    # tier blocks on live runners like UZX/BIYA/MNTS/ECOR.
-    if elite_active_setup or clean_entry_override:
-        return True, "elite active setup"
-
-    # No more awareness alerts. If it is not an entry, it does not hit the phone.
-    blocked_words = [
-        "no clean entry", "wait for reset", "wait for reclaim", "reclaim needed",
-        "not an entry", "do not chase", "avoid chase", "watchlist only",
-    ]
-    if any(w in entry for w in blocked_words):
-        return False, "not in play — no clean entry"
-
-    # VWAP safety comes before stale label checks. A monster leader under VWAP
-    # stays WATCH only until reclaim/hold confirms.
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
 
-    if "lost vwap" in risk_text or "below vwap" in risk_text or "reclaim" in risk_text:
-        return False, "not in play — VWAP reclaim needed"
-
-    # v36.8: do not let stale RUNNER WATCH wording block a monster that is
-    # already top-ranked, over the 25% floor, above VWAP, and structurally active.
-    elite_runner_override = bool(
-        score >= 8.5
-        and gain >= 50
-        and above_vwap
-        and (second_leg.get("detected") or breakout or near_high or "runner continuation" in phase or "above vwap" in phase)
-        and not fakeout.get("detected")
-        and not exhaustion.get("detected")
-        and "lost vwap" not in risk_text
-        and "below vwap" not in risk_text
-        and "reclaim needed" not in risk_text
-    )
-
-    if any(w in tier for w in ["awareness", "market leader", "extended", "avoid", "watch"]) and not elite_runner_override:
-        return False, f"not in play — tier is {result.get('trade_tier', '')}"
-
-    if any(w in bias for w in ["market leader", "extended", "avoid", "watchlist", "reclaim watch"]):
-        return False, f"not in play — bias is {result.get('bias', '')}"
-
-    if any(w in phase for w in ["reclaim needed", "reset needed", "fakeout", "fading", "extended"]):
+    # v36.16: these labels are always watch-only. Do this BEFORE any elite
+    # setup override so ASTC/BRTX-style extended names cannot alert off score.
+    bad_phase_words = [
+        "fading", "extended", "reset needed", "reclaim needed",
+        "fakeout", "avoid", "lost vwap", "below vwap",
+    ]
+    if any(w in phase for w in bad_phase_words):
         return False, f"not in play — phase is {result.get('phase', '')}"
+
+    bad_risk_words = [
+        "lost vwap", "below vwap", "reclaim", "fakeout", "exhaustion",
+        "avoid chase", "do not chase", "extended",
+    ]
+    if any(w in risk_text for w in bad_risk_words):
+        return False, "not in play — risk says wait/reclaim/avoid"
 
     if fakeout.get("detected"):
         return False, "not in play — fakeout/stuff risk"
@@ -4175,8 +4070,40 @@ def is_in_play_alert(result):
     if exhaustion.get("detected"):
         return False, "not in play — extended/exhaustion risk"
 
-    if decay.get("detected") and not second_leg.get("detected"):
+    if decay.get("detected"):
         return False, "not in play — momentum decay"
+
+    blocked_entry_words = [
+        "no clean entry", "wait for reset", "wait for reclaim", "reclaim needed",
+        "not an entry", "do not chase", "avoid chase", "watchlist only",
+    ]
+    if any(w in entry for w in blocked_entry_words):
+        return False, "not in play — no clean entry"
+
+    # Only these phases/setups are allowed to hit the phone.
+    clean_phase = any(w in phase for w in [
+        "second leg", "runner continuation", "ignition", "breakout hold"
+    ])
+
+    clean_trigger = bool(
+        second_leg.get("detected")
+        or open_drive
+        or early_open_drive
+        or (breakout and near_high and higher_lows)
+        or (coil.get("detected") and near_high and higher_lows and entry_score >= 7.0)
+        or clean_phase
+    )
+
+    if not clean_trigger:
+        return False, "not in play — no clean second-leg/continuation/ignition trigger"
+
+    # Do not let stale RUNNER WATCH / MARKET LEADER / AVOID wording fire alerts.
+    # TRADEABLE or RUNNER is okay only if the clean trigger above already passed.
+    if "avoid" in tier or "market leader" in tier or "awareness" in tier:
+        return False, f"not in play — tier is {result.get('trade_tier', '')}"
+
+    if any(w in bias for w in ["avoid", "market leader", "extended", "watchlist", "reclaim watch"]):
+        return False, f"not in play — bias is {result.get('bias', '')}"
 
     if entry_score and entry_score < 6.5:
         return False, f"not in play — entry score {entry_score:.1f} too low"
@@ -4184,23 +4111,11 @@ def is_in_play_alert(result):
     if structure_score and structure_score < 4.5:
         return False, f"not in play — structure score {structure_score:.1f} too low"
 
-    active_setup = bool(
-        second_leg.get("detected")
-        or breakout
-        or (coil.get("detected") and near_high and higher_lows and entry_score >= 7.0)
-        or ("vwap hold" in entry and near_high and higher_lows and entry_score >= 7.0)
-        or ("higher-low" in entry and near_high and higher_lows and entry_score >= 7.0)
-        or ("runner continuation" in phase and near_high and higher_lows and entry_score >= 7.0)
-    )
-
-    if not active_setup:
-        return False, "not in play — no active breakout/coil/second-leg/VWAP-hold setup"
-
-    # Weak C/D/no-news alerts must have a real technical trigger, not just above VWAP + higher lows.
-    if news_score < 5.0 and not (second_leg.get("detected") or breakout):
+    # Weak/no-news setups must have a real technical trigger.
+    if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase):
         return False, "not in play — weak news without breakout/second leg"
 
-    return True, "in play"
+    return True, "clean active setup"
 
 
 def should_alert(result):
