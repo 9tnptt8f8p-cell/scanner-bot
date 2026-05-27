@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.10 — Webull discovery + VWAP-safe 8+/25 alerts"
+BOOT_MARKER = "elite scanner v36.11 — Render-safe off-hours sleep + VWAP-safe 8+/25 alerts"
 
 # ============================================================
 # ENV
@@ -90,6 +90,15 @@ EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even op
 MAX_GAINERS = 180                 # v36.8: wider fresh-mover pool so BRAI-style ignitions are not missed
 MAX_ALERTS_PER_CYCLE = 5
 SCAN_SLEEP = 45
+
+# Render/free-tier protection:
+# When the market is closed, do not keep polling APIs every 60-300 seconds.
+# This will not magically stop Render from counting a live service instance,
+# but it greatly reduces API burn, logs, CPU churn, and restart noise.
+CLOSED_MARKET_SLEEP_SECONDS = 1800      # 30 min after-hours / before 7:30 ET
+WEEKEND_SLEEP_SECONDS = 3600            # 60 min weekends
+CLOSED_ERROR_SLEEP_SECONDS = 300        # slower retry if errors happen off-hours
+
 FRESH_MOVER_MIN_GAIN = 25.0
 FRESH_MOVER_ACCEL_GAIN = 10.0
 FRESH_MOVER_SCAN_BOOST = 2.5
@@ -188,7 +197,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v36.7 8+/25% alerts + super momentum override", 200
+    return "scanner alive — v36.11 Render-safe off-hours sleep + 8+/25% alerts", 200
 
 
 @app.route("/health")
@@ -366,6 +375,39 @@ def market_is_active():
 
     print(f"[MARKET] Alerts OFF — {now.strftime('%I:%M %p ET')}")
     return False
+
+
+
+
+def seconds_until_next_scan_window(now=None):
+    """
+    Render-safe idle timer.
+
+    Scanner window is 7:30 AM ET -> 4:10 PM ET on weekdays.
+    Outside that window, sleep close to the next useful scan time, capped so
+    logs/health checks still show life occasionally.
+    """
+    now = now or now_et()
+
+    # Weekend: sleep in long blocks until Monday premarket.
+    if now.weekday() >= 5:
+        return WEEKEND_SLEEP_SECONDS
+
+    today_start = datetime.combine(now.date(), dtime(7, 30), tzinfo=ET)
+    today_end = datetime.combine(now.date(), dtime(16, 10), tzinfo=ET)
+
+    if now < today_start:
+        return max(300, min(CLOSED_MARKET_SLEEP_SECONDS, int((today_start - now).total_seconds())))
+
+    if now > today_end:
+        # Next weekday 7:30 AM ET.
+        next_day = now.date() + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        next_start = datetime.combine(next_day, dtime(7, 30), tzinfo=ET)
+        return max(300, min(CLOSED_MARKET_SLEEP_SECONDS, int((next_start - now).total_seconds())))
+
+    return dynamic_scan_sleep() if "dynamic_scan_sleep" in globals() else SCAN_SLEEP
 
 
 def get_market_session_label():
@@ -4968,13 +5010,9 @@ def run_scanner():
     while True:
         try:
             if not market_is_active():
-                now = datetime.now(ET)
-
-                if now.time() >= dtime(16, 10) or now.time() < dtime(7, 30):
-                    time.sleep(300)
-                else:
-                    time.sleep(60)
-
+                sleep_for = seconds_until_next_scan_window()
+                print(f"[IDLE] Market closed — deep sleeping {sleep_for // 60} min to save Render/API usage")
+                time.sleep(sleep_for)
                 continue
 
             SENT_THIS_CYCLE.clear()
@@ -5021,7 +5059,8 @@ def run_scanner():
 
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
-            time.sleep(30)
+            # If the scanner errors while the market is closed, do not hammer Render/logs.
+            time.sleep(30 if market_is_active() else CLOSED_ERROR_SLEEP_SECONDS)
 
 
 if __name__ == "__main__":
