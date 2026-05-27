@@ -12,6 +12,6 @@ jobs:
     steps:
       - name: Suspend service
         run: |
-          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend" \
+          curl -sS -w "\nHTTP_CODE=%{http_code}\n" -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/suspend" \
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
             -H "Accept: application/json"
