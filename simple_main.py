@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.11 — Render-safe off-hours sleep + VWAP-safe 8+/25 alerts"
+BOOT_MARKER = "elite scanner v36.12 — hard shutdown AH/weekends + 7:30 premarket"
 
 # ============================================================
 # ENV
@@ -92,12 +92,14 @@ MAX_ALERTS_PER_CYCLE = 5
 SCAN_SLEEP = 45
 
 # Render/free-tier protection:
-# When the market is closed, do not keep polling APIs every 60-300 seconds.
-# This will not magically stop Render from counting a live service instance,
-# but it greatly reduces API burn, logs, CPU churn, and restart noise.
-CLOSED_MARKET_SLEEP_SECONDS = 1800      # 30 min after-hours / before 7:30 ET
-WEEKEND_SLEEP_SECONDS = 3600            # 60 min weekends
-CLOSED_ERROR_SLEEP_SECONDS = 300        # slower retry if errors happen off-hours
+# HARD_SHUTDOWN_AFTER_HOURS=True exits the whole process outside the scan window.
+# Scan window stays ON from 7:30 AM ET -> 4:10 PM ET weekdays.
+# IMPORTANT: if Render auto-restarts exited services, use Render dashboard Suspend
+# or a cron/Render API wake-up setup. This code exits cleanly to avoid overnight loops.
+HARD_SHUTDOWN_AFTER_HOURS = os.getenv("HARD_SHUTDOWN_AFTER_HOURS", "true").lower() in ["1", "true", "yes", "on"]
+CLOSED_MARKET_SLEEP_SECONDS = 1800      # fallback only if hard shutdown disabled
+WEEKEND_SLEEP_SECONDS = 3600            # fallback only if hard shutdown disabled
+CLOSED_ERROR_SLEEP_SECONDS = 300        # fallback only if hard shutdown disabled
 
 FRESH_MOVER_MIN_GAIN = 25.0
 FRESH_MOVER_ACCEL_GAIN = 10.0
@@ -5010,6 +5012,11 @@ def run_scanner():
     while True:
         try:
             if not market_is_active():
+                if HARD_SHUTDOWN_AFTER_HOURS:
+                    print("[SHUTDOWN] Market closed/off-hours — exiting process to save Render free hours")
+                    print("[SHUTDOWN] Restart/redeploy before 7:30 AM ET to catch premarket runners")
+                    os._exit(0)
+
                 sleep_for = seconds_until_next_scan_window()
                 print(f"[IDLE] Market closed — deep sleeping {sleep_for // 60} min to save Render/API usage")
                 time.sleep(sleep_for)
@@ -5059,7 +5066,10 @@ def run_scanner():
 
         except Exception as e:
             print(f"[SCANNER ERROR] {e}")
-            # If the scanner errors while the market is closed, do not hammer Render/logs.
+            # If the scanner errors while the market is closed, exit instead of hammering Render/logs.
+            if not market_is_active() and HARD_SHUTDOWN_AFTER_HOURS:
+                print("[SHUTDOWN] Off-hours scanner error — exiting process")
+                os._exit(0)
             time.sleep(30 if market_is_active() else CLOSED_ERROR_SLEEP_SECONDS)
 
 
