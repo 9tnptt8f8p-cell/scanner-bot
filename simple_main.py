@@ -370,7 +370,7 @@ def market_is_active():
         return False
 
     # Premarket to shortly after close
-    if dtime(7, 30) <= now.time() <= dtime(16, 10):
+    if dtime(9, 20) <= now.time() <= dtime(16, 10):
         return True
 
     print(f"[MARKET] Alerts OFF — {now.strftime('%I:%M %p ET')}")
