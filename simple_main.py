@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.14 — Render web-safe manual AH stop + scanner sleep overnight"
+BOOT_MARKER = "elite scanner v36.15 — regular-hours only + live-gain truth filter"
 
 # ============================================================
 # ENV
@@ -48,12 +48,12 @@ TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
 # Universe / fast pass
 SCAN_MIN_GAIN = 5.0                  # scanner can view wider universe internally
-PREMARKET_SCAN_MIN_GAIN = 5.0        # do not starve premarket candidate pool
+PREMARKET_SCAN_MIN_GAIN = 5.0        # legacy constant; premarket scanning disabled
 OPEN_SCAN_MIN_GAIN = 5.0
 HARD_MIN_GAIN = 8.0                 # regular-hours hard floor
-PREMARKET_HARD_MIN_GAIN = 8.0       # fixed: do not kill 18-24% premarket leaders
+PREMARKET_HARD_MIN_GAIN = 8.0       # legacy constant; premarket scanning disabled
 ALERT_MIN_GAIN = 25.0                # v36.6: Telegram alerts require 25%+ gain
-PREMARKET_ALERT_MIN_GAIN = 25.0      # v36.6: premarket alerts also require 25%+ gain
+PREMARKET_ALERT_MIN_GAIN = 25.0      # legacy constant; premarket scanning disabled
 MIN_PRICE = 0.50
 MAX_PRICE = 80.0
 MIN_FAST_VOLUME = 25_000             # v36.11: discovery-only lowered so BRAI-style ignitions enter early
@@ -197,7 +197,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v36.11 Render-safe off-hours sleep + 8+/25% alerts", 200
+    return "scanner alive — v36.15 regular-hours only + live-gain truth filter", 200
 
 
 @app.route("/health")
@@ -369,7 +369,7 @@ def market_is_active():
         print("[MARKET] Weekend — scanner sleeping")
         return False
 
-    # Premarket to shortly after close
+    # Regular-hours only: no premarket scan because source/candle percent data is unreliable.
     if dtime(9, 20) <= now.time() <= dtime(16, 10):
         return True
 
@@ -383,17 +383,17 @@ def seconds_until_next_scan_window(now=None):
     """
     Render-safe idle timer.
 
-    Scanner window is 7:30 AM ET -> 4:10 PM ET on weekdays.
+    Scanner window is 9:20 AM ET -> 4:10 PM ET on weekdays.
     Outside that window, sleep close to the next useful scan time, capped so
     logs/health checks still show life occasionally.
     """
     now = now or now_et()
 
-    # Weekend: sleep in long blocks until Monday premarket.
+    # Weekend: sleep in long blocks until Monday regular-hours scanner window.
     if now.weekday() >= 5:
         return WEEKEND_SLEEP_SECONDS
 
-    today_start = datetime.combine(now.date(), dtime(7, 30), tzinfo=ET)
+    today_start = datetime.combine(now.date(), dtime(9, 20), tzinfo=ET)
     today_end = datetime.combine(now.date(), dtime(16, 10), tzinfo=ET)
 
     if now < today_start:
@@ -404,7 +404,7 @@ def seconds_until_next_scan_window(now=None):
         next_day = now.date() + timedelta(days=1)
         while next_day.weekday() >= 5:
             next_day += timedelta(days=1)
-        next_start = datetime.combine(next_day, dtime(7, 30), tzinfo=ET)
+        next_start = datetime.combine(next_day, dtime(9, 20), tzinfo=ET)
         return max(300, min(CLOSED_MARKET_SLEEP_SECONDS, int((next_start - now).total_seconds())))
 
     return dynamic_scan_sleep() if "dynamic_scan_sleep" in globals() else SCAN_SLEEP
@@ -412,8 +412,8 @@ def seconds_until_next_scan_window(now=None):
 
 def get_market_session_label():
     t = now_et().time()
-    if dtime(7, 30) <= t < dtime(9, 30):
-        return "PREMARKET"
+    if dtime(9, 20) <= t < dtime(9, 30):
+        return "PRE-OPEN WARMUP"
     if dtime(9, 30) <= t < dtime(11, 0):
         return "OPENING MOMENTUM"
     if dtime(11, 0) <= t < dtime(14, 30):
@@ -424,7 +424,8 @@ def get_market_session_label():
 
 
 def is_premarket_session():
-    return get_market_session_label() == "PREMARKET"
+    # v36.15: premarket scanning disabled; keep function for backward compatibility.
+    return False
 
 
 def dynamic_scan_min_gain():
@@ -436,9 +437,6 @@ def dynamic_hard_min_gain():
 
 
 def dynamic_alert_min_gain(result=None):
-    # Keep regular session strict, but don't miss clean early premarket runners.
-    if is_premarket_session():
-        return PREMARKET_ALERT_MIN_GAIN
     return ALERT_MIN_GAIN
 
 
@@ -450,8 +448,6 @@ def dynamic_scan_sleep():
     session = get_market_session_label()
     if session == "OPENING MOMENTUM":
         return 20
-    if session == "PREMARKET":
-        return 35
     if session == "MIDDAY":
         return 25
     if session == "POWER HOUR":
@@ -4650,25 +4646,33 @@ def analyze_candidate(candidate, regime):
     if not ticker or is_bad_ticker(ticker):
         return None
 
-    price = safe_float(candidate.get("price"))
-    gain = safe_float(candidate.get("gain"))
-    volume = safe_int(candidate.get("volume"))
+    # Source/screener values are discovery only. They can be stale or wrong.
+    # Live quote is the truth for price and percent gain before fast-pass, score, rank, or alert.
+    source_price = safe_float(candidate.get("price"))
+    source_gain = safe_float(candidate.get("gain"))
+    source_volume = safe_int(candidate.get("volume"))
     source = candidate.get("source", "unknown")
 
-    if gain <= 0:
+    if source_gain < DISCOVERY_MIN_GAIN:
         return None
 
     live = get_live_quote(ticker)
-    live_price = safe_float(live.get("price"))
-    live_gain = safe_float(live.get("gain"))
-    if live_price > 0:
-        price = live_price
-    if live_gain > 0:
-        gain = live_gain
+    if not quote_is_valid(live, ticker):
+        print(f"[LIVE SKIP] {ticker}: invalid live quote — source gain ignored ({source_gain:.1f}% from {source})")
+        return None
+
+    price = safe_float(live.get("price")) or source_price
+    gain = safe_float(live.get("gain"))
     live_volume = safe_int(live.get("volume"))
-    if live_volume > 0:
-        volume = max(volume, live_volume)
+    volume = live_volume or source_volume
     quote_stale = bool(live.get("stale"))
+
+    if abs(gain - source_gain) >= 8.0:
+        print(f"[LIVE OVERRIDE] {ticker}: source {source_gain:.1f}% -> live {gain:.1f}% ({live.get('source', 'unknown')})")
+
+    if gain < dynamic_hard_min_gain():
+        print(f"[LIVE SKIP] {ticker}: live gain {gain:.1f}% under {dynamic_hard_min_gain():.0f}% floor; source {source_gain:.1f}% ignored")
+        return None
 
     profile = get_profile(ticker)
     float_shares = safe_int(profile.get("float"))
