@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.15 — regular-hours only + live-gain truth filter"
+BOOT_MARKER = "elite scanner v36.16 — fixed alert gates + source fallbacks; score math unchanged"
 
 # ============================================================
 # ENV
@@ -82,6 +82,13 @@ LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
 ALERT_MIN_SCORE = 8.0
+# Keep score math unchanged, but allow a separate watch lane so 7.x clean runners
+# are not silently buried as long as they still meet 25% gain + VWAP + clean phase.
+WATCH_ALERT_MIN_SCORE = 7.0
+WATCH_ALERT_MIN_ENTRY_SCORE = 3.5
+WATCH_ALERT_MIN_STRUCTURE_SCORE = 3.0
+TRADE_ALERT_MIN_ENTRY_SCORE = 3.5
+TRADE_ALERT_MIN_STRUCTURE_SCORE = 3.0
 ALERT_HARD_MIN_GAIN = 25.0            # v36.7: Telegram hard floor
 SUPER_MOMO_MIN_SCORE = 7.5            # v36.7: monster momentum can bypass only the 8.0 score floor
 SUPER_MOMO_MIN_GAIN = 60.0
@@ -197,7 +204,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v36.15 regular-hours only + live-gain truth filter", 200
+    return "scanner alive — v36.16 fixed alert gates + source fallbacks; score math unchanged", 200
 
 
 @app.route("/health")
@@ -783,7 +790,12 @@ def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250, max_market_cap
 
 
 def get_yahoo_custom_percent_gainers():
-    url = "https://query1.finance.yahoo.com/v1/finance/screener"
+    # Yahoo's screener endpoint often rejects one host while the other still works.
+    # Try query1 first, then query2 with the exact same payload before giving up.
+    urls = [
+        "https://query1.finance.yahoo.com/v1/finance/screener",
+        "https://query2.finance.yahoo.com/v1/finance/screener",
+    ]
     all_results = []
 
     # v33: small-cap/high-percent scans first. If Yahoo returns none, predefined still works.
@@ -806,8 +818,12 @@ def get_yahoo_custom_percent_gainers():
                 max_market_cap=max_cap,
                 max_price=max_price,
             )
-            r = http_post(url, payload=payload, timeout=8)
-            data = safe_json_response(r, f"GAINERS {label}")
+            data = None
+            for url in urls:
+                r = http_post(url, payload=payload, timeout=8)
+                data = safe_json_response(r, f"GAINERS {label}")
+                if data:
+                    break
             if not data:
                 continue
             result = data.get("finance", {}).get("result") or []
@@ -3993,16 +4009,12 @@ def is_super_momo_override(result):
 
 def is_in_play_alert(result):
     """
-    v36.16 tight phone-alert filter.
+    v36.16 fixed phone-alert filter.
 
-    Goal: phone alerts only when the setup is actually tradeable RIGHT NOW.
-    Logs can still rank/watch leaders, but Telegram requires:
-    - live gain >= 25%
-    - score >= 8, unless true super-momo override
-    - above VWAP
-    - clean active setup: SECOND LEG / RUNNER CONTINUATION / IGNITION / BREAKOUT HOLD
-    - no FADING / EXTENDED / RESET NEEDED / RECLAIM NEEDED / FAKEOUT labels
-    - no fakeout, exhaustion, or momentum-decay state
+    Score math is unchanged. This only fixes the delivery gate:
+    - elite lane: score >= 8
+    - watch lane: clean 7.x runners can alert if gain >= 25%, above VWAP, and phase/structure is clean
+    - blocks broken states: FADING / EXTENDED / RESET / RECLAIM / FAKEOUT / below VWAP
     """
     ticker = result.get("ticker", "UNKNOWN")
     structure = result.get("structure") or {}
@@ -4033,6 +4045,8 @@ def is_in_play_alert(result):
     early_open_drive = bool(result.get("early_open_drive"))
 
     super_momo_override = is_super_momo_override(result)
+    watch_alert_lane = bool(WATCH_ALERT_MIN_SCORE <= score < ALERT_MIN_SCORE)
+    elite_alert_lane = bool(score >= ALERT_MIN_SCORE or super_momo_override)
 
     # Absolute phone-alert gates first. These stop watchlist/rank names from
     # slipping through via old text overrides.
@@ -4042,8 +4056,8 @@ def is_in_play_alert(result):
     if volume < ALERT_MIN_VOLUME:
         return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
 
-    if score < ALERT_MIN_SCORE and not super_momo_override:
-        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
+    if not elite_alert_lane and not watch_alert_lane:
+        return False, f"score {score:.1f} below {WATCH_ALERT_MIN_SCORE:.1f} watch floor"
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
@@ -4082,16 +4096,25 @@ def is_in_play_alert(result):
 
     # Only these phases/setups are allowed to hit the phone.
     clean_phase = any(w in phase for w in [
-        "second leg", "runner continuation", "ignition", "breakout hold"
+        "second leg", "runner continuation", "ignition", "breakout hold", "coil", "above vwap"
     ])
+
+    high_quality_above_vwap = bool(
+        above_vwap
+        and score >= ALERT_MIN_SCORE
+        and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE
+        and structure_score >= TRADE_ALERT_MIN_STRUCTURE_SCORE
+        and (near_high or breakout or higher_lows or coil.get("detected"))
+    )
 
     clean_trigger = bool(
         second_leg.get("detected")
         or open_drive
         or early_open_drive
         or (breakout and near_high and higher_lows)
-        or (coil.get("detected") and near_high and higher_lows and entry_score >= 7.0)
-        or clean_phase
+        or (coil.get("detected") and (near_high or higher_lows) and entry_score >= WATCH_ALERT_MIN_ENTRY_SCORE)
+        or high_quality_above_vwap
+        or (clean_phase and (elite_alert_lane or entry_score >= WATCH_ALERT_MIN_ENTRY_SCORE))
     )
 
     if not clean_trigger:
@@ -4099,23 +4122,31 @@ def is_in_play_alert(result):
 
     # Do not let stale RUNNER WATCH / MARKET LEADER / AVOID wording fire alerts.
     # TRADEABLE or RUNNER is okay only if the clean trigger above already passed.
-    if "avoid" in tier or "market leader" in tier or "awareness" in tier:
+    if "avoid" in tier:
+        return False, f"not in play — tier is {result.get('trade_tier', '')}"
+    if ("market leader" in tier or "awareness" in tier) and not high_quality_above_vwap:
         return False, f"not in play — tier is {result.get('trade_tier', '')}"
 
-    if any(w in bias for w in ["avoid", "market leader", "extended", "watchlist", "reclaim watch"]):
+    if any(w in bias for w in ["avoid", "extended", "reclaim watch"]):
+        return False, f"not in play — bias is {result.get('bias', '')}"
+    if "market leader" in bias and not high_quality_above_vwap:
         return False, f"not in play — bias is {result.get('bias', '')}"
 
-    if entry_score and entry_score < 6.5:
+    min_entry = WATCH_ALERT_MIN_ENTRY_SCORE if watch_alert_lane else TRADE_ALERT_MIN_ENTRY_SCORE
+    min_structure = WATCH_ALERT_MIN_STRUCTURE_SCORE if watch_alert_lane else TRADE_ALERT_MIN_STRUCTURE_SCORE
+
+    if entry_score and entry_score < min_entry:
         return False, f"not in play — entry score {entry_score:.1f} too low"
 
-    if structure_score and structure_score < 4.5:
+    if structure_score and structure_score < min_structure:
         return False, f"not in play — structure score {structure_score:.1f} too low"
 
     # Weak/no-news setups must have a real technical trigger.
     if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase):
         return False, "not in play — weak news without breakout/second leg"
 
-    return True, "clean active setup"
+    lane = "elite" if elite_alert_lane else "watch"
+    return True, f"clean active setup ({lane} lane)"
 
 
 def should_alert(result):
