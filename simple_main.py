@@ -149,6 +149,7 @@ SHOW_VERBOSE_DEBUG = True
 LIVE_SPEED_MODE = True
 MAX_DEEP_SCAN_NAMES = 35
 MAX_NEWS_NAMES_PER_CYCLE = 14
+MAX_PRIORITY_NEWS_NAMES_PER_CYCLE = 24  # v36.17: let high-priority runners bypass normal speed cap
 MAX_SEC_NAMES_PER_CYCLE = 10
 ENABLE_PRNEWSWIRE_INTRADAY = False
 NEWS_FAST_TIMEOUT = 1.2
@@ -2521,18 +2522,27 @@ def rank_news_candidates(headlines, ticker):
     return ranked
 
 
-def get_best_news(ticker):
+def get_best_news(ticker, priority=False):
     global NEWS_CALLS_THIS_CYCLE
 
     cached = cached_get(NEWS_CACHE, ticker)
-    if cached:
+    # v36.17: if an earlier low-priority pass cached a speed-mode skip,
+    # allow a priority runner to refresh instead of inheriting "NO NEWS".
+    if cached and not (priority and "skipped" in str(cached.get("explain", "")).lower()):
         return cached
 
-    if LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_NEWS_NAMES_PER_CYCLE:
+    normal_cap_hit = LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_NEWS_NAMES_PER_CYCLE
+    priority_cap_hit = LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_PRIORITY_NEWS_NAMES_PER_CYCLE
+
+    if normal_cap_hit and (not priority or priority_cap_hit):
         news = classify_news("", ticker)
         news["explain"] = "Skipped news lookup in speed mode"
-        print(f"[NEWS SKIP] {ticker}: speed-mode news cap reached")
+        tag = "priority cap reached" if priority else "speed-mode news cap reached"
+        print(f"[NEWS SKIP] {ticker}: {tag}")
         return cached_set(NEWS_CACHE, ticker, news)
+
+    if normal_cap_hit and priority:
+        print(f"[NEWS PRIORITY] {ticker}: bypassing normal speed cap")
 
     NEWS_CALLS_THIS_CYCLE += 1
     all_headlines = []
@@ -4670,8 +4680,15 @@ def analyze_candidate(candidate, regime):
         freshness=freshness,
     )
 
-    if full_research:
-        news = get_best_news(ticker)
+    priority_news_candidate = bool(
+        gain >= 25
+        or second_leg.get("detected")
+        or safe_float(freshness.get("score", 0)) >= 0.7
+        or (bool(get_struct(structure, "above_vwap", False)) and (coil.get("detected") or get_struct(structure, "breakout", False)))
+    )
+
+    if full_research or priority_news_candidate:
+        news = get_best_news(ticker, priority=priority_news_candidate)
     else:
         news = blank_news(ticker)
         print(f"[NEWS SKIP] {ticker}: weak candidate speed skip")
@@ -4866,6 +4883,21 @@ def analyze_candidate(candidate, regime):
     reasons = dedupe(reasons)
     risks = dedupe(risks)
 
+    # v36.17 contradiction cleaner: do not show SECOND LEG / CONTINUATION
+    # with generic avoid/wait wording unless there is an actual broken state.
+    phase_text_for_clean = str(phase or "").upper()
+    hard_broken_context = bool(
+        fakeout.get("detected")
+        or exhaustion.get("detected")
+        or not bool(get_struct(structure, "above_vwap", False))
+    )
+    if not hard_broken_context and score >= 6.5 and ("SECOND LEG" in phase_text_for_clean or "RUNNER CONTINUATION" in phase_text_for_clean):
+        risks = [r for r in risks if "avoid" not in str(r).lower() and "do not chase" not in str(r).lower()]
+        if "AVOID" in str(bias).upper():
+            bias = "🟢 RUNNER WATCH"
+        if "AVOID" in str(trade_tier).upper():
+            trade_tier = "🟢 RUNNER WATCH"
+
     preview_result = {
         "ticker": ticker, "score": score, "price": price, "gain": gain,
         "volume": volume, "float": float_shares, "bias": bias,
@@ -4879,6 +4911,14 @@ def analyze_candidate(candidate, regime):
     bias = preview_result.get("bias", bias)
     phase = preview_result.get("phase", phase)
     elite_leader = bool(preview_result.get("elite_leader"))
+
+    # v36.17 final display sanity pass after elite gate.
+    phase_text_for_clean = str(phase or "").upper()
+    if score >= 6.5 and ("SECOND LEG" in phase_text_for_clean or "RUNNER CONTINUATION" in phase_text_for_clean):
+        if "AVOID" in str(bias).upper() and not fakeout.get("detected") and not exhaustion.get("detected"):
+            bias = "🟢 RUNNER WATCH"
+        if "AVOID" in str(trade_tier).upper() and not fakeout.get("detected") and not exhaustion.get("detected"):
+            trade_tier = "🟢 RUNNER WATCH"
 
     print(
         f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
@@ -4931,17 +4971,26 @@ def analyze_candidate(candidate, regime):
     }
 
 
-def sort_results(results):
-    return sorted(
-        results,
-        key=lambda r: (
-            bool(r.get("open_drive_runner") or r.get("early_open_drive")),
-            safe_float(r.get("score", 0)),
-            safe_float(r.get("gain", 0)) + min(25, safe_int(r.get("volume", 0)) / 500_000),
-            safe_int(r.get("volume", 0)),
-        ),
-        reverse=True,
+def alert_sort_key(r):
+    phase = str(r.get("phase", "")).upper()
+    second_leg_bonus = 1 if ("SECOND LEG" in phase or (r.get("second_leg") or {}).get("detected")) else 0
+    clean_continuation_bonus = 1 if any(x in phase for x in ["RUNNER CONTINUATION", "COIL", "IGNITION", "BREAKOUT HOLD"]) else 0
+    fresh_score = safe_float((r.get("freshness") or {}).get("score", 0))
+    return (
+        bool(r.get("open_drive_runner") or r.get("early_open_drive")),
+        second_leg_bonus,
+        clean_continuation_bonus,
+        fresh_score,
+        safe_float(r.get("score", 0)),
+        safe_float(r.get("gain", 0)),
+        safe_int(r.get("volume", 0)),
     )
+
+
+def sort_results(results):
+    # v36.17: alert queue favors second-leg/fresh active runners first.
+    # Score value itself is unchanged.
+    return sorted(results, key=alert_sort_key, reverse=True)
 
 def print_top_ranked(results):
     if not results:
