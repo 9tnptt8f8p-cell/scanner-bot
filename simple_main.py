@@ -81,16 +81,14 @@ LOW_FLOAT_GOOD = 20_000_000
 LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
-ALERT_MIN_SCORE = 8.0
-# Keep score math unchanged, but allow a separate watch lane so 7.x clean runners
-# are not silently buried as long as they still meet 25% gain + VWAP + clean phase.
-WATCH_ALERT_MIN_SCORE = 7.0
-WATCH_ALERT_MIN_ENTRY_SCORE = 3.5
-WATCH_ALERT_MIN_STRUCTURE_SCORE = 3.0
+ALERT_MIN_SCORE = 8.0                 # strict Telegram floor: no 7.x phone alerts
+WATCH_ALERT_MIN_SCORE = 7.0           # internal rank/watch labels only; NOT a Telegram lane
+WATCH_ALERT_MIN_ENTRY_SCORE = 3.5     # internal display compatibility only
+WATCH_ALERT_MIN_STRUCTURE_SCORE = 3.0 # internal display compatibility only
 TRADE_ALERT_MIN_ENTRY_SCORE = 3.5
 TRADE_ALERT_MIN_STRUCTURE_SCORE = 3.0
-ALERT_HARD_MIN_GAIN = 25.0            # v36.7: Telegram hard floor
-SUPER_MOMO_MIN_SCORE = 7.5            # v36.7: monster momentum can bypass only the 8.0 score floor
+ALERT_HARD_MIN_GAIN = 25.0            # Telegram hard gain floor
+SUPER_MOMO_MIN_SCORE = 8.0            # no score bypass below 8.0
 SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
 EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
@@ -3992,39 +3990,23 @@ def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, m
 
 def is_super_momo_override(result):
     """
-    v36.7: lets true monster momentum names bypass ONLY the 8.0 score floor.
-    It does NOT bypass the 25% hard gain floor, VWAP/entry safety, fakeout,
-    exhaustion, or no-clean-entry rules.
+    v36.18: no Telegram score bypass.
+
+    Keep the function for compatibility, but strict mode means every
+    phone alert must still be score >= ALERT_MIN_SCORE.
     """
-    structure = result.get("structure") or {}
-    risk_text = " ".join(result.get("risks", []) or []).lower()
-    phase = str(result.get("phase", "")).lower()
     score = safe_float(result.get("score"))
-    gain = safe_float(result.get("gain"))
-    volume = safe_int(result.get("volume"))
-    above_vwap = bool(get_struct(structure, "above_vwap", False))
-
-    bad_phase = any(w in phase for w in ["fading", "fakeout", "reclaim needed", "reset needed", "extended"])
-    bad_risk = any(w in risk_text for w in ["lost vwap", "below vwap", "reclaim", "fakeout", "exhaustion"])
-
-    return bool(
-        score >= SUPER_MOMO_MIN_SCORE
-        and gain >= SUPER_MOMO_MIN_GAIN
-        and volume >= SUPER_MOMO_MIN_VOLUME
-        and above_vwap
-        and not bad_phase
-        and not bad_risk
-    )
-
+    return bool(score >= ALERT_MIN_SCORE)
 
 def is_in_play_alert(result):
     """
-    v36.16 fixed phone-alert filter.
+    v36.18 strict phone-alert filter.
 
-    Score math is unchanged. This only fixes the delivery gate:
-    - elite lane: score >= 8
-    - watch lane: clean 7.x runners can alert if gain >= 25%, above VWAP, and phase/structure is clean
-    - blocks broken states: FADING / EXTENDED / RESET / RECLAIM / FAKEOUT / below VWAP
+    Score math is unchanged. Telegram delivery is strict:
+    - score must be >= 8.0
+    - gain must be >= 25%
+    - above VWAP / clean phase / clean trigger still required
+    - 7.x names stay internal WATCH only; they do not hit the phone
     """
     ticker = result.get("ticker", "UNKNOWN")
     structure = result.get("structure") or {}
@@ -4054,9 +4036,8 @@ def is_in_play_alert(result):
     open_drive = bool(result.get("open_drive_runner"))
     early_open_drive = bool(result.get("early_open_drive"))
 
-    super_momo_override = is_super_momo_override(result)
-    watch_alert_lane = bool(WATCH_ALERT_MIN_SCORE <= score < ALERT_MIN_SCORE)
-    elite_alert_lane = bool(score >= ALERT_MIN_SCORE or super_momo_override)
+    # Strict phone rule: no 7.x / monster-momo bypass.
+    elite_alert_lane = bool(score >= ALERT_MIN_SCORE)
 
     # Absolute phone-alert gates first. These stop watchlist/rank names from
     # slipping through via old text overrides.
@@ -4066,8 +4047,8 @@ def is_in_play_alert(result):
     if volume < ALERT_MIN_VOLUME:
         return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
 
-    if not elite_alert_lane and not watch_alert_lane:
-        return False, f"score {score:.1f} below {WATCH_ALERT_MIN_SCORE:.1f} watch floor"
+    if not elite_alert_lane:
+        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
@@ -4122,9 +4103,9 @@ def is_in_play_alert(result):
         or open_drive
         or early_open_drive
         or (breakout and near_high and higher_lows)
-        or (coil.get("detected") and (near_high or higher_lows) and entry_score >= WATCH_ALERT_MIN_ENTRY_SCORE)
+        or (coil.get("detected") and (near_high or higher_lows) and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE)
         or high_quality_above_vwap
-        or (clean_phase and (elite_alert_lane or entry_score >= WATCH_ALERT_MIN_ENTRY_SCORE))
+        or (clean_phase and elite_alert_lane and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE)
     )
 
     if not clean_trigger:
@@ -4142,8 +4123,8 @@ def is_in_play_alert(result):
     if "market leader" in bias and not high_quality_above_vwap:
         return False, f"not in play — bias is {result.get('bias', '')}"
 
-    min_entry = WATCH_ALERT_MIN_ENTRY_SCORE if watch_alert_lane else TRADE_ALERT_MIN_ENTRY_SCORE
-    min_structure = WATCH_ALERT_MIN_STRUCTURE_SCORE if watch_alert_lane else TRADE_ALERT_MIN_STRUCTURE_SCORE
+    min_entry = TRADE_ALERT_MIN_ENTRY_SCORE
+    min_structure = TRADE_ALERT_MIN_STRUCTURE_SCORE
 
     if entry_score and entry_score < min_entry:
         return False, f"not in play — entry score {entry_score:.1f} too low"
@@ -4155,8 +4136,7 @@ def is_in_play_alert(result):
     if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase):
         return False, "not in play — weak news without breakout/second leg"
 
-    lane = "elite" if elite_alert_lane else "watch"
-    return True, f"clean active setup ({lane} lane)"
+    return True, "clean active setup (8+ elite lane)"
 
 
 def should_alert(result):
