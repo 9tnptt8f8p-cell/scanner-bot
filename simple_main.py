@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.16 — fixed alert gates + source fallbacks; score math unchanged"
+BOOT_MARKER = "elite scanner v36.20 — awareness lane + dynamic volume + fresh-candle fix + news priority"
 
 # ============================================================
 # ENV
@@ -58,7 +58,11 @@ MIN_PRICE = 0.50
 MAX_PRICE = 80.0
 MIN_FAST_VOLUME = 25_000             # v36.11: discovery-only lowered so BRAI-style ignitions enter early
 MIN_DEEP_VOLUME = 150_000
-ALERT_MIN_VOLUME = 100_000            # phone alerts still need confirmation; discovery can be looser
+ALERT_MIN_VOLUME = 100_000            # elite phone alerts need confirmation; discovery can be looser
+LOW_FLOAT_ALERT_MIN_VOLUME = 50_000    # lets BUUU-style low-float leaders surface earlier
+AWARENESS_MIN_SCORE = 7.0              # runner-awareness lane; still 25%+ gain required
+AWARENESS_MIN_VOLUME = 50_000          # awareness volume floor for low-float/top-gainer movers
+MIN_FINALIZED_CANDLES = 6              # fresh ignitions no longer die at 7 bars
 MAX_FLOAT = 80_000_000               # fixed: 40M was too nuclear in thin markets
 MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
@@ -145,9 +149,9 @@ SHOW_VERBOSE_DEBUG = True
 # ============================================================
 # Keep discovery wide, but do not let slow news/SEC/daily calls block every ticker.
 LIVE_SPEED_MODE = True
-MAX_DEEP_SCAN_NAMES = 35
-MAX_NEWS_NAMES_PER_CYCLE = 14
-MAX_PRIORITY_NEWS_NAMES_PER_CYCLE = 24  # v36.17: let high-priority runners bypass normal speed cap
+MAX_DEEP_SCAN_NAMES = 60
+MAX_NEWS_NAMES_PER_CYCLE = 22
+MAX_PRIORITY_NEWS_NAMES_PER_CYCLE = 36  # v36.17: let high-priority runners bypass normal speed cap
 MAX_SEC_NAMES_PER_CYCLE = 10
 ENABLE_PRNEWSWIRE_INTRADAY = False
 NEWS_FAST_TIMEOUT = 1.2
@@ -203,7 +207,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v36.16 fixed alert gates + source fallbacks; score math unchanged", 200
+    return "scanner alive — v36.20 awareness lane + dynamic volume + fresh-candle fix + news priority", 200
 
 
 @app.route("/health")
@@ -603,7 +607,7 @@ def leader_gain_boost(gain):
     if g >= 50:
         return 0.70, "🔥 50%+ day leader"
     if g >= RUNNER_MIN_GAIN:
-        return 0.35, "🟢 27%+ momentum leader"
+        return 0.35, "🟢 25%+ momentum leader"
     return 0.0, ""
 
 
@@ -1897,7 +1901,7 @@ def calc_vwap(candles):
     return total_pv / total_v
 
 
-def finalized_candles(candles, min_keep=8):
+def finalized_candles(candles, min_keep=MIN_FINALIZED_CANDLES):
     """
     V32.4 stability fix.
     Alpaca/Yahoo 1-minute data includes the currently forming candle. That
@@ -1915,7 +1919,7 @@ def finalized_candles(candles, min_keep=8):
 
 def fallback_structure_analysis(candles):
     candles = finalized_candles(candles)
-    if not candles or len(candles) < 8:
+    if not candles or len(candles) < MIN_FINALIZED_CANDLES:
         return {
             "above_vwap": False,
             "higher_lows": False,
@@ -1927,7 +1931,7 @@ def fallback_structure_analysis(candles):
             "coil": False,
         }
 
-    recent = candles[-8:]
+    recent = candles[-min(8, len(candles)):]
     last = candles[-1]
     price = candle_close(last)
     vwap = calc_vwap(candles)
@@ -1952,8 +1956,10 @@ def fallback_structure_analysis(candles):
     prev_vol = sum(candle_volume(c) for c in candles[-6:-3])
     momentum_decay = prev_vol > 0 and recent_vol < prev_vol * 0.60
 
-    range_now = max(candle_high(c) for c in candles[-5:]) - min(candle_low(c) for c in candles[-5:])
-    range_prev = max(candle_high(c) for c in candles[-10:-5]) - min(candle_low(c) for c in candles[-10:-5])
+    recent_range_candles = candles[-min(5, len(candles)): ]
+    prev_range_candles = candles[-10:-5] if len(candles) >= 10 else candles[:max(1, len(candles)//2)]
+    range_now = max(candle_high(c) for c in recent_range_candles) - min(candle_low(c) for c in recent_range_candles)
+    range_prev = max(candle_high(c) for c in prev_range_candles) - min(candle_low(c) for c in prev_range_candles)
     tightening = range_prev > 0 and range_now < range_prev * 0.75
 
     bad_structure = (not above_vwap and not breakout) or big_upper_wick
@@ -2074,7 +2080,7 @@ STRONG_NEWS_PATTERNS = {
     ],
     "Contract / Order": [
         "contract", "purchase order", "supply agreement", "distribution agreement", "licensing agreement", "government contract",
-        "multi-year agreement", "master services agreement", "award",
+        "multi-year agreement", "master services agreement", "award", "purchase agreement", "commercial agreement", "customer win",
     ],
     "AI / Nvidia": [
         "nvidia", "artificial intelligence", " ai ", "gpu", "data center",
@@ -2090,10 +2096,10 @@ STRONG_NEWS_PATTERNS = {
     ],
     "Partnership": [
         "partnership", "collaboration", "mou", "memorandum of understanding",
-        "strategic alliance", "joint venture", "letter of intent",
+        "strategic alliance", "joint venture", "letter of intent", "strategic relationship", "teaming agreement",
     ],
     "Infrastructure / Facility": [
-        "facility", "battery", "manufacturing", "buildout", "production capacity",
+        "facility", "battery", "manufacturing", "buildout", "production capacity", "capacity expansion", "new plant", "pilot production",
     ],
 }
 
@@ -3988,6 +3994,67 @@ def detect_open_drive_runner(gain, volume, structure, candles, float_shares=0, m
     }
 
 
+
+def dynamic_alert_volume_floor(result):
+    """Lower confirmation volume only for the exact names we kept missing: low-float or explosive top-gainer leaders."""
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    score = safe_float(result.get("score"))
+    structure = result.get("structure") or {}
+    news_score = safe_float(result.get("news_score", (result.get("news") or {}).get("score", 0)))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    low_float = float_shares <= 0 or float_shares <= LOW_FLOAT_GOOD
+    tiny_float = 0 < float_shares <= LOW_FLOAT_TINY
+    strong_leader = gain >= 35 and (near_high or breakout or higher_lows or above_vwap)
+    if tiny_float and gain >= ALERT_HARD_MIN_GAIN:
+        return LOW_FLOAT_ALERT_MIN_VOLUME
+    if low_float and strong_leader and score >= AWARENESS_MIN_SCORE:
+        return LOW_FLOAT_ALERT_MIN_VOLUME
+    if gain >= 50 and score >= AWARENESS_MIN_SCORE:
+        return AWARENESS_MIN_VOLUME
+    if news_score >= 8 and gain >= ALERT_HARD_MIN_GAIN:
+        return AWARENESS_MIN_VOLUME
+    return ALERT_MIN_VOLUME
+
+
+def is_awareness_lane(result):
+    """Phone-visible potential runner lane. Still requires 25%+ gain, real structure, and no decay/fakeout."""
+    structure = result.get("structure") or {}
+    score = safe_float(result.get("score"))
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    news_score = safe_float(result.get("news_score", (result.get("news") or {}).get("score", 0)))
+    coil = result.get("coil") or {}
+    second_leg = result.get("second_leg") or {}
+    decay = result.get("decay") or {}
+    exhaustion = result.get("exhaustion") or {}
+    fakeout = result.get("fakeout") or {}
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    low_or_unknown_float = float_shares <= 0 or float_shares <= LOW_FLOAT_GOOD
+    technical_trigger = second_leg.get("detected") or coil.get("detected") or breakout or near_high or higher_lows
+    catalyst_or_leader = news_score >= 8 or gain >= 35 or (low_or_unknown_float and gain >= ALERT_HARD_MIN_GAIN)
+
+    return bool(
+        gain >= ALERT_HARD_MIN_GAIN
+        and score >= AWARENESS_MIN_SCORE
+        and volume >= dynamic_alert_volume_floor(result)
+        and above_vwap
+        and technical_trigger
+        and catalyst_or_leader
+        and not decay.get("detected")
+        and not exhaustion.get("detected")
+        and not fakeout.get("detected")
+    )
+
 def is_super_momo_override(result):
     """
     v36.18: no Telegram score bypass.
@@ -4000,13 +4067,11 @@ def is_super_momo_override(result):
 
 def is_in_play_alert(result):
     """
-    v36.18 strict phone-alert filter.
+    v36.20 phone-alert filter.
 
-    Score math is unchanged. Telegram delivery is strict:
-    - score must be >= 8.0
-    - gain must be >= 25%
-    - above VWAP / clean phase / clean trigger still required
-    - 7.x names stay internal WATCH only; they do not hit the phone
+    Two lanes:
+    - Elite: score >= 8.0, normal volume confirmation.
+    - Awareness/Potential Runner: score >= 7.0, 25%+ gain, low-float/top-gainer or strong-news context, above VWAP, and clean trigger.
     """
     ticker = result.get("ticker", "UNKNOWN")
     structure = result.get("structure") or {}
@@ -4036,19 +4101,20 @@ def is_in_play_alert(result):
     open_drive = bool(result.get("open_drive_runner"))
     early_open_drive = bool(result.get("early_open_drive"))
 
-    # Strict phone rule: no 7.x / monster-momo bypass.
     elite_alert_lane = bool(score >= ALERT_MIN_SCORE)
+    awareness_alert_lane = bool(is_awareness_lane(result))
 
     # Absolute phone-alert gates first. These stop watchlist/rank names from
     # slipping through via old text overrides.
     if gain < ALERT_HARD_MIN_GAIN:
         return False, f"gain {gain:.1f}% below hard alert floor {ALERT_HARD_MIN_GAIN:.0f}%"
 
-    if volume < ALERT_MIN_VOLUME:
-        return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(ALERT_MIN_VOLUME)}"
+    min_alert_volume = dynamic_alert_volume_floor(result)
+    if volume < min_alert_volume:
+        return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(min_alert_volume)}"
 
-    if not elite_alert_lane:
-        return False, f"score {score:.1f} below {ALERT_MIN_SCORE:.1f} alert floor"
+    if not (elite_alert_lane or awareness_alert_lane):
+        return False, f"score {score:.1f} below elite {ALERT_MIN_SCORE:.1f} and awareness {AWARENESS_MIN_SCORE:.1f} lanes"
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
@@ -4092,7 +4158,7 @@ def is_in_play_alert(result):
 
     high_quality_above_vwap = bool(
         above_vwap
-        and score >= ALERT_MIN_SCORE
+        and (score >= ALERT_MIN_SCORE or awareness_alert_lane)
         and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE
         and structure_score >= TRADE_ALERT_MIN_STRUCTURE_SCORE
         and (near_high or breakout or higher_lows or coil.get("detected"))
@@ -4115,12 +4181,12 @@ def is_in_play_alert(result):
     # TRADEABLE or RUNNER is okay only if the clean trigger above already passed.
     if "avoid" in tier:
         return False, f"not in play — tier is {result.get('trade_tier', '')}"
-    if ("market leader" in tier or "awareness" in tier) and not high_quality_above_vwap:
+    if ("market leader" in tier or "awareness" in tier) and not (high_quality_above_vwap or awareness_alert_lane):
         return False, f"not in play — tier is {result.get('trade_tier', '')}"
 
     if any(w in bias for w in ["avoid", "extended", "reclaim watch"]):
         return False, f"not in play — bias is {result.get('bias', '')}"
-    if "market leader" in bias and not high_quality_above_vwap:
+    if "market leader" in bias and not (high_quality_above_vwap or awareness_alert_lane):
         return False, f"not in play — bias is {result.get('bias', '')}"
 
     min_entry = TRADE_ALERT_MIN_ENTRY_SCORE
@@ -4133,10 +4199,14 @@ def is_in_play_alert(result):
         return False, f"not in play — structure score {structure_score:.1f} too low"
 
     # Weak/no-news setups must have a real technical trigger.
-    if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase):
+    if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase or awareness_alert_lane):
         return False, "not in play — weak news without breakout/second leg"
 
-    return True, "clean active setup (8+ elite lane)"
+    if awareness_alert_lane and not elite_alert_lane:
+        result["awareness_alert"] = True
+        return True, "potential runner awareness lane"
+
+    return True, "clean active setup (elite lane)"
 
 
 def should_alert(result):
@@ -4172,6 +4242,8 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    if result.get("awareness_alert"):
+        return "👀 POTENTIAL RUNNER — EARLY"
     # v36.1: open-drive ignition gets its own clean title.
     if result.get("open_drive_runner"):
         return "🚨 OPEN DRIVE RUNNER"
@@ -4635,8 +4707,8 @@ def analyze_candidate(candidate, regime):
     if candles:
         print(f"[CANDLES] {ticker}: using {len(candles)} finalized bars (ignored active bar)")
 
-    if not candles or len(candles) < 8:
-        print(f"[DEEP SKIP] {ticker}: insufficient finalized candles")
+    if not candles or len(candles) < MIN_FINALIZED_CANDLES:
+        print(f"[DEEP SKIP] {ticker}: insufficient finalized candles ({len(candles) if candles else 0}/{MIN_FINALIZED_CANDLES})")
         return None
 
     structure = get_structure(candles, ticker)
@@ -4662,9 +4734,10 @@ def analyze_candidate(candidate, regime):
 
     priority_news_candidate = bool(
         gain >= 25
+        or volume >= 1_000_000
         or second_leg.get("detected")
         or safe_float(freshness.get("score", 0)) >= 0.7
-        or (bool(get_struct(structure, "above_vwap", False)) and (coil.get("detected") or get_struct(structure, "breakout", False)))
+        or (bool(get_struct(structure, "above_vwap", False)) and (coil.get("detected") or get_struct(structure, "breakout", False) or get_struct(structure, "near_high", False)))
     )
 
     if full_research or priority_news_candidate:
