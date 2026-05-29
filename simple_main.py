@@ -63,6 +63,13 @@ LOW_FLOAT_ALERT_MIN_VOLUME = 50_000    # lets BUUU-style low-float leaders surfa
 AWARENESS_MIN_SCORE = 7.0              # runner-awareness lane; still 25%+ gain required
 AWARENESS_MIN_VOLUME = 50_000          # awareness volume floor for low-float/top-gainer movers
 MIN_FINALIZED_CANDLES = 6              # fresh ignitions no longer die at 7 bars
+
+# v36.30 chart-timing gates — phone alerts must be fresh, not just high % gain.
+CHART_MAX_OFF_HIGH_ALERT = 7.0          # best alerts fire within ~7% of HOD
+CHART_STALE_OFF_HIGH = 12.0             # hard stale/fade zone for most runners
+CHART_MIN_VOLUME_RATIO = 0.75           # recent 3 bars vs prior 3 bars
+CHART_FRESH_VOLUME_RATIO = 1.05
+CHART_RE_ALERT_HIGH_MULTIPLIER = 1.012  # require a true new HOD area for repeats
 MAX_FLOAT = 80_000_000               # fixed: 40M was too nuclear in thin markets
 MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
@@ -3801,34 +3808,207 @@ def build_bias(score, structure_score, entry_score, news, risks, second_leg, dec
     return clamp(score)
 
 
+
+# ============================================================
+# v36.30 CHART TIMING ENGINE
+# ============================================================
+
+def pct_change(a, b):
+    a = safe_float(a)
+    b = safe_float(b)
+    if b <= 0:
+        return 0.0
+    return ((a - b) / b) * 100.0
+
+
+def detect_vwap_reclaim(candles, vwap):
+    candles = finalized_candles(candles)
+    vwap = safe_float(vwap)
+    if not candles or vwap <= 0 or len(candles) < 4:
+        return False
+    recent = candles[-5:]
+    was_below = any(candle_close(c) < vwap for c in recent[:-1])
+    now_above = candle_close(recent[-1]) >= vwap
+    return bool(was_below and now_above)
+
+
+def analyze_chart_timing(candles, structure, price):
+    """
+    Mimics a trader reading the live chart.
+
+    It separates a real-time entry trigger from a stale percent-gainer:
+    - fresh breakout / HOD push
+    - VWAP reclaim
+    - second-leg coil/pressure
+    - post-peak fade / extended wait
+    """
+    candles = finalized_candles(candles)
+    structure = structure or {}
+    price = safe_float(price)
+
+    base = {
+        "label": "UNKNOWN",
+        "alert_ok": False,
+        "fresh_breakout": False,
+        "vwap_reclaim": False,
+        "second_leg_ready": False,
+        "stale": True,
+        "reason": "not enough chart data",
+        "off_high_pct": 999.0,
+        "volume_ratio": 0.0,
+        "last5_change_pct": 0.0,
+        "last10_change_pct": 0.0,
+        "day_high": 0.0,
+    }
+
+    if not candles or len(candles) < MIN_FINALIZED_CANDLES:
+        return base
+
+    day_high = safe_float(get_struct(structure, "day_high", 0)) or max(candle_high(c) for c in candles)
+    recent_high = safe_float(get_struct(structure, "recent_high", 0)) or max(candle_high(c) for c in candles[-min(10, len(candles)):])
+    recent_low = safe_float(get_struct(structure, "recent_low", 0)) or min(candle_low(c) for c in candles[-min(10, len(candles)):])
+    vwap = safe_float(get_struct(structure, "vwap", calc_vwap(candles)))
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+
+    recent3_vol = sum(candle_volume(c) for c in candles[-3:]) if len(candles) >= 3 else 0
+    prior3_vol = sum(candle_volume(c) for c in candles[-6:-3]) if len(candles) >= 6 else 0
+    volume_ratio = (recent3_vol / prior3_vol) if prior3_vol > 0 else (1.0 if recent3_vol > 0 else 0.0)
+
+    close_now = candle_close(candles[-1])
+    close_5 = candle_close(candles[-6]) if len(candles) >= 6 else candle_close(candles[0])
+    close_10 = candle_close(candles[-11]) if len(candles) >= 11 else candle_close(candles[0])
+    last5_change = pct_change(close_now, close_5)
+    last10_change = pct_change(close_now, close_10)
+
+    off_high = ((day_high - price) / day_high * 100.0) if day_high > 0 else 999.0
+    recent_new_high = bool(day_high > 0 and max(candle_high(c) for c in candles[-3:]) >= day_high * 0.995)
+    very_near_high = bool(day_high > 0 and price >= day_high * 0.975)
+
+    recent_range_pct = ((recent_high - recent_low) / recent_low * 100.0) if recent_low > 0 else 999.0
+    coiling = bool(above_vwap and higher_lows and recent_range_pct <= 8.0 and off_high <= 8.0)
+    vwap_reclaim = bool(detect_vwap_reclaim(candles, vwap) and volume_ratio >= CHART_MIN_VOLUME_RATIO)
+
+    fresh_breakout = bool(
+        above_vwap
+        and (breakout or recent_new_high)
+        and very_near_high
+        and volume_ratio >= CHART_FRESH_VOLUME_RATIO
+        and last5_change >= -1.5
+    )
+
+    second_leg_ready = bool(
+        above_vwap
+        and higher_lows
+        and off_high <= CHART_MAX_OFF_HIGH_ALERT
+        and (coiling or breakout or recent_new_high or near_high)
+        and volume_ratio >= CHART_MIN_VOLUME_RATIO
+        and last10_change >= -3.0
+    )
+
+    fading_from_peak = bool(off_high >= CHART_STALE_OFF_HIGH)
+    weak_recent_momo = bool(last10_change <= -4.0 and not recent_new_high)
+    volume_fading = bool(volume_ratio < 0.55 and not recent_new_high and not vwap_reclaim)
+    stale = bool(fading_from_peak or weak_recent_momo or volume_fading or not above_vwap)
+
+    alert_ok = bool((fresh_breakout or vwap_reclaim or second_leg_ready) and not stale and off_high <= CHART_MAX_OFF_HIGH_ALERT)
+
+    if fresh_breakout:
+        label = "🔥 FRESH HOD BREAKOUT"
+        reason = "fresh high/breakout with expanding volume"
+    elif vwap_reclaim:
+        label = "🟢 VWAP RECLAIM"
+        reason = "fresh VWAP reclaim with volume"
+    elif second_leg_ready:
+        label = "🌀 SECOND LEG READY"
+        reason = "holding near highs with higher lows/coil"
+    elif stale:
+        label = "⚠️ POST-PEAK FADE / WAIT"
+        reason = f"stale chart: off high {off_high:.1f}%, vol ratio {volume_ratio:.2f}, last10 {last10_change:.1f}%"
+    else:
+        label = "👀 BUILDING / NOT READY"
+        reason = "structure building but no fresh trigger yet"
+
+    return {
+        "label": label,
+        "alert_ok": alert_ok,
+        "fresh_breakout": fresh_breakout,
+        "vwap_reclaim": vwap_reclaim,
+        "second_leg_ready": second_leg_ready,
+        "coiling": coiling,
+        "stale": stale,
+        "reason": reason,
+        "off_high_pct": off_high,
+        "volume_ratio": volume_ratio,
+        "last5_change_pct": last5_change,
+        "last10_change_pct": last10_change,
+        "day_high": day_high,
+        "recent_new_high": recent_new_high,
+        "recent_range_pct": recent_range_pct,
+    }
+
+
+def apply_chart_timing_score(score, chart_timing):
+    score = safe_float(score)
+    chart_timing = chart_timing or {}
+    if chart_timing.get("fresh_breakout"):
+        score += 1.00
+    elif chart_timing.get("second_leg_ready"):
+        score += 0.75
+    elif chart_timing.get("vwap_reclaim"):
+        score += 0.60
+
+    if chart_timing.get("stale"):
+        off_high = safe_float(chart_timing.get("off_high_pct"))
+        if off_high >= 18:
+            score -= 2.25
+        elif off_high >= CHART_STALE_OFF_HIGH:
+            score -= 1.50
+        else:
+            score -= 0.80
+    return clamp(score)
+
 # ============================================================
 # ALERT MEMORY / COOLDOWN
 # ============================================================
 
-def meaningful_change_since_alert(ticker, price, score, bias):
+def meaningful_change_since_alert(ticker, result):
+    """Smart cooldown: repeat alerts only when the chart makes a real new high or materially upgrades while fresh."""
     item = LAST_ALERT.get(ticker)
+    price = safe_float(result.get("price"))
+    score = safe_float(result.get("score"))
+    bias = result.get("bias")
+    chart_timing = result.get("chart_timing") or {}
+    current_day_high = safe_float(chart_timing.get("day_high")) or safe_float(get_struct(result.get("structure") or {}, "day_high", 0))
+
     if not item:
         return True, "first alert"
 
     elapsed = time.time() - item.get("time", 0)
     last_price = safe_float(item.get("price"))
     last_score = safe_float(item.get("score"))
+    last_day_high = safe_float(item.get("day_high"))
 
-    new_high = last_price > 0 and price >= last_price * RE_ALERT_NEW_HIGH_MULTIPLIER
-    score_improved = score >= last_score + 0.8
-    upgraded = item.get("bias") != bias and "RUNNER" in bias
+    price_push = last_price > 0 and price >= last_price * 1.03
+    true_new_high = current_day_high > 0 and (last_day_high <= 0 or current_day_high >= last_day_high * CHART_RE_ALERT_HIGH_MULTIPLIER)
+    fresh_again = bool(chart_timing.get("fresh_breakout") or chart_timing.get("second_leg_ready") or chart_timing.get("vwap_reclaim"))
+    score_improved = score >= last_score + 1.0 and fresh_again
+    upgraded = item.get("bias") != bias and "RUNNER" in str(bias).upper() and fresh_again
 
-    if elapsed >= ALERT_COOLDOWN_SECONDS and (new_high or score_improved or upgraded):
+    if elapsed >= ALERT_COOLDOWN_SECONDS and ((price_push and true_new_high and fresh_again) or score_improved or upgraded):
         reason = []
-        if new_high:
-            reason.append("new high")
+        if price_push and true_new_high:
+            reason.append("fresh new high")
         if score_improved:
-            reason.append("score improvement")
+            reason.append("score improvement with fresh setup")
         if upgraded:
-            reason.append("bias upgraded")
+            reason.append("bias upgraded with fresh setup")
         return True, " / ".join(reason)
 
-    return False, "cooldown/no meaningful change"
+    return False, "cooldown/no fresh new high"
 
 
 
@@ -4100,6 +4280,7 @@ def is_in_play_alert(result):
     fakeout = result.get("fakeout") or {}
     open_drive = bool(result.get("open_drive_runner"))
     early_open_drive = bool(result.get("early_open_drive"))
+    chart_timing = result.get("chart_timing") or {}
 
     elite_alert_lane = bool(score >= ALERT_MIN_SCORE)
     awareness_alert_lane = bool(is_awareness_lane(result))
@@ -4118,6 +4299,17 @@ def is_in_play_alert(result):
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
+
+    # v36.30 chart-timing hard gate. A percent leader is not alertable unless
+    # the live chart is fresh: HOD breakout, VWAP reclaim, or second-leg ready.
+    if chart_timing.get("stale"):
+        return False, f"not in play — stale chart ({chart_timing.get('reason', 'post-peak fade')})"
+
+    if not (chart_timing.get("alert_ok") or open_drive or early_open_drive):
+        return False, f"not in play — no fresh chart trigger ({chart_timing.get('label', 'not ready')})"
+
+    if safe_float(chart_timing.get("off_high_pct")) > CHART_MAX_OFF_HIGH_ALERT and not (open_drive or early_open_drive):
+        return False, f"not in play — {safe_float(chart_timing.get('off_high_pct')):.1f}% off high"
 
     # v36.16: these labels are always watch-only. Do this BEFORE any elite
     # setup override so ASTC/BRTX-style extended names cannot alert off score.
@@ -4165,7 +4357,10 @@ def is_in_play_alert(result):
     )
 
     clean_trigger = bool(
-        second_leg.get("detected")
+        chart_timing.get("fresh_breakout")
+        or chart_timing.get("vwap_reclaim")
+        or chart_timing.get("second_leg_ready")
+        or second_leg.get("detected")
         or open_drive
         or early_open_drive
         or (breakout and near_high and higher_lows)
@@ -4221,7 +4416,7 @@ def should_alert(result):
         print(f"[BLOCK] {ticker}: {play_reason}")
         return False
 
-    ok, reason = meaningful_change_since_alert(ticker, result["price"], result["score"], result["bias"])
+    ok, reason = meaningful_change_since_alert(ticker, result)
     if not ok:
         print(f"[COOLDOWN] {ticker}: {reason}")
         return False
@@ -4232,6 +4427,8 @@ def should_alert(result):
         "price": result["price"],
         "score": result["score"],
         "bias": result["bias"],
+        "day_high": safe_float((result.get("chart_timing") or {}).get("day_high")),
+        "chart_label": (result.get("chart_timing") or {}).get("label", ""),
     }
     SENT_THIS_CYCLE.add(ticker)
     return True
@@ -4879,7 +5076,18 @@ def analyze_candidate(candidate, regime):
         score = min(score, 8.8)
 
     score = apply_elite_score_floor_v35(score, gain, volume, float_shares, structure, freshness, daily_context)
+
+    # v36.30: chart timing is the final quality layer. This makes the bot behave
+    # more like a live chart reader: reward fresh HOD/VWAP/second-leg timing and
+    # punish post-peak fades before they can become stale phone alerts.
+    chart_timing = analyze_chart_timing(candles, structure, price)
+    score = apply_chart_timing_score(score, chart_timing)
     score = clamp(score)
+
+    if chart_timing.get("stale") and gain >= RUNNER_MIN_GAIN:
+        phase = "⚠️ POST-PEAK FADE / WAIT"
+        if score < 8.5:
+            bias = "⚠️ AVOID / WAIT"
 
     # v33.12 ranking visibility floor:
     # True tiny/low-float leaders stay visible even when extended.
@@ -4921,6 +5129,11 @@ def analyze_candidate(candidate, regime):
     reasons.extend(daily_context.get("reasons", []))
     reasons.extend(entry_reasons)
 
+    if chart_timing.get("reason"):
+        reasons.append(chart_timing.get("reason"))
+    if chart_timing.get("stale"):
+        risks.append(chart_timing.get("reason"))
+
     risks.extend(risk_reasons)
     if fakeout.get("risk"):
         risks.append(fakeout.get("risk"))
@@ -4957,6 +5170,7 @@ def analyze_candidate(candidate, regime):
         "trade_tier": trade_tier, "phase": phase, "structure": structure,
         "news_score": news_score, "news": news,
         "daily_context": daily_context, "freshness": freshness,
+        "chart_timing": chart_timing,
         "open_drive": open_drive, "open_drive_runner": bool(open_drive.get("detected")), "early_open_drive": bool(open_drive.get("early_detected")),
     }
     preview_result = apply_elite_leader_gate_fix(preview_result)
@@ -4976,7 +5190,8 @@ def analyze_candidate(candidate, regime):
     print(
         f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
         f"+{gain:.1f}% {float_info.get('label', '')} "
-        f"Fresh={safe_float(freshness.get('score', 0)):.1f} Daily={daily_context.get('label', '')} Phase={phase}"
+        f"Fresh={safe_float(freshness.get('score', 0)):.1f} Daily={daily_context.get('label', '')} "
+        f"Chart={chart_timing.get('label', '')} Phase={phase}"
     )
 
     return {
@@ -5016,6 +5231,7 @@ def analyze_candidate(candidate, regime):
         "halt_risk": halt_risk,
         "freshness": freshness,
         "daily_context": daily_context,
+        "chart_timing": chart_timing,
         "elite_leader": elite_leader,
         "open_drive": open_drive,
         "open_drive_runner": bool(open_drive.get("detected")),
@@ -5025,12 +5241,16 @@ def analyze_candidate(candidate, regime):
 
 
 def alert_sort_key(r):
+    chart = r.get("chart_timing") or {}
     phase = str(r.get("phase", "")).upper()
     second_leg_bonus = 1 if ("SECOND LEG" in phase or (r.get("second_leg") or {}).get("detected")) else 0
     clean_continuation_bonus = 1 if any(x in phase for x in ["RUNNER CONTINUATION", "COIL", "IGNITION", "BREAKOUT HOLD"]) else 0
     fresh_score = safe_float((r.get("freshness") or {}).get("score", 0))
     return (
+        bool(chart.get("fresh_breakout") or chart.get("vwap_reclaim") or chart.get("second_leg_ready")),
         bool(r.get("open_drive_runner") or r.get("early_open_drive")),
+        -safe_float(chart.get("off_high_pct", 999)),
+        safe_float(chart.get("volume_ratio", 0)),
         second_leg_bonus,
         clean_continuation_bonus,
         fresh_score,
