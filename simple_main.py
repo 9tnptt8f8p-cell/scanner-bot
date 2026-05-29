@@ -64,12 +64,16 @@ AWARENESS_MIN_SCORE = 7.0              # runner-awareness lane; still 25%+ gain 
 AWARENESS_MIN_VOLUME = 50_000          # awareness volume floor for low-float/top-gainer movers
 MIN_FINALIZED_CANDLES = 6              # fresh ignitions no longer die at 7 bars
 
-# v36.30 chart-timing gates — phone alerts must be fresh, not just high % gain.
-CHART_MAX_OFF_HIGH_ALERT = 7.0          # best alerts fire within ~7% of HOD
-CHART_STALE_OFF_HIGH = 12.0             # hard stale/fade zone for most runners
-CHART_MIN_VOLUME_RATIO = 0.75           # recent 3 bars vs prior 3 bars
-CHART_FRESH_VOLUME_RATIO = 1.05
+# v36.40 right-time chart gates — phone alerts must be fresh, not just high % gain.
+CHART_MAX_OFF_HIGH_ALERT = 5.5          # best alerts fire very close to HOD
+CHART_STALE_OFF_HIGH = 10.0             # hard stale/fade zone for most runners
+CHART_MIN_VOLUME_RATIO = 0.95           # recent 3 bars vs prior 3 bars
+CHART_FRESH_VOLUME_RATIO = 1.20         # breakout alerts need expanding current volume
 CHART_RE_ALERT_HIGH_MULTIPLIER = 1.012  # require a true new HOD area for repeats
+CHART_HOD_RECENT_BARS = 5               # HOD/breakout must be recent, not an old morning spike
+CHART_STALE_HOD_BARS = 25               # old HOD with no reclaim/new push is stale
+CHART_BUILDING_SCORE_CAP = 7.4          # never elite-alert a chart labeled not ready
+CHART_NOT_FRESH_SCORE_CAP = 7.6         # no fresh trigger = visibility only
 MAX_FLOAT = 80_000_000               # fixed: 40M was too nuclear in thin markets
 MAX_MARKET_CAP = 1_200_000_000       # fixed: cap is awareness unless extreme
 EXTREME_FLOAT_SKIP = 150_000_000     # only hard skip truly heavy floats
@@ -3834,13 +3838,19 @@ def detect_vwap_reclaim(candles, vwap):
 
 def analyze_chart_timing(candles, structure, price):
     """
-    Mimics a trader reading the live chart.
+    Right-time chart engine.
 
-    It separates a real-time entry trigger from a stale percent-gainer:
-    - fresh breakout / HOD push
-    - VWAP reclaim
-    - second-leg coil/pressure
-    - post-peak fade / extended wait
+    This is intentionally stricter than a percent-gainer ranker. It tries to
+    mimic a trader asking: "Is this actionable right now?"
+
+    Alertable triggers:
+    - fresh HOD breakout/new high in the last few finalized bars
+    - fresh VWAP reclaim with volume expansion
+    - second-leg coil near HOD with higher lows and active volume
+
+    Non-alertable states:
+    - BUILDING / NOT READY: decent structure but no live trigger yet
+    - POST-PEAK FADE / WAIT: old high, fading volume, too far off HOD, or below VWAP
     """
     candles = finalized_candles(candles)
     structure = structure or {}
@@ -3852,21 +3862,37 @@ def analyze_chart_timing(candles, structure, price):
         "fresh_breakout": False,
         "vwap_reclaim": False,
         "second_leg_ready": False,
+        "coiling": False,
         "stale": True,
+        "building": False,
         "reason": "not enough chart data",
         "off_high_pct": 999.0,
         "volume_ratio": 0.0,
         "last5_change_pct": 0.0,
         "last10_change_pct": 0.0,
         "day_high": 0.0,
+        "hod_age_bars": 999,
+        "recent_new_high": False,
+        "recent_range_pct": 999.0,
     }
 
     if not candles or len(candles) < MIN_FINALIZED_CANDLES:
         return base
 
-    day_high = safe_float(get_struct(structure, "day_high", 0)) or max(candle_high(c) for c in candles)
-    recent_high = safe_float(get_struct(structure, "recent_high", 0)) or max(candle_high(c) for c in candles[-min(10, len(candles)):])
-    recent_low = safe_float(get_struct(structure, "recent_low", 0)) or min(candle_low(c) for c in candles[-min(10, len(candles)):])
+    highs = [candle_high(c) for c in candles]
+    lows = [candle_low(c) for c in candles]
+    day_high = safe_float(get_struct(structure, "day_high", 0)) or max(highs)
+    # Use the most recent occurrence of HOD so old morning spikes are punished.
+    hod_index = 0
+    if day_high > 0:
+        for i, h in enumerate(highs):
+            if h >= day_high * 0.995:
+                hod_index = i
+    hod_age_bars = max(0, len(candles) - 1 - hod_index)
+
+    recent_window = min(10, len(candles))
+    recent_high = safe_float(get_struct(structure, "recent_high", 0)) or max(highs[-recent_window:])
+    recent_low = safe_float(get_struct(structure, "recent_low", 0)) or min(lows[-recent_window:])
     vwap = safe_float(get_struct(structure, "vwap", calc_vwap(candles)))
 
     above_vwap = bool(get_struct(structure, "above_vwap", False))
@@ -3876,61 +3902,76 @@ def analyze_chart_timing(candles, structure, price):
 
     recent3_vol = sum(candle_volume(c) for c in candles[-3:]) if len(candles) >= 3 else 0
     prior3_vol = sum(candle_volume(c) for c in candles[-6:-3]) if len(candles) >= 6 else 0
-    volume_ratio = (recent3_vol / prior3_vol) if prior3_vol > 0 else (1.0 if recent3_vol > 0 else 0.0)
+    prior10_vol = sum(candle_volume(c) for c in candles[-13:-3]) if len(candles) >= 13 else 0
+    avg_prior3 = prior3_vol / 3 if prior3_vol > 0 else 0
+    avg_prior10 = prior10_vol / 10 if prior10_vol > 0 else 0
+    avg_recent3 = recent3_vol / 3 if recent3_vol > 0 else 0
+    volume_ratio = (avg_recent3 / avg_prior3) if avg_prior3 > 0 else (1.0 if avg_recent3 > 0 else 0.0)
+    volume_ratio_10 = (avg_recent3 / avg_prior10) if avg_prior10 > 0 else volume_ratio
+    active_volume = bool(volume_ratio >= CHART_MIN_VOLUME_RATIO or volume_ratio_10 >= 1.05)
+    expanding_volume = bool(volume_ratio >= CHART_FRESH_VOLUME_RATIO or volume_ratio_10 >= 1.20)
 
     close_now = candle_close(candles[-1])
+    close_3 = candle_close(candles[-4]) if len(candles) >= 4 else candle_close(candles[0])
     close_5 = candle_close(candles[-6]) if len(candles) >= 6 else candle_close(candles[0])
     close_10 = candle_close(candles[-11]) if len(candles) >= 11 else candle_close(candles[0])
+    last3_change = pct_change(close_now, close_3)
     last5_change = pct_change(close_now, close_5)
     last10_change = pct_change(close_now, close_10)
 
     off_high = ((day_high - price) / day_high * 100.0) if day_high > 0 else 999.0
-    recent_new_high = bool(day_high > 0 and max(candle_high(c) for c in candles[-3:]) >= day_high * 0.995)
-    very_near_high = bool(day_high > 0 and price >= day_high * 0.975)
+    recent_new_high = bool(hod_age_bars <= CHART_HOD_RECENT_BARS)
+    very_near_high = bool(day_high > 0 and price >= day_high * (1 - CHART_MAX_OFF_HIGH_ALERT / 100.0))
+    tight_to_high = bool(day_high > 0 and price >= day_high * 0.975)
 
     recent_range_pct = ((recent_high - recent_low) / recent_low * 100.0) if recent_low > 0 else 999.0
-    coiling = bool(above_vwap and higher_lows and recent_range_pct <= 8.0 and off_high <= 8.0)
-    vwap_reclaim = bool(detect_vwap_reclaim(candles, vwap) and volume_ratio >= CHART_MIN_VOLUME_RATIO)
+    coiling = bool(above_vwap and higher_lows and recent_range_pct <= 7.5 and off_high <= CHART_MAX_OFF_HIGH_ALERT)
+    vwap_reclaim = bool(detect_vwap_reclaim(candles, vwap) and active_volume and last3_change >= -0.75)
 
     fresh_breakout = bool(
         above_vwap
         and (breakout or recent_new_high)
+        and recent_new_high
         and very_near_high
-        and volume_ratio >= CHART_FRESH_VOLUME_RATIO
-        and last5_change >= -1.5
+        and expanding_volume
+        and last5_change >= -0.75
     )
 
     second_leg_ready = bool(
         above_vwap
         and higher_lows
+        and tight_to_high
         and off_high <= CHART_MAX_OFF_HIGH_ALERT
+        and hod_age_bars <= CHART_STALE_HOD_BARS
         and (coiling or breakout or recent_new_high or near_high)
-        and volume_ratio >= CHART_MIN_VOLUME_RATIO
-        and last10_change >= -3.0
+        and active_volume
+        and last10_change >= -2.0
     )
 
+    old_hod_no_push = bool(hod_age_bars > CHART_STALE_HOD_BARS and not vwap_reclaim and not fresh_breakout)
     fading_from_peak = bool(off_high >= CHART_STALE_OFF_HIGH)
-    weak_recent_momo = bool(last10_change <= -4.0 and not recent_new_high)
-    volume_fading = bool(volume_ratio < 0.55 and not recent_new_high and not vwap_reclaim)
-    stale = bool(fading_from_peak or weak_recent_momo or volume_fading or not above_vwap)
+    weak_recent_momo = bool(last10_change <= -3.5 and not recent_new_high)
+    volume_fading = bool(volume_ratio < 0.65 and volume_ratio_10 < 0.80 and not recent_new_high and not vwap_reclaim)
+    below_or_lost_vwap = bool(not above_vwap)
+    stale = bool(fading_from_peak or old_hod_no_push or weak_recent_momo or volume_fading or below_or_lost_vwap)
 
     alert_ok = bool((fresh_breakout or vwap_reclaim or second_leg_ready) and not stale and off_high <= CHART_MAX_OFF_HIGH_ALERT)
 
     if fresh_breakout:
         label = "🔥 FRESH HOD BREAKOUT"
-        reason = "fresh high/breakout with expanding volume"
+        reason = f"fresh HOD within {hod_age_bars} bars with expanding volume"
     elif vwap_reclaim:
         label = "🟢 VWAP RECLAIM"
-        reason = "fresh VWAP reclaim with volume"
+        reason = "fresh VWAP reclaim with active volume"
     elif second_leg_ready:
         label = "🌀 SECOND LEG READY"
-        reason = "holding near highs with higher lows/coil"
+        reason = f"near HOD with higher lows/coil; HOD age {hod_age_bars} bars"
     elif stale:
         label = "⚠️ POST-PEAK FADE / WAIT"
-        reason = f"stale chart: off high {off_high:.1f}%, vol ratio {volume_ratio:.2f}, last10 {last10_change:.1f}%"
+        reason = f"stale chart: HOD age {hod_age_bars} bars, off high {off_high:.1f}%, vol ratio {volume_ratio:.2f}, last10 {last10_change:.1f}%"
     else:
         label = "👀 BUILDING / NOT READY"
-        reason = "structure building but no fresh trigger yet"
+        reason = f"building only: HOD age {hod_age_bars} bars, no live trigger"
 
     return {
         "label": label,
@@ -3940,36 +3981,51 @@ def analyze_chart_timing(candles, structure, price):
         "second_leg_ready": second_leg_ready,
         "coiling": coiling,
         "stale": stale,
+        "building": bool(label.startswith("👀")),
         "reason": reason,
         "off_high_pct": off_high,
         "volume_ratio": volume_ratio,
+        "volume_ratio_10": volume_ratio_10,
+        "active_volume": active_volume,
+        "expanding_volume": expanding_volume,
+        "last3_change_pct": last3_change,
         "last5_change_pct": last5_change,
         "last10_change_pct": last10_change,
         "day_high": day_high,
+        "hod_age_bars": hod_age_bars,
         "recent_new_high": recent_new_high,
         "recent_range_pct": recent_range_pct,
     }
 
-
 def apply_chart_timing_score(score, chart_timing):
+    """Final score layer: reward fresh timing, cap non-actionable charts."""
     score = safe_float(score)
     chart_timing = chart_timing or {}
+
     if chart_timing.get("fresh_breakout"):
-        score += 1.00
+        score += 1.10
     elif chart_timing.get("second_leg_ready"):
-        score += 0.75
+        score += 0.85
     elif chart_timing.get("vwap_reclaim"):
-        score += 0.60
+        score += 0.70
 
     if chart_timing.get("stale"):
         off_high = safe_float(chart_timing.get("off_high_pct"))
-        if off_high >= 18:
-            score -= 2.25
-        elif off_high >= CHART_STALE_OFF_HIGH:
-            score -= 1.50
+        hod_age = safe_int(chart_timing.get("hod_age_bars"), 999)
+        if off_high >= 18 or hod_age >= 45:
+            score -= 3.00
+        elif off_high >= CHART_STALE_OFF_HIGH or hod_age >= CHART_STALE_HOD_BARS:
+            score -= 2.00
         else:
-            score -= 0.80
+            score -= 1.10
+        score = min(score, 6.2)
+    elif chart_timing.get("building") or not chart_timing.get("alert_ok"):
+        # This is the key stale-alert fix: good stats can stay visible, but
+        # no elite phone alert unless the live chart has a trigger now.
+        score = min(score, CHART_BUILDING_SCORE_CAP if chart_timing.get("building") else CHART_NOT_FRESH_SCORE_CAP)
+
     return clamp(score)
+
 
 # ============================================================
 # ALERT MEMORY / COOLDOWN
@@ -4220,7 +4276,8 @@ def is_awareness_lane(result):
     near_high = bool(get_struct(structure, "near_high", False))
     higher_lows = bool(get_struct(structure, "higher_lows", False))
     low_or_unknown_float = float_shares <= 0 or float_shares <= LOW_FLOAT_GOOD
-    technical_trigger = second_leg.get("detected") or coil.get("detected") or breakout or near_high or higher_lows
+    chart_timing = result.get("chart_timing") or {}
+    technical_trigger = bool(chart_timing.get("alert_ok") or chart_timing.get("fresh_breakout") or chart_timing.get("vwap_reclaim") or chart_timing.get("second_leg_ready"))
     catalyst_or_leader = news_score >= 8 or gain >= 35 or (low_or_unknown_float and gain >= ALERT_HARD_MIN_GAIN)
 
     return bool(
@@ -4230,6 +4287,7 @@ def is_awareness_lane(result):
         and above_vwap
         and technical_trigger
         and catalyst_or_leader
+        and not chart_timing.get("stale")
         and not decay.get("detected")
         and not exhaustion.get("detected")
         and not fakeout.get("detected")
@@ -4305,10 +4363,10 @@ def is_in_play_alert(result):
     if chart_timing.get("stale"):
         return False, f"not in play — stale chart ({chart_timing.get('reason', 'post-peak fade')})"
 
-    if not (chart_timing.get("alert_ok") or open_drive or early_open_drive):
+    if not chart_timing.get("alert_ok"):
         return False, f"not in play — no fresh chart trigger ({chart_timing.get('label', 'not ready')})"
 
-    if safe_float(chart_timing.get("off_high_pct")) > CHART_MAX_OFF_HIGH_ALERT and not (open_drive or early_open_drive):
+    if safe_float(chart_timing.get("off_high_pct")) > CHART_MAX_OFF_HIGH_ALERT:
         return False, f"not in play — {safe_float(chart_timing.get('off_high_pct')):.1f}% off high"
 
     # v36.16: these labels are always watch-only. Do this BEFORE any elite
@@ -5094,6 +5152,14 @@ def analyze_candidate(candidate, regime):
     # This does NOT force alerts; should_alert still controls alerts.
     if gain >= 50 and 0 < float_shares <= 25_000_000:
         score = max(score, 6.6 if is_premarket_session() and entry_score >= 4.0 else 5.5)
+
+    # Re-apply right-time caps after visibility floors. A huge % mover can stay
+    # visible, but BUILDING/STALE cannot become elite just because it is up big.
+    if chart_timing.get("stale"):
+        score = min(score, 6.2)
+    elif chart_timing.get("building") or not chart_timing.get("alert_ok"):
+        score = min(score, CHART_BUILDING_SCORE_CAP if chart_timing.get("building") else CHART_NOT_FRESH_SCORE_CAP)
+    score = clamp(score)
 
     bias = simple_market_label(
         gain=gain,
