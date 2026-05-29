@@ -1,17 +1,16 @@
 name: Resume Render Scanner
 
 on:
-  schedule:
-    - cron: "10 13 * * 1-5"
   workflow_dispatch:
+  schedule:
+    - cron: "20 13 * * 1-5"
 
 jobs:
   resume:
     runs-on: ubuntu-latest
-
     steps:
       - name: Resume service
         run: |
-          curl -sS -w "\nHTTP_CODE=%{http_code}\n" -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume" \
+          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/resume" \
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
             -H "Accept: application/json"
