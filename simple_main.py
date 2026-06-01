@@ -6426,3 +6426,248 @@ def build_alert(result):
 if __name__ == "__main__":
     Thread(target=start_web_server, daemon=True).start()
     run_scanner()
+# ============================================================
+# v39.1 HOTFIX — headlines + meaningful push wording + cleaner gates
+# ============================================================
+
+def fmt_signed_pct(value):
+    v = safe_float(value)
+    return f"{v:+.1f}%"
+
+
+def print_top_ranked(results):
+    """v39.1: do not print 'No live movers' after fast alerts already fired."""
+    if not results:
+        if SENT_THIS_CYCLE:
+            print(f"[SCAN] Fast alerts sent ({len(SENT_THIS_CYCLE)}) — slow scan had no extra live movers")
+        else:
+            print("[SCAN] No live movers found")
+        return
+
+    top = " | ".join(
+        f"{r['ticker']} +{safe_float(r.get('gain')):.1f}% {fmt_money(r.get('price'))} vol={fmt_big_num(r.get('volume'))} float={fmt_big_num(r.get('float')) if r.get('float') else 'unknown'}"
+        for r in results[:8]
+    )
+    print(f"[LIVE FEED] Top movers: {top}")
+
+
+def is_moving_now(structure, chart_timing, gain, volume):
+    """v39.1: moving-now gate with cleaner signed-percent wording."""
+    structure = structure or {}
+    chart_timing = chart_timing or {}
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+
+    if gain < ALERT_HARD_MIN_GAIN:
+        return False, f"gain {gain:.1f}% below 25% floor"
+    if volume < FAST_ALERT_MIN_VOLUME:
+        return False, f"volume {fmt_big_num(volume)} below {fmt_big_num(FAST_ALERT_MIN_VOLUME)}"
+
+    off_high = safe_float(chart_timing.get("off_high_pct"), 999)
+    vol_ratio = safe_float(chart_timing.get("volume_ratio"))
+    vol_ratio_10 = safe_float(chart_timing.get("volume_ratio_10"))
+    best_vol_ratio = max(vol_ratio, vol_ratio_10)
+    major_leader = gain >= MAJOR_LEADER_GAIN and volume >= MAJOR_LEADER_VOLUME
+
+    if off_high > MOVING_NOW_MAX_OFF_HIGH:
+        if not (major_leader and off_high <= MAJOR_LEADER_MAX_OFF_HIGH and best_vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO):
+            return False, f"{off_high:.1f}% off HOD"
+
+    last3 = safe_float(chart_timing.get("last3_change_pct"))
+    last5 = safe_float(chart_timing.get("last5_change_pct"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    fresh_hod = bool(chart_timing.get("fresh_breakout") or chart_timing.get("recent_new_high"))
+    vwap_reclaim = bool(chart_timing.get("vwap_reclaim"))
+    second_leg = bool(chart_timing.get("second_leg_ready"))
+    recent_push = bool(last3 >= MOVING_NOW_MIN_LAST3_CHANGE or last5 >= 1.0)
+    volume_surge = bool(best_vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO)
+
+    live_trigger = bool(fresh_hod or vwap_reclaim or second_leg or recent_push or volume_surge)
+    if not live_trigger:
+        return False, f"no live trigger (last3 {fmt_signed_pct(last3)}, vol {best_vol_ratio:.1f}x)"
+
+    if not (above_vwap or vwap_reclaim) and not (fresh_hod and volume_surge):
+        return False, "not above/reclaiming VWAP and no fresh HOD+volume surge"
+
+    if not (volume_surge or fresh_hod or recent_push or second_leg):
+        return False, f"recent volume not active ({best_vol_ratio:.1f}x)"
+
+    facts = []
+    if fresh_hod:
+        facts.append("fresh HOD")
+    if vwap_reclaim:
+        facts.append("VWAP reclaim")
+    if second_leg:
+        facts.append("second-leg push")
+    if recent_push:
+        facts.append(f"last3 {fmt_signed_pct(last3)}")
+    if volume_surge:
+        facts.append(f"vol {best_vol_ratio:.1f}x")
+    if above_vwap and len(facts) < 4:
+        facts.append("above VWAP")
+    return True, " | ".join(dedupe(facts)[:4])
+
+
+def alert_quality_score(result):
+    """v39.1: meaningful-push quality score with clean signed-percent text."""
+    result = result or {}
+    chart = result.get("chart_timing") or {}
+    structure = result.get("structure") or {}
+    news = result.get("news") or {}
+
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    vol_ratio = max(safe_float(chart.get("volume_ratio")), safe_float(chart.get("volume_ratio_10")))
+    last3 = safe_float(chart.get("last3_change_pct"))
+    last5 = safe_float(chart.get("last5_change_pct"))
+
+    fresh_hod = bool(chart.get("fresh_breakout") or chart.get("recent_new_high"))
+    vwap_reclaim = bool(chart.get("vwap_reclaim"))
+    second_leg = bool(chart.get("second_leg_ready"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    low_float = bool(float_shares and float_shares <= ALERT_LOW_FLOAT_BONUS_SHARES)
+    strong_news = safe_float(news.get("score")) >= 8 or str(news.get("quality", "")).upper() == "STRONG"
+    major_leader = bool(gain >= MAJOR_LEADER_GAIN and volume >= MAJOR_LEADER_VOLUME)
+
+    score = 0
+    reasons = []
+
+    if fresh_hod:
+        score += 3
+        reasons.append("fresh HOD")
+    if vol_ratio >= ALERT_STRONG_VOLUME_RATIO:
+        score += 2
+        reasons.append(f"volume surge {vol_ratio:.1f}x")
+    elif vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO:
+        score += 1
+        reasons.append(f"volume {vol_ratio:.1f}x")
+    if last3 >= ALERT_STRONG_LAST3_CHANGE:
+        score += 2
+        reasons.append(f"last3 {fmt_signed_pct(last3)}")
+    elif last3 >= MOVING_NOW_MIN_LAST3_CHANGE or last5 >= 1.0:
+        score += 1
+        reasons.append(f"price push {fmt_signed_pct(max(last3, last5))}")
+    if vwap_reclaim:
+        score += 2
+        reasons.append("VWAP reclaim")
+    elif above_vwap:
+        score += 1
+        reasons.append("above VWAP")
+    if second_leg:
+        score += 2
+        reasons.append("second-leg push")
+    if low_float:
+        score += 1
+        reasons.append(f"low float {fmt_big_num(float_shares)}")
+    if strong_news:
+        score += 1
+        reasons.append("strong news")
+    if major_leader and (vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO or above_vwap):
+        score += 1
+        reasons.append("major leader")
+
+    return score, dedupe(reasons)
+
+
+def meaningful_alert_gate(result):
+    """v39.1: keep meaningful push; block weak negative-last3 alerts unless they have real proof."""
+    result = result or {}
+    chart = result.get("chart_timing") or {}
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    last3 = safe_float(chart.get("last3_change_pct"))
+    vol_ratio = max(safe_float(chart.get("volume_ratio")), safe_float(chart.get("volume_ratio_10")))
+    fresh_hod = bool(chart.get("fresh_breakout") or chart.get("recent_new_high"))
+    low_float = bool(float_shares and float_shares <= ALERT_LOW_FLOAT_BONUS_SHARES)
+
+    quality, reasons = alert_quality_score(result)
+    major_leader = is_major_market_leader(result)
+    floor = ALERT_MIN_QUALITY_MAJOR_LEADER if major_leader else ALERT_MIN_QUALITY
+
+    if major_leader and "market leader" not in [r.lower() for r in reasons]:
+        quality += 1
+        reasons.append("market leader")
+
+    # Do not let 'second-leg + above VWAP' alone alert while the last 3 bars are red.
+    if last3 < 0 and not (fresh_hod or vol_ratio >= ALERT_STRONG_VOLUME_RATIO or low_float):
+        return False, f"last3 {fmt_signed_pct(last3)} needs fresh HOD, strong volume, or low float", quality, reasons
+
+    if quality < floor:
+        reason_txt = ", ".join(reasons[:3]) if reasons else "no strong live reason"
+        return False, f"quality {quality}/{floor} too weak ({reason_txt})", quality, reasons
+
+    hard_reason = any(
+        r.startswith("fresh HOD")
+        or r.startswith("volume")
+        or r.startswith("vol ")
+        or r.startswith("last3")
+        or r.startswith("price push")
+        or r.startswith("VWAP reclaim")
+        or r.startswith("second-leg")
+        or r == "market leader"
+        for r in reasons
+    )
+    if not hard_reason:
+        return False, f"quality {quality}/{floor} but no hard live trigger", quality, reasons
+
+    return True, " + ".join(reasons[:4]), quality, reasons
+
+
+def ensure_alert_news(result):
+    """v39.1: fast alerts still try to attach a headline before Telegram sends."""
+    result = result or {}
+    ticker = str(result.get("ticker", "")).upper().strip()
+    news = result.get("news") or {}
+    headline = clean_text(news.get("headline") or result.get("news_headline") or result.get("headline") or "")
+    quality = str(news.get("quality", "")).upper()
+    if ticker and (not headline or quality in {"", "NONE", "JUNK", "STALE"}):
+        try:
+            priority = bool(is_major_market_leader(result) or safe_float(result.get("gain")) >= 50)
+            news = get_best_news(ticker, priority=priority)
+            result["news"] = news or {}
+            result["news_headline"] = clean_text((news or {}).get("headline") or "")
+        except Exception as e:
+            print(f"[NEWS ATTACH ERROR] {ticker}: {e}")
+    return result
+
+
+def build_alert(result):
+    """v39.1 clean alert: keep MEANINGFUL LIVE PUSH and show headline when found."""
+    result = normalize_alert_fields(result)
+    result = ensure_alert_news(result)
+    news = result.get("news") or {}
+    news_line = compact_news_line(news)
+
+    float_text = fmt_big_num(result.get("float")) if result.get("float") else "unknown"
+    quality = safe_int(result.get("alert_quality"))
+    reasons = result.get("alert_reasons") or []
+    reason_text = " + ".join(reasons[:4]) if reasons else (result.get("moving_now_reason") or live_facts_line(result))
+
+    title = f"🔥 MEANINGFUL LIVE PUSH — {result['ticker']}"
+    if result.get("market_leader_override"):
+        title = f"🚨 MARKET LEADER LIVE PUSH — {result['ticker']}"
+
+    lines = [
+        title,
+        "",
+        f"{fmt_money(result['price'])} | +{safe_float(result.get('gain')):.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+    ]
+    if quality:
+        lines.append(f"Quality: {quality}/10")
+    if reason_text:
+        lines.append(f"Why: {reason_text}")
+
+    headline = clean_text(news.get("headline") or result.get("news_headline") or "")
+    if news_line:
+        lines.extend(["", news_line])
+    if headline and UNKNOWN_CATALYST_LABEL not in news_line:
+        lines.append(f"Headline: {headline[:220]}")
+
+    sec_short = compact_dilution_label(result.get("sec"))
+    if sec_short:
+        lines.append(f"Filing: {sec_short}")
+
+    return "\n".join(lines)
