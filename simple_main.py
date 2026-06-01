@@ -5348,10 +5348,9 @@ def analyze_candidate(candidate, regime):
             trade_tier = "🟢 RUNNER WATCH"
 
     print(
-        f"[RANK] {ticker} {score:.1f}/10 {trade_tier} {bias} "
-        f"+{gain:.1f}% {float_info.get('label', '')} "
-        f"Fresh={safe_float(freshness.get('score', 0)):.1f} Daily={daily_context.get('label', '')} "
-        f"Chart={chart_timing.get('label', '')} Phase={phase}"
+        f"[LIVE RANK] {ticker} +{gain:.1f}% {fmt_money(price)} "
+        f"vol={fmt_big_num(volume)} float={fmt_big_num(float_shares) if float_shares else 'unknown'} "
+        f"news={news_score:.1f}/10 now={live_facts_line({'structure': structure, 'chart_timing': chart_timing, 'second_leg': second_leg})}"
     )
 
     return {
@@ -5400,41 +5399,128 @@ def analyze_candidate(candidate, regime):
     }
 
 
-def alert_sort_key(r):
+def live_momentum_sort_key(r):
+    """Pure live feed sorting: what is moving now, not prediction labels."""
+    gain = safe_float(r.get("gain", 0))
+    volume = safe_int(r.get("volume", 0))
+    float_shares = safe_int(r.get("float", 0))
+    news_score = safe_float(r.get("news_score", 0))
     chart = r.get("chart_timing") or {}
-    phase = str(r.get("phase", "")).upper()
-    second_leg_bonus = 1 if ("SECOND LEG" in phase or (r.get("second_leg") or {}).get("detected")) else 0
-    clean_continuation_bonus = 1 if any(x in phase for x in ["RUNNER CONTINUATION", "COIL", "IGNITION", "BREAKOUT HOLD"]) else 0
-    fresh_score = safe_float((r.get("freshness") or {}).get("score", 0))
+    above_vwap = bool(get_struct(r.get("structure", {}), "above_vwap", False))
+    fresh = bool(chart.get("fresh_breakout") or chart.get("vwap_reclaim") or chart.get("second_leg_ready"))
+    low_float_rank = 999_999_999 if float_shares <= 0 else float_shares
     return (
-        bool(chart.get("fresh_breakout") or chart.get("vwap_reclaim") or chart.get("second_leg_ready")),
-        bool(r.get("open_drive_runner") or r.get("early_open_drive")),
-        -safe_float(chart.get("off_high_pct", 999)),
-        safe_float(chart.get("volume_ratio", 0)),
-        second_leg_bonus,
-        clean_continuation_bonus,
-        fresh_score,
-        safe_float(r.get("score", 0)),
-        safe_float(r.get("gain", 0)),
-        safe_int(r.get("volume", 0)),
+        gain,
+        safe_int(volume),
+        news_score,
+        fresh,
+        above_vwap,
+        -low_float_rank,
     )
 
 
 def sort_results(results):
-    # v36.17: alert queue favors second-leg/fresh active runners first.
-    # Score value itself is unchanged.
-    return sorted(results, key=alert_sort_key, reverse=True)
+    # v38: pure live momentum feed. Biggest real live movers first.
+    return sorted(results, key=live_momentum_sort_key, reverse=True)
+
+
+def live_facts_line(r):
+    chart = r.get("chart_timing") or {}
+    facts = []
+    if bool(get_struct(r.get("structure", {}), "above_vwap", False)):
+        facts.append("above VWAP")
+    if chart.get("fresh_breakout"):
+        facts.append("fresh HOD")
+    if chart.get("vwap_reclaim"):
+        facts.append("VWAP reclaim")
+    if chart.get("second_leg_ready") or (r.get("second_leg") or {}).get("detected"):
+        facts.append("second-leg push")
+    vr = safe_float(chart.get("volume_ratio", 0))
+    if vr > 0:
+        facts.append(f"vol ratio {vr:.1f}x")
+    return " | ".join(dedupe(facts)[:4])
+
 
 def print_top_ranked(results):
     if not results:
-        print("[SCAN] No qualified deep-scan results")
+        print("[SCAN] No live movers found")
         return
 
     top = " | ".join(
-        f"{r['ticker']} {r['score']:.1f}/10 {r['bias'].replace('🟢 ', '').replace('👀 ', '').replace('⚠️ ', '')} +{r['gain']:.1f}% {r.get('float_info', {}).get('label', '')} {(r.get('daily_context') or {}).get('label', '')}"
-        for r in results[:5]
+        f"{r['ticker']} +{r['gain']:.1f}% {fmt_money(r['price'])} vol={fmt_big_num(r.get('volume'))} float={fmt_big_num(r.get('float')) if r.get('float') else 'unknown'}"
+        for r in results[:8]
     )
-    print(f"[SCAN] Top ranked: {top}")
+    print(f"[LIVE FEED] Top movers: {top}")
+
+
+def should_alert(result):
+    """v38 pure live data alert rule. No runner/avoid/building prediction gates.
+
+    Telegram rule: never alert below +25%. Above +25%, alert live movers,
+    using cooldown only to prevent spam unless the move meaningfully expands.
+    """
+    ticker = result["ticker"]
+    gain = safe_float(result.get("gain", 0))
+
+    if ticker in SENT_THIS_CYCLE:
+        print(f"[NO ALERT] {ticker}: already sent this cycle")
+        return False
+
+    if gain < ALERT_HARD_MIN_GAIN:
+        print(f"[BLOCK] {ticker}: live gain {gain:.1f}% below 25% alert floor")
+        return False
+
+    ok, reason = meaningful_change_since_alert(ticker, result)
+    if not ok:
+        print(f"[COOLDOWN] {ticker}: {reason}")
+        return False
+
+    print(f"[ALERT OK] {ticker}: LIVE MOVER — {reason}")
+    LAST_ALERT[ticker] = {
+        "time": time.time(),
+        "price": result["price"],
+        "score": result.get("score", 0),
+        "bias": "LIVE",
+        "day_high": safe_float((result.get("chart_timing") or {}).get("day_high")),
+        "chart_label": "LIVE FEED",
+    }
+    SENT_THIS_CYCLE.add(ticker)
+    return True
+
+
+# ============================================================
+# ALERT BUILDER — v38 PURE LIVE MOMENTUM FEED
+# ============================================================
+
+def build_alert(result):
+    result = normalize_alert_fields(result)
+    news = result.get("news") or {}
+    news_line = compact_news_line(news)
+
+    float_text = "unknown"
+    if result.get("float"):
+        float_text = fmt_big_num(result.get("float"))
+
+    lines = [
+        f"🔥 LIVE MOVER — {result['ticker']}",
+        "",
+        f"{fmt_money(result['price'])} | +{result['gain']:.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+    ]
+
+    facts = live_facts_line(result)
+    if facts:
+        lines.append(f"Now: {facts}")
+
+    if news_line:
+        lines.extend(["", news_line])
+
+    sec_short = compact_dilution_label(result.get("sec"))
+    if sec_short:
+        lines.append(f"Filing: {sec_short}")
+
+    return "\n".join(lines)
+
 
 def run_scanner():
     print(f"[BOOT] {BOOT_MARKER}")
