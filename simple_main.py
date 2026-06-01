@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v37.00 — fresh leaders + news fallback + elite cooldown bypass + continuation lane"
+BOOT_MARKER = "elite scanner v37.10 — strict 25% alert floor + Yahoo cooldown + elite cooldown bypass"
 
 # ============================================================
 # ENV
@@ -102,9 +102,9 @@ WATCH_ALERT_MIN_ENTRY_SCORE = 3.5     # internal display compatibility only
 WATCH_ALERT_MIN_STRUCTURE_SCORE = 3.0 # internal display compatibility only
 TRADE_ALERT_MIN_ENTRY_SCORE = 3.5
 TRADE_ALERT_MIN_STRUCTURE_SCORE = 3.0
-ALERT_HARD_MIN_GAIN = 25.0            # new-alert hard gain floor
-CONTINUATION_MIN_GAIN = 10.0          # v37: continuation/reclaim lane can alert below 25%
-CONTINUATION_MIN_SCORE = 7.5          # v37: score floor for continuation/reclaim lane
+ALERT_HARD_MIN_GAIN = 25.0            # Telegram hard floor: no alert under +25%, ever
+CONTINUATION_MIN_GAIN = 25.0          # strict mode: continuation lane may rank, but never alerts under 25%
+CONTINUATION_MIN_SCORE = 7.5          # internal display/ranking only; phone alerts still require 25%+
 SUPER_MOMO_MIN_SCORE = 8.0            # no score bypass below 8.0
 SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
@@ -143,6 +143,8 @@ CANDLE_CACHE = {}
 LAST_GOOD_CANDLES = {}
 YAHOO_CANDLE_BLOCK_UNTIL = 0
 YAHOO_CANDLE_429_COUNT = 0
+YAHOO_GAINERS_BLOCK_UNTIL = 0
+YAHOO_GAINERS_429_COUNT = 0
 MARKET_REGIME_CACHE = {}
 DAILY_CONTEXT_CACHE = {}
 FRESHNESS_STATE = {}
@@ -220,7 +222,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v37.00 fresh leaders + news fallback + elite cooldown bypass + continuation lane", 200
+    return "scanner alive — v37.10 strict 25% alert floor + Yahoo cooldown + elite cooldown bypass", 200
 
 
 @app.route("/health")
@@ -757,12 +759,40 @@ def merge_source_items(items):
     return out
 
 
+
+def yahoo_gainers_is_rate_limited(response):
+    """Detect Yahoo screener 429/Too Many Requests and cool down source calls."""
+    text = getattr(response, "text", "") or ""
+    status = getattr(response, "status_code", 0)
+    return status == 429 or "Too Many Requests" in text
+
+
+def set_yahoo_gainers_cooldown(label="Yahoo"):
+    global YAHOO_GAINERS_BLOCK_UNTIL, YAHOO_GAINERS_429_COUNT
+    YAHOO_GAINERS_429_COUNT += 1
+    cooldown = min(600, 300 + (YAHOO_GAINERS_429_COUNT - 1) * 60)
+    YAHOO_GAINERS_BLOCK_UNTIL = time.time() + cooldown
+    print(f"[YAHOO GAINERS 429] {label}: blocking Yahoo gainers for {cooldown}s")
+
+
+def yahoo_gainers_cooling_down():
+    if time.time() < YAHOO_GAINERS_BLOCK_UNTIL:
+        left = int(YAHOO_GAINERS_BLOCK_UNTIL - time.time())
+        print(f"[YAHOO GAINERS BLOCKED] cooling down {left}s after rate limit")
+        return True
+    return False
+
 def get_yahoo_predefined_gainers():
+    if yahoo_gainers_cooling_down():
+        return []
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
     params = {"scrIds": "day_gainers", "count": 250, "formatted": "false"}
 
     try:
         r = http_get(url, params=params, timeout=8)
+        if yahoo_gainers_is_rate_limited(r):
+            set_yahoo_gainers_cooldown("Yahoo predefined")
+            return []
         data = safe_json_response(r, "GAINERS Yahoo predefined")
         if not data:
             return []
@@ -806,6 +836,8 @@ def yahoo_screener_payload(min_gain=20.0, min_volume=0, size=250, max_market_cap
 
 
 def get_yahoo_custom_percent_gainers():
+    if yahoo_gainers_cooling_down():
+        return []
     # Yahoo's screener endpoint often rejects one host while the other still works.
     # Try query1 first, then query2 with the exact same payload before giving up.
     urls = [
@@ -837,6 +869,9 @@ def get_yahoo_custom_percent_gainers():
             data = None
             for url in urls:
                 r = http_post(url, payload=payload, timeout=8)
+                if yahoo_gainers_is_rate_limited(r):
+                    set_yahoo_gainers_cooldown(label)
+                    return merge_source_items(all_results)
                 data = safe_json_response(r, f"GAINERS {label}")
                 if data:
                     break
@@ -861,6 +896,8 @@ def get_yahoo_custom_percent_gainers():
 
 
 def get_yahoo_gainers():
+    if yahoo_gainers_cooling_down():
+        return []
     results = []
     results.extend(get_yahoo_predefined_gainers())
     results.extend(get_yahoo_custom_percent_gainers())
@@ -4282,47 +4319,11 @@ def dynamic_elite_score_floor(result):
 
 
 def has_continuation_trigger(result):
-    """v37: continuation/reclaim lane for clean setups that are below the new-alert 25% floor."""
-    structure = result.get("structure") or {}
-    chart_timing = result.get("chart_timing") or {}
-    second_leg = result.get("second_leg") or {}
-    coil = result.get("coil") or {}
-    decay = result.get("decay") or {}
-    exhaustion = result.get("exhaustion") or {}
-    fakeout = result.get("fakeout") or {}
-
-    above_vwap = bool(get_struct(structure, "above_vwap", False))
-    breakout = bool(get_struct(structure, "breakout", False))
-    near_high = bool(get_struct(structure, "near_high", False))
-    higher_lows = bool(get_struct(structure, "higher_lows", False))
-    score = safe_float(result.get("score"))
-    gain = safe_float(result.get("gain"))
-    volume = safe_int(result.get("volume"))
-
-    trigger = bool(
-        chart_timing.get("fresh_breakout")
-        or chart_timing.get("vwap_reclaim")
-        or chart_timing.get("second_leg_ready")
-        or second_leg.get("detected")
-        or (breakout and near_high and higher_lows)
-        or (coil.get("detected") and near_high and higher_lows)
-    )
-
-    return bool(
-        gain >= CONTINUATION_MIN_GAIN
-        and score >= CONTINUATION_MIN_SCORE
-        and volume >= dynamic_alert_volume_floor(result)
-        and above_vwap
-        and trigger
-        and not chart_timing.get("stale")
-        and not decay.get("detected")
-        and not exhaustion.get("detected")
-        and not fakeout.get("detected")
-    )
-
+    """Strict mode: continuation setups may rank/watch, but Telegram alerts never fire below +25%."""
+    return False
 
 def dynamic_required_alert_gain(result):
-    return CONTINUATION_MIN_GAIN if has_continuation_trigger(result) else ALERT_HARD_MIN_GAIN
+    return ALERT_HARD_MIN_GAIN
 
 def is_awareness_lane(result):
     """Phone-visible potential runner lane. Still requires 25%+ gain, real structure, and no decay/fakeout."""
@@ -4415,15 +4416,15 @@ def is_in_play_alert(result):
     # Absolute phone-alert gates first. These stop watchlist/rank names from
     # slipping through via old text overrides.
     required_gain = dynamic_required_alert_gain(result)
-    if gain < required_gain:
-        return False, f"gain {gain:.1f}% below alert floor {required_gain:.0f}%"
+    if gain < ALERT_HARD_MIN_GAIN:
+        return False, f"gain {gain:.1f}% below alert floor 25%"
 
     min_alert_volume = dynamic_alert_volume_floor(result)
     if volume < min_alert_volume:
         return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(min_alert_volume)}"
 
-    if not (elite_alert_lane or continuation_alert_lane or awareness_alert_lane):
-        return False, f"score {score:.1f} below elite {elite_floor:.1f}, continuation {CONTINUATION_MIN_SCORE:.1f}, and awareness {AWARENESS_MIN_SCORE:.1f} lanes"
+    if not (elite_alert_lane or awareness_alert_lane):
+        return False, f"score {score:.1f} below elite {elite_floor:.1f} and awareness {AWARENESS_MIN_SCORE:.1f} lanes"
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
@@ -4525,10 +4526,6 @@ def is_in_play_alert(result):
     if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase or awareness_alert_lane):
         return False, "not in play — weak news without breakout/second leg"
 
-    if continuation_alert_lane and not elite_alert_lane:
-        result["continuation_alert"] = True
-        return True, "continuation/reclaim lane"
-
     if awareness_alert_lane and not elite_alert_lane:
         result["awareness_alert"] = True
         return True, "potential runner awareness lane"
@@ -4571,8 +4568,6 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
-    if result.get("continuation_alert"):
-        return "🔁 IN PLAY — CONTINUATION"
     if result.get("awareness_alert"):
         return "👀 POTENTIAL RUNNER — EARLY"
     # v36.1: open-drive ignition gets its own clean title.
@@ -4995,6 +4990,16 @@ def analyze_candidate(candidate, regime):
     if source_gain < DISCOVERY_MIN_GAIN:
         return None
 
+    # v37.10 source-layer hard skip before quote/profile calls.
+    # Saves API time by rejecting obvious mega-cap/too-expensive rows from TradingView/Yahoo first.
+    source_market_cap = safe_int(candidate.get("market_cap"))
+    if source_market_cap and source_market_cap > EXTREME_MARKET_CAP_SKIP and source_gain < 50:
+        print(f"[SOURCE SKIP] {ticker}: source market cap over {fmt_big_num(EXTREME_MARKET_CAP_SKIP)} before quote/profile")
+        return None
+    if source_price and source_price > MAX_PRICE and source_gain < RUNNER_MIN_GAIN:
+        print(f"[SOURCE SKIP] {ticker}: source price {fmt_money(source_price)} outside max before quote/profile")
+        return None
+
     live = get_live_quote(ticker)
     if not quote_is_valid(live, ticker):
         print(f"[LIVE SKIP] {ticker}: invalid live quote — source gain ignored ({source_gain:.1f}% from {source})")
@@ -5215,6 +5220,19 @@ def analyze_candidate(candidate, regime):
     # more like a live chart reader: reward fresh HOD/VWAP/second-leg timing and
     # punish post-peak fades before they can become stale phone alerts.
     chart_timing = analyze_chart_timing(candles, structure, price)
+
+    # v37.10 elite structure bonus: keep true +25% fresh-HOD/second-leg/VWAP runners
+    # from collapsing below alert floor due to temporary news/decay noise.
+    elite_structure_trigger = bool(
+        gain >= ALERT_HARD_MIN_GAIN
+        and above_vwap_ctx
+        and (chart_timing.get("fresh_breakout") or chart_timing.get("second_leg_ready") or chart_timing.get("vwap_reclaim") or second_leg_ctx)
+        and not fakeout.get("detected")
+        and not exhaustion.get("detected")
+    )
+    if elite_structure_trigger:
+        score += 1.25
+
     score = apply_chart_timing_score(score, chart_timing)
     score = clamp(score)
 
