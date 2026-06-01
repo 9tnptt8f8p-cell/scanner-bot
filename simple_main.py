@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v38.5 — moving-now alerts only + quote cooldowns"
+BOOT_MARKER = "elite scanner v38.6 — leader focus + anti-spam re-alert gate"
 
 # ============================================================
 # ENV
@@ -110,7 +110,7 @@ SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
 EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
 MAX_GAINERS = 180                 # v36.8: wider fresh-mover pool so BRAI-style ignitions are not missed
-MAX_ALERTS_PER_CYCLE = 8
+MAX_ALERTS_PER_CYCLE = 4
 SCAN_SLEEP = 45
 
 # v38.2: fast alerts still happen early, but NOT just because a ticker is up.
@@ -118,7 +118,7 @@ SCAN_SLEEP = 45
 FAST_LIVE_ALERTS = True
 FAST_ALERT_MIN_GAIN = 25.0
 FAST_ALERT_MIN_VOLUME = 500_000
-FAST_ALERT_MAX_PER_CYCLE = 8
+FAST_ALERT_MAX_PER_CYCLE = 4
 
 # v38.5 leader focus: spend quote/candle/news calls on true leaders first.
 LEADER_FOCUS_MIN_GAIN = 25.0
@@ -129,6 +129,15 @@ MOVING_NOW_MIN_VOLUME_RATIO = 2.00   # must be surging now, not merely up
 MOVING_NOW_MIN_LAST3_CHANGE = 0.50
 MOVING_NOW_MAX_OFF_HIGH = 8.0
 MOVING_NOW_MIN_CANDLES = 5
+
+# v38.6 anti-spam: leaders stay visible in logs, but Telegram repeats need a real expansion.
+LIVE_RE_ALERT_MIN_SECONDS = 600
+LIVE_RE_ALERT_PRICE_PUSH = 1.08
+LIVE_RE_ALERT_HIGH_PUSH = 1.03
+LIVE_RE_ALERT_GAIN_DELTA = 20.0
+MAJOR_LEADER_GAIN = 75.0
+MAJOR_LEADER_VOLUME = 10_000_000
+MAJOR_LEADER_MAX_OFF_HIGH = 35.0
 
 
 # Render/free-tier protection:
@@ -242,7 +251,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v37.10 strict 25% alert floor + Yahoo cooldown + elite cooldown bypass", 200
+    return "scanner alive — v38.6 leader focus + anti-spam", 200
 
 
 @app.route("/health")
@@ -4192,45 +4201,44 @@ def apply_chart_timing_score(score, chart_timing):
 # ============================================================
 
 def meaningful_change_since_alert(ticker, result):
-    """Smart cooldown: repeat alerts only when the chart makes a real new high or materially upgrades while fresh."""
+    """v38.6 anti-spam gate.
+
+    First valid live-move alert sends immediately. Repeat alerts are blocked unless
+    the ticker makes a meaningful new expansion. This keeps leaders visible in logs
+    without spamming Telegram every scan cycle.
+    """
     item = LAST_ALERT.get(ticker)
     price = safe_float(result.get("price"))
-    score = safe_float(result.get("score"))
-    bias = result.get("bias")
+    gain = safe_float(result.get("gain"))
     chart_timing = result.get("chart_timing") or {}
     current_day_high = safe_float(chart_timing.get("day_high")) or safe_float(get_struct(result.get("structure") or {}, "day_high", 0))
 
     if not item:
-        return True, "first alert"
+        return True, "first live alert"
 
     elapsed = time.time() - item.get("time", 0)
     last_price = safe_float(item.get("price"))
-    last_score = safe_float(item.get("score"))
+    last_gain = safe_float(item.get("gain"))
     last_day_high = safe_float(item.get("day_high"))
 
-    price_push = last_price > 0 and price >= last_price * 1.03
-    true_new_high = current_day_high > 0 and (last_day_high <= 0 or current_day_high >= last_day_high * CHART_RE_ALERT_HIGH_MULTIPLIER)
-    fresh_again = bool(chart_timing.get("fresh_breakout") or chart_timing.get("second_leg_ready") or chart_timing.get("vwap_reclaim"))
-    score_improved = score >= last_score + 1.0 and fresh_again
-    upgraded = item.get("bias") != bias and "RUNNER" in str(bias).upper() and fresh_again
+    if elapsed < LIVE_RE_ALERT_MIN_SECONDS:
+        return False, f"cooldown {int(LIVE_RE_ALERT_MIN_SECONDS - elapsed)}s left"
 
-    # v37: do not bury the best names of the day. A 9/10+ runner can re-alert
-    # on a fresh trigger much sooner than the normal 15-minute cooldown, but it
-    # still needs a small price push/new-HOD style confirmation to avoid spam.
-    if score >= 9.0 and elapsed >= 120 and fresh_again and (true_new_high or price >= last_price * 1.005):
-        return True, "elite runner cooldown bypass"
+    price_expansion = last_price > 0 and price >= last_price * LIVE_RE_ALERT_PRICE_PUSH
+    high_expansion = current_day_high > 0 and (last_day_high <= 0 or current_day_high >= last_day_high * LIVE_RE_ALERT_HIGH_PUSH)
+    gain_expansion = gain >= last_gain + LIVE_RE_ALERT_GAIN_DELTA
 
-    if elapsed >= ALERT_COOLDOWN_SECONDS and ((price_push and true_new_high and fresh_again) or score_improved or upgraded):
+    if price_expansion or high_expansion or gain_expansion:
         reason = []
-        if price_push and true_new_high:
-            reason.append("fresh new high")
-        if score_improved:
-            reason.append("score improvement with fresh setup")
-        if upgraded:
-            reason.append("bias upgraded with fresh setup")
+        if price_expansion:
+            reason.append("price +8% from last alert")
+        if high_expansion:
+            reason.append("new HOD expansion")
+        if gain_expansion:
+            reason.append("gain expanded +20pts")
         return True, " / ".join(reason)
 
-    return False, "cooldown/no fresh new high"
+    return False, "no meaningful expansion since last alert"
 
 
 
@@ -5649,12 +5657,16 @@ def is_moving_now(structure, chart_timing, gain, volume):
         return False, f"volume {fmt_big_num(volume)} below {fmt_big_num(FAST_ALERT_MIN_VOLUME)}"
 
     off_high = safe_float(chart_timing.get("off_high_pct"), 999)
-    if off_high > MOVING_NOW_MAX_OFF_HIGH:
-        return False, f"{off_high:.1f}% off HOD"
 
     vol_ratio = safe_float(chart_timing.get("volume_ratio"))
     vol_ratio_10 = safe_float(chart_timing.get("volume_ratio_10"))
     best_vol_ratio = max(vol_ratio, vol_ratio_10)
+    major_leader = gain >= MAJOR_LEADER_GAIN and volume >= MAJOR_LEADER_VOLUME
+    if off_high > MOVING_NOW_MAX_OFF_HIGH:
+        # Ordinary movers must be close to HOD. Major day leaders can stay visible
+        # farther from HOD, but only alert if volume is clearly re-accelerating.
+        if not (major_leader and off_high <= MAJOR_LEADER_MAX_OFF_HIGH and best_vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO):
+            return False, f"{off_high:.1f}% off HOD"
     last3 = safe_float(chart_timing.get("last3_change_pct"))
     last5 = safe_float(chart_timing.get("last5_change_pct"))
 
@@ -5744,18 +5756,18 @@ def should_alert(result):
         return False
     result["moving_now_reason"] = now_reason
 
-    # v38.5: if it is a valid live mover NOW, do not block it just because
-    # it alerted before. Cooldown only changes the reason text; it does not suppress
-    # true current momentum. This matches the user's "what's moving now" rule.
+    # v38.6: first live alert sends, repeats need real expansion.
     ok, reason = meaningful_change_since_alert(ticker, result)
     if not ok:
-        reason = f"moving now cooldown bypass ({reason})"
+        print(f"[NO ALERT] {ticker}: {reason}")
+        return False
 
     print(f"[ALERT OK] {ticker}: LIVE MOVER — {reason}")
     LAST_ALERT[ticker] = {
         "time": time.time(),
         "price": result["price"],
         "score": result.get("score", 0),
+        "gain": safe_float(result.get("gain")),
         "bias": "LIVE",
         "day_high": safe_float((result.get("chart_timing") or {}).get("day_high")),
         "chart_label": "LIVE FEED",
