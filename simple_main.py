@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v38.3 — moving-now alerts only + quote cooldowns"
+BOOT_MARKER = "elite scanner v38.5 — moving-now alerts only + quote cooldowns"
 
 # ============================================================
 # ENV
@@ -119,6 +119,12 @@ FAST_LIVE_ALERTS = True
 FAST_ALERT_MIN_GAIN = 25.0
 FAST_ALERT_MIN_VOLUME = 500_000
 FAST_ALERT_MAX_PER_CYCLE = 8
+
+# v38.5 leader focus: spend quote/candle/news calls on true leaders first.
+LEADER_FOCUS_MIN_GAIN = 25.0
+LEADER_FOCUS_MIN_VOLUME = 1_000_000
+LEADER_FOCUS_MAX_POOL = 25
+LEADER_FOCUS_BACKFILL_POOL = 8
 MOVING_NOW_MIN_VOLUME_RATIO = 2.00   # must be surging now, not merely up
 MOVING_NOW_MIN_LAST3_CHANGE = 0.50
 MOVING_NOW_MAX_OFF_HIGH = 8.0
@@ -1526,6 +1532,82 @@ def get_candidates():
 
     print(f"[CANDIDATES] merged {len(candidates)} leader candidates from {len(raw)} multi-source names")
     return candidates[:MAX_GAINERS]
+
+
+def candidate_leader_focus_score(item):
+    """v38.5 source-layer leader priority before expensive live calls.
+
+    Goal: process HKIT/TGHL/ABTS style leaders first and stop wasting the
+    first 30-60 seconds on +9% to +13% names. This is source-layer only;
+    live quote still verifies the true gain before any alert.
+    """
+    gain = safe_float(item.get("gain"))
+    volume = safe_int(item.get("volume"))
+    float_shares = safe_int(item.get("float"))
+    price = safe_float(item.get("price"))
+    source_count = len(item.get("sources", []) or [])
+    fresh_boost = safe_float(item.get("fresh_scan_boost"))
+
+    low_float_bonus = 0
+    if float_shares:
+        if float_shares <= LOW_FLOAT_TINY:
+            low_float_bonus = 25
+        elif float_shares <= LOW_FLOAT_ELITE:
+            low_float_bonus = 20
+        elif float_shares <= LOW_FLOAT_GOOD:
+            low_float_bonus = 12
+        elif float_shares <= LOW_FLOAT_ACCEPTABLE:
+            low_float_bonus = 5
+
+    price_bonus = 8 if price and MIN_PRICE <= price <= 20 else 0
+    volume_bonus = min(volume / 1_000_000, 100) * 2
+
+    return (
+        gain * 4.0
+        + volume_bonus
+        + low_float_bonus
+        + fresh_boost * 20
+        + source_count * 5
+        + price_bonus
+    )
+
+
+def prioritize_live_leaders(candidates):
+    """Keep the scan focused on current market leaders.
+
+    Primary pool: source gain >=25% and volume >=1M.
+    Backfill: source gain >=25% but thinner volume, so tiny-float ignitions
+    can still appear without letting under-25% names consume the cycle.
+    """
+    leaders = []
+    backfill = []
+    skipped_under = 0
+
+    for item in candidates or []:
+        gain = safe_float(item.get("gain"))
+        volume = safe_int(item.get("volume"))
+        if gain < LEADER_FOCUS_MIN_GAIN:
+            skipped_under += 1
+            continue
+        if volume >= LEADER_FOCUS_MIN_VOLUME:
+            leaders.append(item)
+        else:
+            backfill.append(item)
+
+    leaders.sort(key=candidate_leader_focus_score, reverse=True)
+    backfill.sort(key=candidate_leader_focus_score, reverse=True)
+    focused = leaders[:LEADER_FOCUS_MAX_POOL] + backfill[:LEADER_FOCUS_BACKFILL_POOL]
+
+    print(
+        f"[LEADER FOCUS] leaders={len(leaders)} backfill={len(backfill)} "
+        f"skipped_under25={skipped_under} -> processing {len(focused)}"
+    )
+    if focused:
+        print("[LEADER FOCUS TOP] " + " | ".join(
+            f"{x.get('ticker')} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
+            for x in focused[:12]
+        ))
+    return focused
 
 
 # ============================================================
@@ -5048,8 +5130,10 @@ def analyze_candidate(candidate, regime):
     if abs(gain - source_gain) >= 8.0:
         print(f"[LIVE OVERRIDE] {ticker}: source {source_gain:.1f}% -> live {gain:.1f}% ({live.get('source', 'unknown')})")
 
-    if gain < dynamic_hard_min_gain():
-        print(f"[LIVE SKIP] {ticker}: live gain {gain:.1f}% under {dynamic_hard_min_gain():.0f}% floor; source {source_gain:.1f}% ignored")
+    # v38.5: user wants ONLY +25% live movers.
+    # Do not waste profile/candle/news/SEC work on anything below the Telegram floor.
+    if gain < ALERT_HARD_MIN_GAIN:
+        print(f"[LIVE SKIP] {ticker}: live gain {gain:.1f}% below 25% hard floor; source {source_gain:.1f}% ignored")
         return None
 
     profile = get_profile(ticker)
@@ -5660,10 +5744,12 @@ def should_alert(result):
         return False
     result["moving_now_reason"] = now_reason
 
+    # v38.5: if it is a valid live mover NOW, do not block it just because
+    # it alerted before. Cooldown only changes the reason text; it does not suppress
+    # true current momentum. This matches the user's "what's moving now" rule.
     ok, reason = meaningful_change_since_alert(ticker, result)
     if not ok:
-        print(f"[COOLDOWN] {ticker}: {reason}")
-        return False
+        reason = f"moving now cooldown bypass ({reason})"
 
     print(f"[ALERT OK] {ticker}: LIVE MOVER — {reason}")
     LAST_ALERT[ticker] = {
@@ -5731,6 +5817,7 @@ def run_scanner():
             print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
 
             candidates = get_candidates()
+            candidates = prioritize_live_leaders(candidates)
             if LIVE_SPEED_MODE and len(candidates) > MAX_DEEP_SCAN_NAMES:
                 print(f"[SPEED] limiting deep scan {len(candidates)} -> {MAX_DEEP_SCAN_NAMES} names")
                 candidates = candidates[:MAX_DEEP_SCAN_NAMES]
@@ -5765,6 +5852,10 @@ def run_scanner():
                     try:
                         # Do not waste slow analysis on names already sent in the fast live pass.
                         if str(candidate.get("ticker", "")).upper().strip() in SENT_THIS_CYCLE:
+                            continue
+                        # v38.5: no slow deep-scan lane for source names below +25%.
+                        # Live quote can still override inside analyze_candidate for +25% source names.
+                        if safe_float(candidate.get("gain")) < ALERT_HARD_MIN_GAIN:
                             continue
                         result = analyze_candidate(candidate, regime)
                         if result:
