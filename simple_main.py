@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v38.1 — instant live-mover alerts first + strict 25% floor"
+BOOT_MARKER = "elite scanner v38.3 — moving-now alerts only + quote cooldowns"
 
 # ============================================================
 # ENV
@@ -119,10 +119,10 @@ FAST_LIVE_ALERTS = True
 FAST_ALERT_MIN_GAIN = 25.0
 FAST_ALERT_MIN_VOLUME = 500_000
 FAST_ALERT_MAX_PER_CYCLE = 8
-MOVING_NOW_MIN_VOLUME_RATIO = 0.95
-MOVING_NOW_MIN_LAST3_CHANGE = 0.75
-MOVING_NOW_MAX_OFF_HIGH = 7.0
-MOVING_NOW_MIN_CANDLES = 6
+MOVING_NOW_MIN_VOLUME_RATIO = 2.00   # must be surging now, not merely up
+MOVING_NOW_MIN_LAST3_CHANGE = 0.50
+MOVING_NOW_MAX_OFF_HIGH = 8.0
+MOVING_NOW_MIN_CANDLES = 5
 
 
 # Render/free-tier protection:
@@ -157,6 +157,8 @@ YAHOO_CANDLE_BLOCK_UNTIL = 0
 YAHOO_CANDLE_429_COUNT = 0
 YAHOO_GAINERS_BLOCK_UNTIL = 0
 YAHOO_GAINERS_429_COUNT = 0
+YAHOO_QUOTE_BLOCK_UNTIL = 0
+TWELVEDATA_QUOTE_BLOCK_UNTIL = 0
 MARKET_REGIME_CACHE = {}
 DAILY_CONTEXT_CACHE = {}
 FRESHNESS_STATE = {}
@@ -1601,9 +1603,21 @@ def get_finnhub_quote_raw(ticker):
 
 
 def get_yahoo_quote_raw(ticker):
+    global YAHOO_QUOTE_BLOCK_UNTIL
+
+    if time.time() < YAHOO_QUOTE_BLOCK_UNTIL:
+        left = int(YAHOO_QUOTE_BLOCK_UNTIL - time.time())
+        return normalize_quote(source="Yahoo", reason=f"Yahoo quote cooldown {left}s")
+
     try:
         url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        r = http_get(url, params={"symbols": ticker, "formatted": "false"}, timeout=5)
+        r = http_get(url, params={"symbols": ticker, "formatted": "false"}, timeout=3)
+        text = getattr(r, "text", "") or ""
+        if getattr(r, "status_code", 0) == 429 or "Too Many Requests" in text:
+            YAHOO_QUOTE_BLOCK_UNTIL = time.time() + 300
+            print(f"[YAHOO QUOTE 429] {ticker}: blocking Yahoo quotes for 300s")
+            return normalize_quote(source="Yahoo", reason="quote rate limited")
+
         data = safe_json_response(r, f"QUOTE Yahoo {ticker}")
         if not data:
             return normalize_quote(source="Yahoo", reason="empty/non-json response")
@@ -1635,17 +1649,26 @@ def get_yahoo_quote_raw(ticker):
         print(f"[QUOTE ERROR] {ticker}: Yahoo {e}")
         return normalize_quote(source="Yahoo", reason=str(e))
 
-
 def get_twelvedata_quote_raw(ticker):
+    global TWELVEDATA_QUOTE_BLOCK_UNTIL
+
+    if time.time() < TWELVEDATA_QUOTE_BLOCK_UNTIL:
+        left = int(TWELVEDATA_QUOTE_BLOCK_UNTIL - time.time())
+        return normalize_quote(source="TwelveData", reason=f"TwelveData cooldown {left}s")
+
     if not TWELVEDATA_API_KEY:
         return normalize_quote(source="TwelveData", reason="missing TWELVEDATA_API_KEY")
 
     try:
         url = "https://api.twelvedata.com/quote"
-        r = http_get(url, params={"symbol": ticker, "apikey": TWELVEDATA_API_KEY}, timeout=5)
+        r = http_get(url, params={"symbol": ticker, "apikey": TWELVEDATA_API_KEY}, timeout=3)
         data = safe_json_response(r, f"QUOTE TwelveData {ticker}")
         if not data or data.get("status") == "error":
-            return normalize_quote(source="TwelveData", reason=clean_text(data.get("message", "error")) if isinstance(data, dict) else "empty response")
+            msg = clean_text(data.get("message", "error")) if isinstance(data, dict) else "empty response"
+            if "run out of api credits" in msg.lower() or "current minute" in msg.lower() or "limit" in msg.lower():
+                TWELVEDATA_QUOTE_BLOCK_UNTIL = time.time() + 70
+                print(f"[TWELVEDATA LIMIT] {ticker}: blocking TwelveData quotes for 70s")
+            return normalize_quote(source="TwelveData", reason=msg)
 
         price = data.get("close") or data.get("price")
         percent_change = data.get("percent_change") or data.get("percentChange") or 0
@@ -1654,7 +1677,6 @@ def get_twelvedata_quote_raw(ticker):
     except Exception as e:
         print(f"[QUOTE ERROR] {ticker}: TwelveData {e}")
         return normalize_quote(source="TwelveData", reason=str(e))
-
 
 def get_live_quote(ticker):
     """
@@ -5522,13 +5544,15 @@ def sort_results(results):
 
 
 def is_moving_now(structure, chart_timing, gain, volume):
-    """v38.2 Telegram gate: not just up — must be moving right now.
+    """v38.3 Telegram gate: alert what is moving NOW, not just what is up.
 
-    Requirements:
-    - still no alerts under +25%
-    - must be above VWAP or actively reclaiming VWAP
-    - must have a live trigger: fresh HOD, VWAP reclaim, second-leg push, or strong recent candle push
-    - must have active/expanding recent 1m volume
+    Hard rules:
+    - never alert below +25%
+    - real volume confirmation
+    - at least one live trigger: fresh HOD, VWAP reclaim, second-leg push, recent price push,
+      or a 2x+ one-minute volume surge
+
+    VWAP helps, but it is not a hard block anymore when volume is exploding now.
     """
     structure = structure or {}
     chart_timing = chart_timing or {}
@@ -5540,52 +5564,49 @@ def is_moving_now(structure, chart_timing, gain, volume):
     if volume < FAST_ALERT_MIN_VOLUME:
         return False, f"volume {fmt_big_num(volume)} below {fmt_big_num(FAST_ALERT_MIN_VOLUME)}"
 
-    above_vwap = bool(get_struct(structure, "above_vwap", False))
-    vwap_reclaim = bool(chart_timing.get("vwap_reclaim"))
-    if not (above_vwap or vwap_reclaim):
-        return False, "not above/reclaiming VWAP"
-
     off_high = safe_float(chart_timing.get("off_high_pct"), 999)
     if off_high > MOVING_NOW_MAX_OFF_HIGH:
         return False, f"{off_high:.1f}% off HOD"
 
     vol_ratio = safe_float(chart_timing.get("volume_ratio"))
     vol_ratio_10 = safe_float(chart_timing.get("volume_ratio_10"))
+    best_vol_ratio = max(vol_ratio, vol_ratio_10)
     last3 = safe_float(chart_timing.get("last3_change_pct"))
     last5 = safe_float(chart_timing.get("last5_change_pct"))
 
-    live_trigger = bool(
-        chart_timing.get("fresh_breakout")
-        or chart_timing.get("vwap_reclaim")
-        or chart_timing.get("second_leg_ready")
-        or chart_timing.get("recent_new_high")
-        or (last3 >= MOVING_NOW_MIN_LAST3_CHANGE and off_high <= MOVING_NOW_MAX_OFF_HIGH)
-        or (last5 >= 1.25 and off_high <= MOVING_NOW_MAX_OFF_HIGH)
-    )
-    if not live_trigger:
-        return False, f"no fresh HOD/reclaim/recent push (last3 {last3:.1f}%)"
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    fresh_hod = bool(chart_timing.get("fresh_breakout") or chart_timing.get("recent_new_high"))
+    vwap_reclaim = bool(chart_timing.get("vwap_reclaim"))
+    second_leg = bool(chart_timing.get("second_leg_ready"))
+    recent_push = bool(last3 >= MOVING_NOW_MIN_LAST3_CHANGE or last5 >= 1.0)
+    volume_surge = bool(best_vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO)
 
-    active_volume = bool(
-        chart_timing.get("active_volume")
-        or chart_timing.get("expanding_volume")
-        or vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO
-        or vol_ratio_10 >= 1.10
-    )
-    if not active_volume:
-        return False, f"recent volume not active ({vol_ratio:.2f}x / {vol_ratio_10:.2f}x)"
+    live_trigger = bool(fresh_hod or vwap_reclaim or second_leg or recent_push or volume_surge)
+    if not live_trigger:
+        return False, f"no live trigger (last3 {last3:.1f}%, vol {best_vol_ratio:.1f}x)"
+
+    # If it is not above/reclaiming VWAP, require a stronger proof that it is moving right now.
+    if not (above_vwap or vwap_reclaim) and not (fresh_hod and volume_surge):
+        return False, "not above/reclaiming VWAP and no fresh HOD+volume surge"
+
+    # Avoid low-energy names that are up big but frozen.
+    if not (volume_surge or fresh_hod or recent_push or second_leg):
+        return False, f"recent volume not active ({best_vol_ratio:.1f}x)"
 
     facts = []
-    if chart_timing.get("fresh_breakout") or chart_timing.get("recent_new_high"):
+    if fresh_hod:
         facts.append("fresh HOD")
-    if chart_timing.get("vwap_reclaim"):
+    if vwap_reclaim:
         facts.append("VWAP reclaim")
-    if chart_timing.get("second_leg_ready"):
+    if second_leg:
         facts.append("second-leg push")
-    if last3 >= MOVING_NOW_MIN_LAST3_CHANGE:
+    if recent_push:
         facts.append(f"last3 +{last3:.1f}%")
-    facts.append(f"vol {max(vol_ratio, vol_ratio_10):.1f}x")
+    if volume_surge:
+        facts.append(f"vol {best_vol_ratio:.1f}x")
+    if above_vwap and len(facts) < 4:
+        facts.append("above VWAP")
     return True, " | ".join(dedupe(facts)[:4])
-
 
 def live_facts_line(r):
     chart = r.get("chart_timing") or {}
@@ -5737,14 +5758,20 @@ def run_scanner():
                         continue
 
             results = []
-            for candidate in candidates:
-                try:
-                    result = analyze_candidate(candidate, regime)
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    print(f"[CANDIDATE ERROR] {candidate.get('ticker')}: {e}")
-                    continue
+            if sent >= MAX_ALERTS_PER_CYCLE:
+                print("[SPEED] fast alerts filled cycle — skipping slow news/SEC/daily analysis")
+            else:
+                for candidate in candidates:
+                    try:
+                        # Do not waste slow analysis on names already sent in the fast live pass.
+                        if str(candidate.get("ticker", "")).upper().strip() in SENT_THIS_CYCLE:
+                            continue
+                        result = analyze_candidate(candidate, regime)
+                        if result:
+                            results.append(result)
+                    except Exception as e:
+                        print(f"[CANDIDATE ERROR] {candidate.get('ticker')}: {e}")
+                        continue
 
             results = sort_results(results)
             print_top_ranked(results)
