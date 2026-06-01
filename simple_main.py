@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v37.10 — strict 25% alert floor + Yahoo cooldown + elite cooldown bypass"
+BOOT_MARKER = "elite scanner v38.1 — instant live-mover alerts first + strict 25% floor"
 
 # ============================================================
 # ENV
@@ -110,8 +110,20 @@ SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
 EARLY_OPEN_DRIVE_GAIN = 25.0          # v36.6: alerts require 25%+ gain, even open-drive
 MAX_GAINERS = 180                 # v36.8: wider fresh-mover pool so BRAI-style ignitions are not missed
-MAX_ALERTS_PER_CYCLE = 5
+MAX_ALERTS_PER_CYCLE = 8
 SCAN_SLEEP = 45
+
+# v38.2: fast alerts still happen early, but NOT just because a ticker is up.
+# Telegram needs proof of live movement right now from 1-minute candles.
+FAST_LIVE_ALERTS = True
+FAST_ALERT_MIN_GAIN = 25.0
+FAST_ALERT_MIN_VOLUME = 500_000
+FAST_ALERT_MAX_PER_CYCLE = 8
+MOVING_NOW_MIN_VOLUME_RATIO = 0.95
+MOVING_NOW_MIN_LAST3_CHANGE = 0.75
+MOVING_NOW_MAX_OFF_HIGH = 7.0
+MOVING_NOW_MIN_CANDLES = 6
+
 
 # Render/free-tier protection:
 # When the market is closed, do not keep polling APIs every 60-300 seconds.
@@ -5399,6 +5411,91 @@ def analyze_candidate(candidate, regime):
     }
 
 
+
+def build_fast_live_result(candidate, regime=None):
+    """v38.1 first-stage live mover result.
+
+    This is intentionally simple and fast: quote -> optional profile -> alert.
+    It does NOT wait on candles, news, SEC, or daily context. Those can be
+    printed later by the normal deep scan, but Telegram gets the live mover now.
+    """
+    ticker = str((candidate or {}).get("ticker", "")).upper().strip()
+    if not ticker or is_bad_ticker(ticker):
+        return None
+
+    quote = get_live_quote(ticker)
+    if not quote_is_valid(quote, ticker):
+        return None
+
+    price = safe_float(quote.get("price"))
+    gain = safe_float(quote.get("gain"))
+    source_gain = safe_float((candidate or {}).get("gain"))
+
+    # Trust live quote for the actual alert floor. Source gain is shown only in logs.
+    if gain < FAST_ALERT_MIN_GAIN:
+        print(f"[FAST LIVE SKIP] {ticker}: live gain {gain:.1f}% below 25% floor; source {source_gain:.1f}% ignored")
+        return None
+
+    volume = max(safe_int(quote.get("volume")), safe_int((candidate or {}).get("volume")))
+    if volume < FAST_ALERT_MIN_VOLUME:
+        print(f"[FAST LIVE SKIP] {ticker}: volume {fmt_big_num(volume)} below fast alert floor {fmt_big_num(FAST_ALERT_MIN_VOLUME)}")
+        return None
+
+    if price < MIN_PRICE or price > MAX_PRICE:
+        print(f"[FAST LIVE SKIP] {ticker}: price {fmt_money(price)} outside {fmt_money(MIN_PRICE)}-${MAX_PRICE:.0f}")
+        return None
+
+    # v38.2: do a quick 1-minute candle confirmation before Telegram.
+    # This removes alerts that are merely up on the day but not moving right now.
+    candles = get_candles(ticker)
+    if not valid_candle_list(candles, min_count=MOVING_NOW_MIN_CANDLES):
+        print(f"[FAST LIVE SKIP] {ticker}: no reliable 1m candles for moving-now confirmation")
+        return None
+
+    structure = get_structure(candles, ticker)
+    chart_timing = analyze_chart_timing(candles, structure, price)
+
+    ok_now, now_reason = is_moving_now(structure, chart_timing, gain, volume)
+    if not ok_now:
+        print(f"[FAST LIVE SKIP] {ticker}: not moving now — {now_reason}")
+        return None
+
+    # Float is useful in the Telegram message, but only fetch it after the live-move gate passes.
+    float_shares = safe_int((candidate or {}).get("float"))
+    market_cap = safe_int((candidate or {}).get("market_cap"))
+    if not float_shares or not market_cap:
+        profile = get_profile(ticker)
+        float_shares = float_shares or safe_int(profile.get("float"))
+        market_cap = market_cap or safe_int(profile.get("market_cap"))
+
+    result = {
+        "ticker": ticker,
+        "price": price,
+        "gain": gain,
+        "volume": volume,
+        "float": float_shares,
+        "market_cap": market_cap,
+        "score": gain / 10.0,
+        "bias": "LIVE",
+        "trade_tier": "LIVE",
+        "phase": "LIVE",
+        "source": (candidate or {}).get("source") or quote.get("source"),
+        "news": {"label": "", "headline": "", "score": 0},
+        "news_score": 0,
+        "sec": {},
+        "structure": structure,
+        "chart_timing": chart_timing,
+        "moving_now_reason": now_reason,
+        "fast_live": True,
+        "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
+    }
+    print(
+        f"[FAST LIVE RANK] {ticker} +{gain:.1f}% {fmt_money(price)} "
+        f"vol={fmt_big_num(volume)} float={fmt_big_num(float_shares) if float_shares else 'unknown'} "
+        f"now={now_reason} src={quote.get('source')}"
+    )
+    return result
+
 def live_momentum_sort_key(r):
     """Pure live feed sorting: what is moving now, not prediction labels."""
     gain = safe_float(r.get("gain", 0))
@@ -5422,6 +5519,72 @@ def live_momentum_sort_key(r):
 def sort_results(results):
     # v38: pure live momentum feed. Biggest real live movers first.
     return sorted(results, key=live_momentum_sort_key, reverse=True)
+
+
+def is_moving_now(structure, chart_timing, gain, volume):
+    """v38.2 Telegram gate: not just up — must be moving right now.
+
+    Requirements:
+    - still no alerts under +25%
+    - must be above VWAP or actively reclaiming VWAP
+    - must have a live trigger: fresh HOD, VWAP reclaim, second-leg push, or strong recent candle push
+    - must have active/expanding recent 1m volume
+    """
+    structure = structure or {}
+    chart_timing = chart_timing or {}
+    gain = safe_float(gain)
+    volume = safe_int(volume)
+
+    if gain < ALERT_HARD_MIN_GAIN:
+        return False, f"gain {gain:.1f}% below 25% floor"
+    if volume < FAST_ALERT_MIN_VOLUME:
+        return False, f"volume {fmt_big_num(volume)} below {fmt_big_num(FAST_ALERT_MIN_VOLUME)}"
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    vwap_reclaim = bool(chart_timing.get("vwap_reclaim"))
+    if not (above_vwap or vwap_reclaim):
+        return False, "not above/reclaiming VWAP"
+
+    off_high = safe_float(chart_timing.get("off_high_pct"), 999)
+    if off_high > MOVING_NOW_MAX_OFF_HIGH:
+        return False, f"{off_high:.1f}% off HOD"
+
+    vol_ratio = safe_float(chart_timing.get("volume_ratio"))
+    vol_ratio_10 = safe_float(chart_timing.get("volume_ratio_10"))
+    last3 = safe_float(chart_timing.get("last3_change_pct"))
+    last5 = safe_float(chart_timing.get("last5_change_pct"))
+
+    live_trigger = bool(
+        chart_timing.get("fresh_breakout")
+        or chart_timing.get("vwap_reclaim")
+        or chart_timing.get("second_leg_ready")
+        or chart_timing.get("recent_new_high")
+        or (last3 >= MOVING_NOW_MIN_LAST3_CHANGE and off_high <= MOVING_NOW_MAX_OFF_HIGH)
+        or (last5 >= 1.25 and off_high <= MOVING_NOW_MAX_OFF_HIGH)
+    )
+    if not live_trigger:
+        return False, f"no fresh HOD/reclaim/recent push (last3 {last3:.1f}%)"
+
+    active_volume = bool(
+        chart_timing.get("active_volume")
+        or chart_timing.get("expanding_volume")
+        or vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO
+        or vol_ratio_10 >= 1.10
+    )
+    if not active_volume:
+        return False, f"recent volume not active ({vol_ratio:.2f}x / {vol_ratio_10:.2f}x)"
+
+    facts = []
+    if chart_timing.get("fresh_breakout") or chart_timing.get("recent_new_high"):
+        facts.append("fresh HOD")
+    if chart_timing.get("vwap_reclaim"):
+        facts.append("VWAP reclaim")
+    if chart_timing.get("second_leg_ready"):
+        facts.append("second-leg push")
+    if last3 >= MOVING_NOW_MIN_LAST3_CHANGE:
+        facts.append(f"last3 +{last3:.1f}%")
+    facts.append(f"vol {max(vol_ratio, vol_ratio_10):.1f}x")
+    return True, " | ".join(dedupe(facts)[:4])
 
 
 def live_facts_line(r):
@@ -5470,6 +5633,12 @@ def should_alert(result):
         print(f"[BLOCK] {ticker}: live gain {gain:.1f}% below 25% alert floor")
         return False
 
+    ok_now, now_reason = is_moving_now(result.get("structure"), result.get("chart_timing"), gain, result.get("volume"))
+    if not ok_now:
+        print(f"[BLOCK] {ticker}: not moving now — {now_reason}")
+        return False
+    result["moving_now_reason"] = now_reason
+
     ok, reason = meaningful_change_since_alert(ticker, result)
     if not ok:
         print(f"[COOLDOWN] {ticker}: {reason}")
@@ -5508,7 +5677,7 @@ def build_alert(result):
         f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
     ]
 
-    facts = live_facts_line(result)
+    facts = result.get("moving_now_reason") or live_facts_line(result)
     if facts:
         lines.append(f"Now: {facts}")
 
@@ -5548,6 +5717,25 @@ def run_scanner():
 
             print(f"[REGIME] {regime['label']} — {regime['description']}")
 
+            sent = 0
+
+            # v38.1: fast first-stage alerts. This sends the live mover alert before
+            # slow candles/news/SEC/daily work can delay names like HKIT/TGHL.
+            if FAST_LIVE_ALERTS:
+                for candidate in candidates:
+                    if sent >= min(MAX_ALERTS_PER_CYCLE, FAST_ALERT_MAX_PER_CYCLE):
+                        break
+                    try:
+                        fast_result = build_fast_live_result(candidate, regime)
+                        if fast_result and should_alert(fast_result):
+                            msg = build_alert(fast_result)
+                            send_alert(msg)
+                            print(f"[FAST ALERT SENT] {fast_result['ticker']}")
+                            sent += 1
+                    except Exception as e:
+                        print(f"[FAST LIVE ERROR] {candidate.get('ticker')}: {e}")
+                        continue
+
             results = []
             for candidate in candidates:
                 try:
@@ -5561,7 +5749,6 @@ def run_scanner():
             results = sort_results(results)
             print_top_ranked(results)
 
-            sent = 0
             for result in results:
                 if sent >= MAX_ALERTS_PER_CYCLE:
                     break
