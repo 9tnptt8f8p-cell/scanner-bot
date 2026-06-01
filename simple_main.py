@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v38.6 — leader focus + anti-spam re-alert gate"
+BOOT_MARKER = "elite scanner v39.0 — LEADER HUNTER"
 
 # ============================================================
 # ENV
@@ -258,7 +258,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v38.6 leader focus + anti-spam", 200
+    return "scanner alive — v39.0 LEADER HUNTER", 200
 
 
 @app.route("/health")
@@ -2308,7 +2308,7 @@ def news_rank_from_score_quality(score, quality, category=""):
     if q in ["JUNK", "STALE"]:
         return "D", "Junk/stale news"
     if q == "NONE" or score <= 0:
-        return "D", "No confirmed catalyst"
+        return "D", "UNKNOWN CATALYST — INVESTIGATE"
     if score >= 9:
         return "A+", "Elite catalyst"
     if score >= 8:
@@ -2462,8 +2462,8 @@ def classify_news_raw(headline, ticker=None):
             "score": 0,
             "quality": "NONE",
             "category": "No News",
-            "label": "❌ NO CONFIRMED NEWS",
-            "explain": "No fresh catalyst found",
+            "label": "UNKNOWN CATALYST — INVESTIGATE",
+            "explain": "UNKNOWN CATALYST — INVESTIGATE",
             "headline": "",
         }
 
@@ -6011,6 +6011,416 @@ def run_scanner():
             print(f"[SCANNER ERROR] {e}")
             # If the scanner errors while the market is closed, do not hammer Render/logs.
             time.sleep(30 if market_is_active() else CLOSED_ERROR_SLEEP_SECONDS)
+
+
+# ============================================================
+# v39.0 LEADER HUNTER OVERRIDES
+# Focus: strongest live leaders only, Webull news fallback, cleaner alerts,
+# unknown catalyst handling, and stricter anti-spam.
+# ============================================================
+
+UNKNOWN_CATALYST_LABEL = "UNKNOWN CATALYST — INVESTIGATE"
+
+# Extra junk/news hygiene from live agenda.
+EXTRA_JUNK_HEADLINE_PHRASES = [
+    "gap-ups and gap-downs",
+    "gap ups and gap downs",
+    "stocks moving today",
+    "why shares are moving",
+    "why shares are trading",
+    "pre-market movers",
+    "premarket movers",
+    "most active stocks",
+    "biggest stock movers",
+]
+
+
+def is_major_market_leader(result):
+    """True market leader override: do not hide the top mover just because catalyst is unknown."""
+    result = result or {}
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    chart = result.get("chart_timing") or {}
+    structure = result.get("structure") or {}
+
+    fresh_hod = bool(chart.get("fresh_breakout") or chart.get("recent_new_high"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    volume_ratio = max(safe_float(chart.get("volume_ratio")), safe_float(chart.get("volume_ratio_10")))
+    off_high = safe_float(chart.get("off_high_pct"), 999)
+
+    return bool(
+        gain >= 50
+        and volume >= 1_000_000
+        and off_high <= MAJOR_LEADER_MAX_OFF_HIGH
+        and (fresh_hod or above_vwap or volume_ratio >= MOVING_NOW_MIN_VOLUME_RATIO)
+    )
+
+
+def is_junk_news_text_v39(headline, ticker=None):
+    raw = clean_text(headline)
+    if not raw:
+        return True
+    h = f" {raw.lower()} "
+    if any(p in h for p in EXTRA_JUNK_HEADLINE_PHRASES):
+        return True
+    return is_junk_news_text_base(raw, ticker)
+
+
+# Preserve original junk filter, then override with the v39 extras.
+is_junk_news_text_base = is_junk_news_text
+is_junk_news_text = is_junk_news_text_v39
+
+
+def fetch_webull_news_fallback(ticker):
+    """Best-effort Webull headline fallback.
+
+    Webull endpoints change often and may reject cloud IPs. This function is deliberately
+    safe: if Webull blocks/changes shape, it returns [] and the rest of the news stack continues.
+    """
+    ticker = str(ticker or "").upper().strip()
+    if not ticker:
+        return []
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,text/html,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://app.webull.com",
+        "Referer": "https://app.webull.com/",
+        "Cache-Control": "no-cache",
+    }
+
+    urls = [
+        ("https://www.webullapp.com/news", {"keyword": ticker, "hl": "en"}),
+        ("https://www.webull.com/newslist", {"keyword": ticker}),
+        ("https://www.webull.com/quote/nasdaq-" + ticker.lower(), None),
+        ("https://www.webull.com/quote/nyse-" + ticker.lower(), None),
+        ("https://www.webull.com/quote/amex-" + ticker.lower(), None),
+    ]
+
+    headlines = []
+    for url, params in urls:
+        try:
+            r = http_get(url, params=params, headers=headers, timeout=3)
+            if getattr(r, "status_code", 0) not in (200, 203):
+                continue
+            text = getattr(r, "text", "") or ""
+            if not text:
+                continue
+
+            # JSON-like responses: recursively pull title/headline fields.
+            data = None
+            try:
+                if text.lstrip().startswith(("{", "[")):
+                    data = r.json()
+            except Exception:
+                data = None
+
+            def walk(obj):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if str(k).lower() in {"title", "headline", "newsTitle", "summary"} and isinstance(v, str):
+                            yield v
+                        else:
+                            yield from walk(v)
+                elif isinstance(obj, list):
+                    for x in obj:
+                        yield from walk(x)
+
+            if data is not None:
+                for title in walk(data):
+                    title = clean_text(title)
+                    if 20 <= len(title) <= 240 and strict_ticker_in_text(ticker, title) and not is_junk_news_text(title, ticker):
+                        headlines.append(f"Webull: {title}")
+                continue
+
+            # HTML fallback: title/meta/script text extraction.
+            soup = BeautifulSoup(text, "html.parser")
+            for node in soup.find_all(["title", "h1", "h2", "h3"]):
+                title = clean_text(node.get_text(" "))
+                if 20 <= len(title) <= 240 and strict_ticker_in_text(ticker, title) and not is_junk_news_text(title, ticker):
+                    headlines.append(f"Webull: {title}")
+
+            # Script/meta snippets sometimes contain Webull news titles.
+            for m in re.findall(r'"(?:title|headline|newsTitle)"\s*:\s*"([^"]{20,240})"', text):
+                title = clean_text(m.encode("utf-8").decode("unicode_escape", errors="ignore"))
+                if strict_ticker_in_text(ticker, title) and not is_junk_news_text(title, ticker):
+                    headlines.append(f"Webull: {title}")
+        except Exception as e:
+            print(f"[WEBULL NEWS ERROR] {ticker}: {e}")
+            continue
+
+    out = dedupe(headlines)[:8]
+    if out:
+        print(f"[WEBULL NEWS] {ticker}: {len(out)} candidate headlines")
+    return out
+
+
+def classify_webull_catalyst(headline, ticker=None):
+    """Same classifier, but Webull headlines get the v39 catalyst buckets."""
+    return classify_news(headline, ticker)
+
+
+def get_best_news_v39(ticker, priority=False):
+    """v39 news stack: PR/Globe/Yahoo/Finnhub + Webull fallback.
+
+    Unknown news is not bearish for major leaders; alert text will show
+    UNKNOWN CATALYST — INVESTIGATE instead of 'No confirmed catalyst'.
+    """
+    global NEWS_CALLS_THIS_CYCLE
+
+    ticker = str(ticker or "").upper().strip()
+    cached = cached_get(NEWS_CACHE, ticker)
+    if cached and not (priority and str(cached.get("quality", "")).upper() in {"NONE", "JUNK", "STALE"}):
+        return cached
+
+    normal_cap_hit = LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_NEWS_NAMES_PER_CYCLE
+    priority_cap_hit = LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_PRIORITY_NEWS_NAMES_PER_CYCLE
+    if normal_cap_hit and (not priority or priority_cap_hit):
+        news = classify_news("", ticker)
+        news["rank_meaning"] = UNKNOWN_CATALYST_LABEL
+        news["explain"] = "News lookup skipped in speed mode — investigate catalyst manually"
+        print(f"[NEWS SKIP] {ticker}: speed cap")
+        return cached_set(NEWS_CACHE, ticker, news)
+
+    if normal_cap_hit and priority:
+        print(f"[NEWS PRIORITY] {ticker}: bypassing normal speed cap")
+
+    NEWS_CALLS_THIS_CYCLE += 1
+    all_headlines = []
+
+    # Publisher/PR first. Webull is a late fallback because it can block cloud requests.
+    primary_sources = [scrape_prnewswire, scrape_globenewswire, scrape_yahoo_news]
+    if BENZINGA_API_KEY:
+        primary_sources.append(fetch_benzinga_news)
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(primary_sources))) as executor:
+            futures = {executor.submit(fn, ticker): fn.__name__ for fn in primary_sources}
+            for fut in as_completed(futures, timeout=NEWS_PARALLEL_TIMEOUT):
+                try:
+                    all_headlines.extend(fut.result(timeout=0.1) or [])
+                except Exception as e:
+                    print(f"[NEWS ERROR] {ticker} {futures[fut]}: {e}")
+    except Exception as e:
+        print(f"[NEWS TIMEBOX] {ticker}: primary news timebox hit ({e})")
+
+    ranked = rank_news_candidates(all_headlines, ticker)
+    if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
+        best = ranked[0]
+        print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 PRIMARY)")
+        return cached_set(NEWS_CACHE, ticker, best)
+
+    # Finnhub before Webull. Webull is the emergency headline fallback.
+    try:
+        fh = fetch_finnhub_company_news(ticker)
+        if fh:
+            all_headlines.extend(fh)
+            ranked = rank_news_candidates(all_headlines, ticker)
+    except Exception as e:
+        print(f"[NEWS ERROR] {ticker} Finnhub: {e}")
+
+    if not ranked or safe_float(ranked[0].get("score", 0)) < 7:
+        try:
+            wb = fetch_webull_news_fallback(ticker)
+            if wb:
+                all_headlines.extend(wb)
+                ranked = rank_news_candidates(all_headlines, ticker)
+        except Exception as e:
+            print(f"[WEBULL NEWS ERROR] {ticker}: {e}")
+
+    if not ranked:
+        news = classify_news("", ticker)
+        news["rank_meaning"] = UNKNOWN_CATALYST_LABEL
+        news["explain"] = UNKNOWN_CATALYST_LABEL
+        print(f"[NEWS] {ticker}: {UNKNOWN_CATALYST_LABEL}")
+        return cached_set(NEWS_CACHE, ticker, news)
+
+    best = ranked[0]
+    if str(best.get("quality", "")).upper() in {"NONE", "JUNK", "STALE"} or safe_float(best.get("score")) <= 0:
+        best["rank_meaning"] = UNKNOWN_CATALYST_LABEL
+        best["explain"] = UNKNOWN_CATALYST_LABEL
+    print(f"[NEWS] {ticker}: {best.get('headline','')[:120] or UNKNOWN_CATALYST_LABEL} ({best.get('quality')} {best.get('score')}/10)")
+    return cached_set(NEWS_CACHE, ticker, best)
+
+
+# Override original news stack.
+get_best_news = get_best_news_v39
+
+
+def compact_news_line(news):
+    news = news or {}
+    rank = news.get("rank") or news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))[0]
+    meaning = news.get("rank_meaning") or news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))[1]
+    category = news.get("category") or "Catalyst"
+    quality = str(news.get("quality", "")).upper()
+    if quality in {"NONE", "JUNK", "STALE"} or meaning == UNKNOWN_CATALYST_LABEL:
+        return f"NEWS: {UNKNOWN_CATALYST_LABEL}"
+    if rank in ["A+", "A", "B"]:
+        return f"NEWS: {rank} — {category}"
+    if rank == "C":
+        return f"NEWS: C — {meaning}"
+    return f"NEWS: {rank} — {meaning}"
+
+
+def prioritize_live_leaders(candidates):
+    """v39: spend live quote/candle/news calls on the biggest leaders first."""
+    leaders = []
+    backfill = []
+    skipped_under = 0
+
+    for item in candidates or []:
+        gain = safe_float(item.get("gain"))
+        volume = safe_int(item.get("volume"))
+        if gain < LEADER_FOCUS_MIN_GAIN:
+            skipped_under += 1
+            continue
+        if volume >= LEADER_FOCUS_MIN_VOLUME or gain >= 50:
+            leaders.append(item)
+        else:
+            backfill.append(item)
+
+    leaders.sort(key=candidate_leader_focus_score, reverse=True)
+    backfill.sort(key=candidate_leader_focus_score, reverse=True)
+    focused = leaders[:LEADER_FOCUS_MAX_POOL] + backfill[:LEADER_FOCUS_BACKFILL_POOL]
+
+    print(
+        f"[v39 LEADER HUNTER] leaders={len(leaders)} backfill={len(backfill)} "
+        f"skipped_under25={skipped_under} -> processing {len(focused)}"
+    )
+    if focused:
+        print("[v39 TOP LEADERS] " + " | ".join(
+            f"{x.get('ticker')} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
+            for x in focused[:15]
+        ))
+    return focused
+
+
+def meaningful_alert_gate(result):
+    """v39: alert only if it is a live leader with clear action evidence."""
+    gain = safe_float((result or {}).get("gain"))
+    volume = safe_int((result or {}).get("volume"))
+    quality, reasons = alert_quality_score(result)
+    major_leader = is_major_market_leader(result)
+    floor = ALERT_MIN_QUALITY_MAJOR_LEADER if major_leader else ALERT_MIN_QUALITY
+
+    if major_leader and "market leader" not in [r.lower() for r in reasons]:
+        quality += 1
+        reasons.append("market leader")
+
+    if quality < floor:
+        reason_txt = ", ".join(reasons[:3]) if reasons else "no strong live reason"
+        return False, f"quality {quality}/{floor} too weak ({reason_txt})", quality, reasons
+
+    hard_reason = any(
+        r.startswith("fresh HOD")
+        or r.startswith("volume")
+        or r.startswith("vol ")
+        or r.startswith("last3")
+        or r.startswith("VWAP reclaim")
+        or r.startswith("second-leg")
+        or r == "market leader"
+        for r in reasons
+    )
+    if not hard_reason:
+        return False, f"quality {quality}/{floor} but no hard live trigger", quality, reasons
+
+    return True, " + ".join(reasons[:4]), quality, reasons
+
+
+def should_alert(result):
+    """v39 LEADER HUNTER alert rule.
+
+    No alerts below +25%. Above +25%, send only meaningful live leaders.
+    Unknown catalyst is allowed for major leaders, but spam repeats are blocked.
+    """
+    ticker = result["ticker"]
+    gain = safe_float(result.get("gain", 0))
+
+    if ticker in SENT_THIS_CYCLE:
+        print(f"[NO ALERT] {ticker}: already sent this cycle")
+        return False
+
+    if gain < ALERT_HARD_MIN_GAIN:
+        print(f"[BLOCK] {ticker}: live gain {gain:.1f}% below 25% alert floor")
+        return False
+
+    ok_now, now_reason = is_moving_now(result.get("structure"), result.get("chart_timing"), gain, result.get("volume"))
+    major_leader = is_major_market_leader(result)
+    if not ok_now and not major_leader:
+        print(f"[BLOCK] {ticker}: not moving now — {now_reason}")
+        return False
+    if not ok_now and major_leader:
+        now_reason = f"market leader override — {now_reason}"
+    result["moving_now_reason"] = now_reason
+    result["market_leader_override"] = major_leader
+
+    ok_quality, quality_reason, quality_score, quality_reasons = meaningful_alert_gate(result)
+    result["alert_quality"] = quality_score
+    result["alert_reasons"] = quality_reasons
+    if not ok_quality:
+        print(f"[NO ALERT] {ticker}: {quality_reason}")
+        return False
+
+    ok, reason = meaningful_change_since_alert(ticker, result)
+    if not ok:
+        print(f"[NO ALERT] {ticker}: {reason}")
+        return False
+
+    print(f"[v39 ALERT OK] {ticker}: LEADER HUNTER — Q{result.get('alert_quality', 0)}/10 {result.get('moving_now_reason', reason)} — {reason}")
+    LAST_ALERT[ticker] = {
+        "time": time.time(),
+        "price": result["price"],
+        "score": result.get("score", 0),
+        "gain": safe_float(result.get("gain")),
+        "bias": "LEADER",
+        "day_high": safe_float((result.get("chart_timing") or {}).get("day_high")),
+        "chart_label": "v39 LEADER HUNTER",
+    }
+    SENT_THIS_CYCLE.add(ticker)
+    return True
+
+
+def build_alert(result):
+    """v39 clean alert: no runner/avoid/watchlist conflict language."""
+    result = normalize_alert_fields(result)
+    news = result.get("news") or {}
+    news_line = compact_news_line(news)
+
+    float_text = "unknown"
+    if result.get("float"):
+        float_text = fmt_big_num(result.get("float"))
+
+    quality = safe_int(result.get("alert_quality"))
+    reasons = result.get("alert_reasons") or []
+    reason_text = " + ".join(reasons[:4]) if reasons else (result.get("moving_now_reason") or live_facts_line(result))
+
+    title = "🔥 LEADER — " + result["ticker"]
+    if result.get("market_leader_override"):
+        title = "🚨 MARKET LEADER — " + result["ticker"]
+
+    lines = [
+        title,
+        "",
+        f"{fmt_money(result['price'])} | +{result['gain']:.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+    ]
+    if quality:
+        lines.append(f"Quality: {quality}/10")
+    if reason_text:
+        lines.append(f"Why: {reason_text}")
+    if news_line:
+        lines.extend(["", news_line])
+
+    sec_short = compact_dilution_label(result.get("sec"))
+    if sec_short:
+        lines.append(f"Filing: {sec_short}")
+
+    return "\n".join(lines)
+
 
 
 if __name__ == "__main__":
