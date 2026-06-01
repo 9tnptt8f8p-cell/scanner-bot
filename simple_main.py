@@ -130,6 +130,13 @@ MOVING_NOW_MIN_LAST3_CHANGE = 0.50
 MOVING_NOW_MAX_OFF_HIGH = 8.0
 MOVING_NOW_MIN_CANDLES = 5
 
+# v38.7 meaningful alerts: Telegram needs a clear reason, not just live gain.
+ALERT_MIN_QUALITY = 5
+ALERT_MIN_QUALITY_MAJOR_LEADER = 4
+ALERT_STRONG_VOLUME_RATIO = 3.0
+ALERT_STRONG_LAST3_CHANGE = 2.0
+ALERT_LOW_FLOAT_BONUS_SHARES = 10_000_000
+
 # v38.6 anti-spam: leaders stay visible in logs, but Telegram repeats need a real expansion.
 LIVE_RE_ALERT_MIN_SECONDS = 600
 LIVE_RE_ALERT_PRICE_PUSH = 1.08
@@ -5733,6 +5740,102 @@ def print_top_ranked(results):
     print(f"[LIVE FEED] Top movers: {top}")
 
 
+
+def alert_quality_score(result):
+    """v38.7: score why this alert matters now.
+
+    This is separate from ranking. A ticker can stay visible in logs as a leader,
+    but Telegram only fires when it has enough live reasons.
+    """
+    result = result or {}
+    chart = result.get("chart_timing") or {}
+    structure = result.get("structure") or {}
+    news = result.get("news") or {}
+
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    float_shares = safe_int(result.get("float"))
+    vol_ratio = max(
+        safe_float(chart.get("volume_ratio")),
+        safe_float(chart.get("volume_ratio_10")),
+    )
+    last3 = safe_float(chart.get("last3_change_pct"))
+    last5 = safe_float(chart.get("last5_change_pct"))
+
+    fresh_hod = bool(chart.get("fresh_breakout") or chart.get("recent_new_high"))
+    vwap_reclaim = bool(chart.get("vwap_reclaim"))
+    second_leg = bool(chart.get("second_leg_ready"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    low_float = bool(float_shares and float_shares <= ALERT_LOW_FLOAT_BONUS_SHARES)
+    strong_news = safe_float(news.get("score")) >= 8 or str(news.get("quality", "")).upper() == "STRONG"
+    major_leader = bool(gain >= MAJOR_LEADER_GAIN and volume >= MAJOR_LEADER_VOLUME)
+
+    score = 0
+    reasons = []
+
+    if fresh_hod:
+        score += 3
+        reasons.append("fresh HOD")
+    if vol_ratio >= ALERT_STRONG_VOLUME_RATIO:
+        score += 2
+        reasons.append(f"volume surge {vol_ratio:.1f}x")
+    elif vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO:
+        score += 1
+        reasons.append(f"volume {vol_ratio:.1f}x")
+    if last3 >= ALERT_STRONG_LAST3_CHANGE:
+        score += 2
+        reasons.append(f"last3 +{last3:.1f}%")
+    elif last3 >= MOVING_NOW_MIN_LAST3_CHANGE or last5 >= 1.0:
+        score += 1
+        reasons.append(f"price push +{max(last3, last5):.1f}%")
+    if vwap_reclaim:
+        score += 2
+        reasons.append("VWAP reclaim")
+    elif above_vwap:
+        score += 1
+        reasons.append("above VWAP")
+    if second_leg:
+        score += 2
+        reasons.append("second-leg push")
+    if low_float:
+        score += 1
+        reasons.append(f"low float {fmt_big_num(float_shares)}")
+    if strong_news:
+        score += 1
+        reasons.append("strong news")
+    if major_leader and (vol_ratio >= MOVING_NOW_MIN_VOLUME_RATIO or above_vwap):
+        score += 1
+        reasons.append("major leader")
+
+    return score, dedupe(reasons)
+
+
+def meaningful_alert_gate(result):
+    """Require every Telegram alert to have enough live-quality reasons."""
+    gain = safe_float((result or {}).get("gain"))
+    volume = safe_int((result or {}).get("volume"))
+    quality, reasons = alert_quality_score(result)
+    major_leader = bool(gain >= MAJOR_LEADER_GAIN and volume >= MAJOR_LEADER_VOLUME)
+    floor = ALERT_MIN_QUALITY_MAJOR_LEADER if major_leader else ALERT_MIN_QUALITY
+
+    if quality < floor:
+        reason_txt = ", ".join(reasons[:3]) if reasons else "no strong live reason"
+        return False, f"quality {quality}/{floor} too weak ({reason_txt})", quality, reasons
+
+    # Avoid vague alerts: require at least one hard action trigger.
+    hard_reason = any(
+        r.startswith("fresh HOD")
+        or r.startswith("volume")
+        or r.startswith("last3")
+        or r.startswith("VWAP reclaim")
+        or r.startswith("second-leg")
+        for r in reasons
+    )
+    if not hard_reason:
+        return False, f"quality {quality}/{floor} but no hard live trigger", quality, reasons
+
+    return True, " + ".join(reasons[:4]), quality, reasons
+
 def should_alert(result):
     """v38 pure live data alert rule. No runner/avoid/building prediction gates.
 
@@ -5756,13 +5859,20 @@ def should_alert(result):
         return False
     result["moving_now_reason"] = now_reason
 
+    ok_quality, quality_reason, quality_score, quality_reasons = meaningful_alert_gate(result)
+    result["alert_quality"] = quality_score
+    result["alert_reasons"] = quality_reasons
+    if not ok_quality:
+        print(f"[NO ALERT] {ticker}: {quality_reason}")
+        return False
+
     # v38.6: first live alert sends, repeats need real expansion.
     ok, reason = meaningful_change_since_alert(ticker, result)
     if not ok:
         print(f"[NO ALERT] {ticker}: {reason}")
         return False
 
-    print(f"[ALERT OK] {ticker}: LIVE MOVER — {reason}")
+    print(f"[ALERT OK] {ticker}: LIVE MOVER — Q{result.get('alert_quality', 0)}/10 {result.get('moving_now_reason', reason)} — {reason}")
     LAST_ALERT[ticker] = {
         "time": time.time(),
         "price": result["price"],
@@ -5789,16 +5899,21 @@ def build_alert(result):
     if result.get("float"):
         float_text = fmt_big_num(result.get("float"))
 
+    quality = safe_int(result.get("alert_quality"))
+    reasons = result.get("alert_reasons") or []
+    reason_text = " + ".join(reasons[:4]) if reasons else (result.get("moving_now_reason") or live_facts_line(result))
+
     lines = [
-        f"🔥 LIVE MOVER — {result['ticker']}",
+        f"🔥 MEANINGFUL LIVE PUSH — {result['ticker']}",
         "",
         f"{fmt_money(result['price'])} | +{result['gain']:.1f}%",
         f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
     ]
+    if quality:
+        lines.append(f"Quality: {quality}/10")
 
-    facts = result.get("moving_now_reason") or live_facts_line(result)
-    if facts:
-        lines.append(f"Now: {facts}")
+    if reason_text:
+        lines.append(f"Why: {reason_text}")
 
     if news_line:
         lines.extend(["", news_line])
