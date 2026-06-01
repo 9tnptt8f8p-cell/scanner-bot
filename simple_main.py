@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v39.0 — LEADER HUNTER"
+BOOT_MARKER = "elite scanner v39.2 — LEADER HUNTER HOTFIX"
 
 # ============================================================
 # ENV
@@ -181,6 +181,8 @@ YAHOO_GAINERS_BLOCK_UNTIL = 0
 YAHOO_GAINERS_429_COUNT = 0
 YAHOO_QUOTE_BLOCK_UNTIL = 0
 TWELVEDATA_QUOTE_BLOCK_UNTIL = 0
+WEBULL_FAIL_BLOCK_UNTIL = 0
+WEBULL_FAIL_COOLDOWN = 600
 MARKET_REGIME_CACHE = {}
 DAILY_CONTEXT_CACHE = {}
 FRESHNESS_STATE = {}
@@ -1244,7 +1246,7 @@ def get_tradingview_gainers():
 
 def get_webull_gainers():
     """
-    v36.11 stable Webull discovery source.
+    v39.2: stable Webull discovery source with 417 cooldown.
 
     Webull is optional discovery only:
     - no duplicate endpoint retries
@@ -1252,6 +1254,12 @@ def get_webull_gainers():
     - no hard dependency on Webull response shape
     - alerts still require the normal deep-scan validation
     """
+    global WEBULL_FAIL_BLOCK_UNTIL
+    if time.time() < WEBULL_FAIL_BLOCK_UNTIL:
+        left = int(WEBULL_FAIL_BLOCK_UNTIL - time.time())
+        print(f"[WEBULL] cooldown {left}s after 417 — skipped")
+        return []
+
     url = "https://quotes-gw.webullfintech.com/api/wlas/ranking/region/6/page/1/list"
     params = {
         "deviceId": "scannerbot",
@@ -1308,9 +1316,13 @@ def get_webull_gainers():
         r = http_get(url, params=params, headers=headers, timeout=4)
 
         if getattr(r, "status_code", 0) != 200:
-            # Webull commonly rejects cloud requests with 417.
-            # Keep this quiet and let Yahoo/TradingView/StockAnalysis carry discovery.
-            print(f"[WEBULL] unavailable status={getattr(r, 'status_code', 'NA')} — skipped")
+            status = getattr(r, "status_code", 0)
+            # Webull commonly rejects cloud requests with 417. Cool it down so Render does not hammer it every cycle.
+            if status == 417:
+                WEBULL_FAIL_BLOCK_UNTIL = time.time() + WEBULL_FAIL_COOLDOWN
+                print(f"[WEBULL] unavailable status=417 — cooling down {WEBULL_FAIL_COOLDOWN}s")
+            else:
+                print(f"[WEBULL] unavailable status={status or 'NA'} — skipped")
             return []
 
         data = safe_json_response(r, "GAINERS Webull")
@@ -6423,12 +6435,11 @@ def build_alert(result):
 
 
 
-if __name__ == "__main__":
-    Thread(target=start_web_server, daemon=True).start()
-    run_scanner()
 # ============================================================
-# v39.1 HOTFIX — headlines + meaningful push wording + cleaner gates
+# v39.2 HOTFIX — loaded before scanner starts
 # ============================================================
+# NOTE: __main__ moved to the bottom so these override functions are active.
+
 
 def fmt_signed_pct(value):
     v = safe_float(value)
@@ -6671,3 +6682,220 @@ def build_alert(result):
         lines.append(f"Filing: {sec_short}")
 
     return "\n".join(lines)
+
+
+
+# ============================================================
+# v39.3 DATA + NEWS HOTFIX
+# Faster/cleaner alert data + headline-first alerts
+# ============================================================
+BOOT_MARKER = "elite scanner v39.3 — faster data + headline-first alerts"
+MAX_PRIORITY_NEWS_NAMES_PER_CYCLE = 80
+NEWS_CACHE_TTL_FAST_ALERT = 300
+QUOTE_AGREEMENT_MAX_PCT_DIFF = 12.0
+QUOTE_GAIN_MAX_SOURCE_DIFF = 45.0
+
+
+def quote_price_agreement(a, b):
+    pa = safe_float((a or {}).get("price"))
+    pb = safe_float((b or {}).get("price"))
+    if pa <= 0 or pb <= 0:
+        return False
+    diff = abs(pa - pb) / max(pa, pb) * 100.0
+    return diff <= QUOTE_AGREEMENT_MAX_PCT_DIFF
+
+
+def choose_best_quote_v39_3(ticker, quotes):
+    """Pick a live quote only after sanity checks.
+
+    This prevents bad single-source prints from becoming Telegram alerts.
+    Priority:
+    1) Yahoo quote with volume if it agrees with another source
+    2) Finnhub if it agrees with another source
+    3) Any valid source only if no other source is available, marked unconfirmed
+    """
+    valid = []
+    for q in quotes or []:
+        if quote_is_valid(q, ticker):
+            valid.append(q)
+
+    if not valid:
+        return None
+
+    for q in valid:
+        q["confirmed"] = any(quote_price_agreement(q, other) for other in valid if other is not q)
+
+    confirmed = [q for q in valid if q.get("confirmed")]
+    pool = confirmed or valid
+
+    def qscore(q):
+        src = str(q.get("source", "")).lower()
+        score = 0
+        if q.get("confirmed"):
+            score += 100
+        if "yahoo" in src:
+            score += 30
+        if "finnhub" in src:
+            score += 20
+        if "twelvedata" in src:
+            score += 10
+        if safe_int(q.get("volume")) > 0:
+            score += 10
+        return score
+
+    best = sorted(pool, key=qscore, reverse=True)[0]
+    if not best.get("confirmed"):
+        best = dict(best)
+        best["unconfirmed_quote"] = True
+        best["reason"] = (best.get("reason") or "") + " | single-source quote"
+    return best
+
+
+def get_live_quote_v39_3(ticker):
+    """v39.3: parallel quote stack + source agreement.
+
+    Fast enough for leaders, safer than trusting one Finnhub print.
+    """
+    cached = cached_get(QUOTE_CACHE, ticker, ttl=25)
+    if cached:
+        return cached
+
+    fns = [get_finnhub_quote_raw, get_yahoo_quote_raw, get_twelvedata_quote_raw]
+    quotes = []
+    errors = []
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futs = {executor.submit(fn, ticker): fn.__name__ for fn in fns}
+            for fut in as_completed(futs, timeout=3.2):
+                try:
+                    q = fut.result(timeout=0.1)
+                    if quote_is_valid(q, ticker):
+                        quotes.append(q)
+                    else:
+                        errors.append(f"{futs[fut]}:{(q or {}).get('reason','invalid')}")
+                except Exception as e:
+                    errors.append(f"{futs[fut]}:{e}")
+    except Exception as e:
+        errors.append(f"quote timebox:{e}")
+
+    best = choose_best_quote_v39_3(ticker, quotes)
+    if best:
+        tag = "CONFIRMED" if best.get("confirmed") else "UNCONFIRMED"
+        print(f"[LIVE {tag}] {ticker} {fmt_money(best.get('price'))} {safe_float(best.get('gain')):.1f}% src={best.get('source')}")
+        remember_good_quote(ticker, best)
+        return cached_set(QUOTE_CACHE, ticker, best)
+
+    last_good = get_last_good_quote(ticker, max_age=180)
+    if last_good and quote_is_valid(last_good, ticker):
+        print(f"[QUOTE FALLBACK] {ticker}: using recent last-good quote ({last_good.get('reason')})")
+        return cached_set(QUOTE_CACHE, ticker, last_good)
+
+    print(f"[QUOTE FAIL] {ticker}: " + " | ".join(errors))
+    return normalize_quote(source="none", reason="all quote sources failed")
+
+
+# Override quote stack before scanner starts.
+get_live_quote = get_live_quote_v39_3
+get_finnhub_quote = get_live_quote_v39_3
+
+
+def validate_live_vs_source_gain(ticker, live_gain, source_gain, quote):
+    """Reject obvious mismatch bad-data alerts."""
+    lg = safe_float(live_gain)
+    sg = safe_float(source_gain)
+    if sg >= 25 and lg >= 25 and abs(lg - sg) > QUOTE_GAIN_MAX_SOURCE_DIFF:
+        # Allow insane runners if multiple quote sources confirmed price.
+        if not (quote or {}).get("confirmed"):
+            return False, f"unconfirmed quote gain mismatch live {lg:.1f}% vs source {sg:.1f}%"
+    if (quote or {}).get("unconfirmed_quote") and lg < 75:
+        return False, "single-source quote not strong enough for alert"
+    return True, "ok"
+
+
+_original_build_fast_live_result_v39_2 = build_fast_live_result
+
+
+def build_fast_live_result(candidate, regime=None):
+    """v39.3 fast result with quote sanity + guaranteed news attempt."""
+    result = _original_build_fast_live_result_v39_2(candidate, regime=regime)
+    if not result:
+        return None
+
+    ticker = result.get("ticker")
+    source_gain = safe_float((candidate or {}).get("gain"))
+    quote = get_live_quote(ticker)
+    ok, why = validate_live_vs_source_gain(ticker, result.get("gain"), source_gain, quote)
+    if not ok:
+        print(f"[FAST LIVE SKIP] {ticker}: bad data guard — {why}")
+        return None
+
+    # Every alert candidate gets a headline attempt before Telegram.
+    # If nothing is found, alert still shows UNKNOWN CATALYST — INVESTIGATE.
+    try:
+        priority = bool(is_major_market_leader(result) or safe_float(result.get("gain")) >= 50)
+        news = get_best_news(ticker, priority=priority)
+        result["news"] = news or {}
+        result["news_headline"] = clean_text((news or {}).get("headline") or "")
+        result["news_score"] = safe_float((news or {}).get("score"))
+    except Exception as e:
+        print(f"[NEWS ATTACH ERROR] {ticker}: {e}")
+        result["news"] = {"quality": "NONE", "score": 0, "rank_meaning": UNKNOWN_CATALYST_LABEL, "explain": UNKNOWN_CATALYST_LABEL}
+        result["news_headline"] = ""
+    return result
+
+
+def compact_news_line(news):
+    """v39.3 always show a catalyst line in the alert."""
+    news = news or {}
+    headline = clean_text(news.get("headline") or "")
+    quality = str(news.get("quality", "")).upper()
+    if headline and quality not in {"NONE", "JUNK", "STALE"}:
+        rank = news.get("rank") or news_rank_from_score_quality(news.get("score", 0), news.get("quality", ""), news.get("category", ""))[0]
+        category = news.get("category") or "Catalyst"
+        return f"NEWS: {rank} — {category}"
+    return f"NEWS: {UNKNOWN_CATALYST_LABEL}"
+
+
+def build_alert(result):
+    """v39.3 alert text: headline/catalyst always visible."""
+    result = normalize_alert_fields(result)
+    result = ensure_alert_news(result)
+    news = result.get("news") or {}
+    news_line = compact_news_line(news)
+
+    float_text = fmt_big_num(result.get("float")) if result.get("float") else "unknown"
+    quality = safe_int(result.get("alert_quality"))
+    reasons = result.get("alert_reasons") or []
+    reason_text = " + ".join(reasons[:4]) if reasons else (result.get("moving_now_reason") or live_facts_line(result))
+
+    title = f"🔥 MEANINGFUL LIVE PUSH — {result['ticker']}"
+    if result.get("market_leader_override"):
+        title = f"🚨 MARKET LEADER LIVE PUSH — {result['ticker']}"
+
+    lines = [
+        title,
+        "",
+        f"{fmt_money(result['price'])} | +{safe_float(result.get('gain')):.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+    ]
+    if quality:
+        lines.append(f"Quality: {quality}/10")
+    if reason_text:
+        lines.append(f"Why: {reason_text}")
+
+    headline = clean_text(news.get("headline") or result.get("news_headline") or "")
+    lines.extend(["", news_line])
+    if headline and UNKNOWN_CATALYST_LABEL not in news_line:
+        lines.append(f"Headline: {headline[:220]}")
+    elif UNKNOWN_CATALYST_LABEL in news_line:
+        lines.append("Headline: none found yet — check Webull/filings manually")
+
+    sec_short = compact_dilution_label(result.get("sec"))
+    if sec_short:
+        lines.append(f"Filing: {sec_short}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    Thread(target=start_web_server, daemon=True).start()
+    run_scanner()
