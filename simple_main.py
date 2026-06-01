@@ -6703,6 +6703,391 @@ def prioritize_live_leaders(candidates):
     return focused
 
 
+
+# ============================================================
+# v41.0 CLEAN LEADER-ONLY REBUILD
+# Mission: stop junk alerts. Track only true leaders and alert only on
+# fast spike / fresh HOD breakout / tight second-leg setup.
+# ============================================================
+
+BOOT_MARKER = "elite scanner v41.0 — LEADER ONLY SPIKE/SETUP ENGINE"
+MAX_ALERTS_PER_CYCLE = 2
+FAST_ALERT_MAX_PER_CYCLE = 2
+LEADER_ONLY_MAX_POOL = 15
+LEADER_ONLY_MIN_GAIN = 50.0
+LEADER_ONLY_ALT_GAIN = 25.0
+LEADER_ONLY_ALT_VOLUME = 50_000_000
+LEADER_ONLY_MIN_VOLUME = 500_000
+LEADER_ONLY_MAX_OFF_HOD = 12.0
+LEADER_SETUP_MAX_OFF_HOD = 6.0
+LEADER_SPIKE_MIN_PCT = 10.0
+LEADER_SPIKE_MIN_SECONDS = 90
+LEADER_SPIKE_LOOKBACK_BARS = 5
+LEADER_NEWS_PREFETCH_MAX = 8
+LEADER_STATE = {}
+NEWS_PREFETCH_STARTED = set()
+
+
+def leader_only_score(item):
+    gain = safe_float(item.get("gain"))
+    volume = safe_int(item.get("volume"))
+    price = safe_float(item.get("price"))
+    sources = len(item.get("sources", []) or [])
+    fresh = safe_float(item.get("fresh_scan_boost"))
+    score = gain * 5 + min(volume / 1_000_000, 150) * 2 + sources * 10 + fresh * 30
+    if price and 0.5 <= price <= 15:
+        score += 30
+    return score
+
+
+def is_true_leader_source(item):
+    gain = safe_float(item.get("gain"))
+    volume = safe_int(item.get("volume"))
+    price = safe_float(item.get("price"))
+    if price and (price < MIN_PRICE or price > MAX_PRICE):
+        return False
+    if gain >= LEADER_ONLY_MIN_GAIN and volume >= LEADER_ONLY_MIN_VOLUME:
+        return True
+    if gain >= LEADER_ONLY_ALT_GAIN and volume >= LEADER_ONLY_ALT_VOLUME:
+        return True
+    return False
+
+
+def prioritize_live_leaders(candidates):
+    leaders = [c for c in (candidates or []) if is_true_leader_source(c)]
+    leaders.sort(key=leader_only_score, reverse=True)
+    focused = leaders[:LEADER_ONLY_MAX_POOL]
+    skipped = max(0, len(candidates or []) - len(leaders))
+    print(f"[v41 LEADER ONLY] true_leaders={len(leaders)} skipped_nonleaders={skipped} -> tracking {len(focused)}")
+    if focused:
+        print("[v41 TRACKING] " + " | ".join(
+            f"{x.get('ticker')} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
+            for x in focused[:15]
+        ))
+    return focused
+
+
+def prefetch_news_for_leaders(candidates):
+    # Fire-and-forget. Alerts do not wait on this, but headline cache warms up quickly.
+    picks = []
+    for c in (candidates or [])[:LEADER_NEWS_PREFETCH_MAX]:
+        ticker = str(c.get("ticker", "")).upper().strip()
+        if ticker and ticker not in NEWS_PREFETCH_STARTED:
+            NEWS_PREFETCH_STARTED.add(ticker)
+            picks.append(ticker)
+    if not picks:
+        return
+
+    def _worker(symbols):
+        for t in symbols:
+            try:
+                get_best_news(t, priority=True)
+            except Exception as e:
+                print(f"[NEWS PREFETCH ERROR] {t}: {e}")
+    Thread(target=_worker, args=(picks,), daemon=True).start()
+    print(f"[NEWS PREFETCH] started for {', '.join(picks)}")
+
+
+def detect_v41_fast_spike(ticker, price, candles, chart_timing):
+    candles = finalized_candles(candles)
+    price = safe_float(price)
+    if not ticker or price <= 0 or not candles or len(candles) < 3:
+        return False, 0.0, ""
+
+    lookback = candles[-LEADER_SPIKE_LOOKBACK_BARS:] if len(candles) >= LEADER_SPIKE_LOOKBACK_BARS else candles
+    rolling_low = min(candle_low(c) for c in lookback if candle_low(c) > 0) if lookback else 0
+    spike_from_low = pct_change(price, rolling_low) if rolling_low > 0 else 0
+
+    state = LEADER_STATE.get(ticker, {})
+    last_price = safe_float(state.get("last_price"))
+    last_seen = safe_float(state.get("last_seen"))
+    spike_from_last_seen = pct_change(price, last_seen) if last_seen > 0 else 0
+
+    # Update state after calculating the trigger.
+    low_seen = safe_float(state.get("rolling_low"))
+    if low_seen <= 0 or rolling_low < low_seen:
+        low_seen = rolling_low
+    LEADER_STATE[ticker] = {
+        **state,
+        "last_seen": price,
+        "rolling_low": low_seen,
+        "last_update": time.time(),
+    }
+
+    best_spike = max(spike_from_low, spike_from_last_seen)
+    vol_ratio = max(safe_float(chart_timing.get("volume_ratio")), safe_float(chart_timing.get("volume_ratio_10")))
+    above_hod_area = safe_float(chart_timing.get("off_high_pct"), 999) <= LEADER_ONLY_MAX_OFF_HOD
+
+    if best_spike >= LEADER_SPIKE_MIN_PCT and vol_ratio >= 1.5 and above_hod_area:
+        return True, best_spike, f"FAST +{best_spike:.1f}% leader spike"
+    return False, best_spike, ""
+
+
+def classify_v41_leader_trigger(result):
+    chart = result.get("chart_timing") or {}
+    structure = result.get("structure") or {}
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+    off_hod = safe_float(chart.get("off_high_pct"), 999)
+    vol_ratio = max(safe_float(chart.get("volume_ratio")), safe_float(chart.get("volume_ratio_10")))
+    last3 = safe_float(chart.get("last3_change_pct"))
+    last5 = safe_float(chart.get("last5_change_pct"))
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    fresh_hod = bool(chart.get("fresh_breakout") or chart.get("recent_new_high"))
+    second_leg = bool(chart.get("second_leg_ready"))
+    vwap_reclaim = bool(chart.get("vwap_reclaim"))
+    fast_spike = bool(chart.get("fast_leader_spike"))
+
+    if gain < ALERT_HARD_MIN_GAIN:
+        return None, f"gain {gain:.1f}% under 25%"
+    if volume < LEADER_ONLY_MIN_VOLUME:
+        return None, f"volume {fmt_big_num(volume)} under leader floor"
+    if not above_vwap and not vwap_reclaim and not (fresh_hod and vol_ratio >= 2.0):
+        return None, "not above/reclaiming VWAP"
+
+    # Hard anti-junk: no stale market-leader override by itself.
+    if off_hod > LEADER_ONLY_MAX_OFF_HOD and not fast_spike:
+        return None, f"stale leader — {off_hod:.1f}% off HOD"
+
+    if fast_spike:
+        return "FAST_LEADER_SPIKE", chart.get("fast_leader_spike_reason") or "fast +10% leader spike"
+
+    if fresh_hod and vol_ratio >= 1.5 and last3 >= 0:
+        return "FRESH_HOD_BREAKOUT", f"fresh HOD + vol {vol_ratio:.1f}x"
+
+    if second_leg and off_hod <= LEADER_SETUP_MAX_OFF_HOD and last5 >= -0.5 and vol_ratio >= 0.9:
+        return "SECOND_LEG_SETUP", f"second-leg setup near HOD ({off_hod:.1f}% off high)"
+
+    if vwap_reclaim and last3 >= 0.5 and vol_ratio >= 1.2:
+        return "VWAP_RECLAIM_PUSH", f"VWAP reclaim + last3 {fmt_signed_pct(last3)}"
+
+    # No more "market leader override" alerts. Leaders stay in logs unless they spike/set up.
+    return None, f"leader but no spike/setup (off HOD {off_hod:.1f}%, last3 {fmt_signed_pct(last3)}, vol {vol_ratio:.1f}x)"
+
+
+def build_fast_live_result(candidate, regime=None):
+    ticker = str((candidate or {}).get("ticker", "")).upper().strip()
+    if not ticker or is_bad_ticker(ticker):
+        return None
+
+    quote = get_live_quote(ticker)
+    if not quote_is_valid(quote, ticker):
+        return None
+
+    price = safe_float(quote.get("price"))
+    gain = safe_float(quote.get("gain"))
+    source_gain = safe_float((candidate or {}).get("gain"))
+    if gain < ALERT_HARD_MIN_GAIN:
+        print(f"[v41 SKIP] {ticker}: live gain {gain:.1f}% below 25%; source {source_gain:.1f}% ignored")
+        return None
+
+    volume = max(safe_int(quote.get("volume")), safe_int((candidate or {}).get("volume")))
+    if volume < LEADER_ONLY_MIN_VOLUME:
+        print(f"[v41 SKIP] {ticker}: volume {fmt_big_num(volume)} below leader floor")
+        return None
+
+    if price < MIN_PRICE or price > MAX_PRICE:
+        print(f"[v41 SKIP] {ticker}: price {fmt_money(price)} outside range")
+        return None
+
+    ok_source, why_source = validate_live_vs_source_gain(ticker, gain, source_gain, quote)
+    if not ok_source:
+        print(f"[v41 SKIP] {ticker}: bad data — {why_source}")
+        return None
+
+    candles = get_candles(ticker)
+    if not valid_candle_list(candles, min_count=MOVING_NOW_MIN_CANDLES):
+        print(f"[v41 SKIP] {ticker}: no reliable 1m candles")
+        return None
+
+    ok_candle, why_candle = quote_matches_candles(ticker, quote, candles)
+    if not ok_candle:
+        print(f"[v41 SKIP] {ticker}: bad data — {why_candle}")
+        return None
+
+    structure = get_structure(candles, ticker)
+    chart_timing = analyze_chart_timing(candles, structure, price)
+    spike_ok, spike_pct, spike_reason = detect_v41_fast_spike(ticker, price, candles, chart_timing)
+    if spike_ok:
+        chart_timing["fast_leader_spike"] = True
+        chart_timing["fast_leader_spike_pct"] = spike_pct
+        chart_timing["fast_leader_spike_reason"] = spike_reason
+
+    float_shares = safe_int((candidate or {}).get("float"))
+    market_cap = safe_int((candidate or {}).get("market_cap"))
+    if not float_shares or not market_cap:
+        profile = get_profile(ticker)
+        float_shares = float_shares or safe_int(profile.get("float"))
+        market_cap = market_cap or safe_int(profile.get("market_cap"))
+
+    result = {
+        "ticker": ticker,
+        "price": price,
+        "gain": gain,
+        "volume": volume,
+        "float": float_shares,
+        "market_cap": market_cap,
+        "score": gain / 10.0,
+        "bias": "LEADER",
+        "trade_tier": "LEADER",
+        "phase": "LIVE",
+        "source": (candidate or {}).get("source") or quote.get("source"),
+        "quote": quote,
+        "data_confirmed": bool(quote.get("confirmed")),
+        "news": {"quality": "NONE", "headline": "", "score": 0},
+        "news_score": 0,
+        "sec": {},
+        "structure": structure,
+        "chart_timing": chart_timing,
+        "fast_live": True,
+        "fast_leader_spike": spike_ok,
+        "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
+    }
+
+    trigger, trigger_reason = classify_v41_leader_trigger(result)
+    if not trigger:
+        print(f"[v41 LOG ONLY] {ticker}: {trigger_reason}")
+        return None
+
+    result["v41_trigger"] = trigger
+    result["moving_now_reason"] = trigger_reason
+
+    # News lookup only after a real alertable trigger; cache may already be warm.
+    try:
+        news = get_best_news(ticker, priority=True)
+        result["news"] = news or result["news"]
+        result["news_headline"] = clean_text((news or {}).get("headline") or "")
+        result["news_score"] = safe_float((news or {}).get("score"))
+    except Exception as e:
+        print(f"[NEWS ATTACH ERROR] {ticker}: {e}")
+
+    print(
+        f"[v41 ALERTABLE] {ticker} {trigger} +{gain:.1f}% {fmt_money(price)} "
+        f"vol={fmt_big_num(volume)} offHOD={safe_float(chart_timing.get('off_high_pct')):.1f}% "
+        f"reason={trigger_reason}"
+    )
+    return result
+
+
+def meaningful_change_since_alert(ticker, result):
+    item = LAST_ALERT.get(ticker)
+    price = safe_float(result.get("price"))
+    gain = safe_float(result.get("gain"))
+    trigger = result.get("v41_trigger") or "LEADER_TRIGGER"
+    chart = result.get("chart_timing") or {}
+    day_high = safe_float(chart.get("day_high"))
+
+    if not item:
+        return True, "first leader trigger"
+
+    elapsed = time.time() - item.get("time", 0)
+    last_price = safe_float(item.get("price"))
+    last_trigger = item.get("trigger")
+    last_high = safe_float(item.get("day_high"))
+
+    # Fast spike can re-alert faster, but only on true +10% expansion.
+    if trigger == "FAST_LEADER_SPIKE" and elapsed >= LEADER_SPIKE_MIN_SECONDS and last_price > 0 and price >= last_price * 1.10:
+        return True, "FAST +10% expansion from last alert"
+
+    if elapsed < LIVE_RE_ALERT_MIN_SECONDS:
+        return False, f"cooldown {int(LIVE_RE_ALERT_MIN_SECONDS - elapsed)}s left"
+
+    if last_price > 0 and price >= last_price * 1.08:
+        return True, "price +8% from last alert"
+    if day_high > 0 and (last_high <= 0 or day_high >= last_high * 1.03):
+        return True, "new HOD expansion"
+    if trigger != last_trigger:
+        return True, f"new setup trigger: {trigger}"
+
+    return False, "no new leader expansion"
+
+
+def should_alert(result):
+    ticker = result.get("ticker")
+    if not ticker:
+        return False
+    if ticker in SENT_THIS_CYCLE:
+        print(f"[NO ALERT] {ticker}: already sent this cycle")
+        return False
+
+    trigger, trigger_reason = classify_v41_leader_trigger(result)
+    if not trigger:
+        print(f"[NO ALERT] {ticker}: {trigger_reason}")
+        return False
+    result["v41_trigger"] = trigger
+    result["moving_now_reason"] = trigger_reason
+
+    ok, reason = meaningful_change_since_alert(ticker, result)
+    if not ok:
+        print(f"[NO ALERT] {ticker}: {reason}")
+        return False
+
+    LAST_ALERT[ticker] = {
+        "time": time.time(),
+        "price": safe_float(result.get("price")),
+        "gain": safe_float(result.get("gain")),
+        "day_high": safe_float((result.get("chart_timing") or {}).get("day_high")),
+        "trigger": trigger,
+    }
+    SENT_THIS_CYCLE.add(ticker)
+    print(f"[v41 ALERT OK] {ticker}: {trigger} — {trigger_reason} — {reason}")
+    return True
+
+
+def build_alert(result):
+    result = normalize_alert_fields(result)
+    news = result.get("news") or {}
+    if not news or str(news.get("quality", "")).upper() in {"", "NONE", "JUNK", "STALE"}:
+        result = ensure_alert_news(result)
+        news = result.get("news") or {}
+
+    trigger = result.get("v41_trigger") or "LEADER_TRIGGER"
+    titles = {
+        "FAST_LEADER_SPIKE": "🚀 FAST LEADER SPIKE",
+        "FRESH_HOD_BREAKOUT": "🔥 FRESH HOD BREAKOUT",
+        "SECOND_LEG_SETUP": "📈 SECOND-LEG SETUP",
+        "VWAP_RECLAIM_PUSH": "🟢 VWAP RECLAIM PUSH",
+    }
+    title = f"{titles.get(trigger, '🔥 LEADER TRIGGER')} — {result['ticker']}"
+
+    float_text = fmt_big_num(result.get("float")) if result.get("float") else "unknown"
+    chart = result.get("chart_timing") or {}
+    data_line = "confirmed" if result.get("data_confirmed") else "single-source/live-candle checked"
+    headline = clean_text(news.get("headline") or result.get("news_headline") or "")
+    news_line = compact_news_line(news)
+
+    lines = [
+        title,
+        "",
+        f"{fmt_money(result['price'])} | +{safe_float(result.get('gain')):.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+        f"Data: {data_line}",
+        f"Why: {result.get('moving_now_reason')}",
+        f"Chart: off HOD {safe_float(chart.get('off_high_pct')):.1f}% | last3 {fmt_signed_pct(chart.get('last3_change_pct'))} | vol {max(safe_float(chart.get('volume_ratio')), safe_float(chart.get('volume_ratio_10'))):.1f}x",
+        "",
+        news_line,
+    ]
+    if headline and UNKNOWN_CATALYST_LABEL not in news_line:
+        lines.append(f"Headline: {headline[:220]}")
+    elif UNKNOWN_CATALYST_LABEL in news_line:
+        lines.append("Headline: none found yet — investigate Webull/filings manually")
+    return "\n".join(lines)
+
+
+def print_top_ranked(results):
+    if not results:
+        if SENT_THIS_CYCLE:
+            print(f"[SCAN] {len(SENT_THIS_CYCLE)} leader alert(s) sent — no extra junk alerts")
+        else:
+            print("[SCAN] No leader spike/setup alerts")
+        return
+    print("[v41 LOG RESULTS] " + " | ".join(
+        f"{r['ticker']} +{safe_float(r.get('gain')):.1f}% {fmt_money(r.get('price'))}"
+        for r in results[:8]
+    ))
+
+
 def run_scanner():
     print(f"[BOOT] {BOOT_MARKER}")
     while True:
@@ -6718,63 +7103,29 @@ def run_scanner():
             NEWS_CALLS_THIS_CYCLE = 0
             SEC_CALLS_THIS_CYCLE = 0
 
-            print(f"[SCAN] Market active — running scan ({get_market_session_label()})")
-            candidates = get_candidates()
-            candidates = prioritize_live_leaders(candidates)
-            if LIVE_SPEED_MODE and len(candidates) > MAX_DEEP_SCAN_NAMES:
-                print(f"[SPEED] limiting deep scan {len(candidates)} -> {MAX_DEEP_SCAN_NAMES} names")
-                candidates = candidates[:MAX_DEEP_SCAN_NAMES]
+            print(f"[SCAN] v41 leader-only scan ({get_market_session_label()})")
+            candidates = prioritize_live_leaders(get_candidates())
+            prefetch_news_for_leaders(candidates)
             regime = estimate_market_regime(candidates)
             print(f"[REGIME] {regime['label']} — {regime['description']}")
 
             sent = 0
-            if FAST_LIVE_ALERTS:
-                for candidate in candidates:
-                    if sent >= min(MAX_ALERTS_PER_CYCLE, FAST_ALERT_MAX_PER_CYCLE):
-                        break
-                    try:
-                        fast_result = build_fast_live_result(candidate, regime)
-                        if fast_result and should_alert(fast_result):
-                            msg = build_alert(fast_result)
-                            send_alert(msg)
-                            print(f"[FAST ALERT SENT] {fast_result['ticker']}")
-                            sent += 1
-                    except Exception as e:
-                        print(f"[FAST LIVE ERROR] {candidate.get('ticker')}: {e}")
-                        continue
-
-            results = []
-            if sent >= MAX_ALERTS_PER_CYCLE:
-                print(f"[SPEED] {sent} fast alert(s) filled cycle — skipping slow news/SEC/daily analysis")
-            else:
-                for candidate in candidates:
-                    try:
-                        if str(candidate.get("ticker", "")).upper().strip() in SENT_THIS_CYCLE:
-                            continue
-                        if safe_float(candidate.get("gain")) < ALERT_HARD_MIN_GAIN:
-                            continue
-                        result = analyze_candidate(candidate, regime)
-                        if result:
-                            results.append(result)
-                    except Exception as e:
-                        print(f"[CANDIDATE ERROR] {candidate.get('ticker')}: {e}")
-                        continue
-
-            results = sort_results(results)
-            print_top_ranked(results)
-            for result in results:
+            for candidate in candidates:
                 if sent >= MAX_ALERTS_PER_CYCLE:
                     break
-                if should_alert(result):
-                    msg = build_alert(result)
-                    send_alert(msg)
-                    print(f"[ALERT SENT] {result['ticker']}")
-                    sent += 1
+                try:
+                    result = build_fast_live_result(candidate, regime)
+                    if result and should_alert(result):
+                        send_alert(build_alert(result))
+                        print(f"[v41 ALERT SENT] {result['ticker']} {result.get('v41_trigger')}")
+                        sent += 1
+                except Exception as e:
+                    print(f"[v41 ERROR] {candidate.get('ticker')}: {e}")
 
             if sent:
-                print(f"[SCAN] Cycle complete — {sent} alert(s) sent")
+                print(f"[SCAN] Cycle complete — {sent} leader-only alert(s) sent")
             else:
-                print("[SCAN] Cycle complete — no alerts")
+                print("[SCAN] Cycle complete — no leader spike/setup alerts")
             time.sleep(dynamic_scan_sleep())
 
         except Exception as e:
