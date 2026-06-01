@@ -25,7 +25,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v36.20 — awareness lane + dynamic volume + fresh-candle fix + news priority"
+BOOT_MARKER = "elite scanner v37.00 — fresh leaders + news fallback + elite cooldown bypass + continuation lane"
 
 # ============================================================
 # ENV
@@ -60,7 +60,7 @@ MIN_FAST_VOLUME = 25_000             # v36.11: discovery-only lowered so BRAI-st
 MIN_DEEP_VOLUME = 150_000
 ALERT_MIN_VOLUME = 100_000            # elite phone alerts need confirmation; discovery can be looser
 LOW_FLOAT_ALERT_MIN_VOLUME = 50_000    # lets BUUU-style low-float leaders surface earlier
-AWARENESS_MIN_SCORE = 7.0              # runner-awareness lane; still 25%+ gain required
+AWARENESS_MIN_SCORE = 6.5              # v37: lower awareness lane in hot tape, still structure-gated
 AWARENESS_MIN_VOLUME = 50_000          # awareness volume floor for low-float/top-gainer movers
 MIN_FINALIZED_CANDLES = 6              # fresh ignitions no longer die at 7 bars
 
@@ -96,13 +96,15 @@ LOW_FLOAT_GOOD = 20_000_000
 LOW_FLOAT_ACCEPTABLE = 40_000_000
 
 # Alerting
-ALERT_MIN_SCORE = 8.0                 # strict Telegram floor: no 7.x phone alerts
+ALERT_MIN_SCORE = 8.0                 # base elite floor; v37 dynamic floor adjusts by market regime
 WATCH_ALERT_MIN_SCORE = 7.0           # internal rank/watch labels only; NOT a Telegram lane
 WATCH_ALERT_MIN_ENTRY_SCORE = 3.5     # internal display compatibility only
 WATCH_ALERT_MIN_STRUCTURE_SCORE = 3.0 # internal display compatibility only
 TRADE_ALERT_MIN_ENTRY_SCORE = 3.5
 TRADE_ALERT_MIN_STRUCTURE_SCORE = 3.0
-ALERT_HARD_MIN_GAIN = 25.0            # Telegram hard gain floor
+ALERT_HARD_MIN_GAIN = 25.0            # new-alert hard gain floor
+CONTINUATION_MIN_GAIN = 10.0          # v37: continuation/reclaim lane can alert below 25%
+CONTINUATION_MIN_SCORE = 7.5          # v37: score floor for continuation/reclaim lane
 SUPER_MOMO_MIN_SCORE = 8.0            # no score bypass below 8.0
 SUPER_MOMO_MIN_GAIN = 60.0
 SUPER_MOMO_MIN_VOLUME = 100_000_000
@@ -164,11 +166,11 @@ MAX_DEEP_SCAN_NAMES = 60
 MAX_NEWS_NAMES_PER_CYCLE = 22
 MAX_PRIORITY_NEWS_NAMES_PER_CYCLE = 36  # v36.17: let high-priority runners bypass normal speed cap
 MAX_SEC_NAMES_PER_CYCLE = 10
-ENABLE_PRNEWSWIRE_INTRADAY = False
-NEWS_FAST_TIMEOUT = 1.2
-NEWS_PARALLEL_TIMEOUT = 2.4
-GLOBE_TIMEOUT = 1.4
-YAHOO_NEWS_TIMEOUT = 1.2
+ENABLE_PRNEWSWIRE_INTRADAY = True
+NEWS_FAST_TIMEOUT = 2.5
+NEWS_PARALLEL_TIMEOUT = 3.8
+GLOBE_TIMEOUT = 2.5
+YAHOO_NEWS_TIMEOUT = 2.5
 SEC_FAST_TIMEOUT = 2.0
 DAILY_CONTEXT_MIN_GAIN = 18.0
 
@@ -218,7 +220,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "scanner alive — v36.20 awareness lane + dynamic volume + fresh-candle fix + news priority", 200
+    return "scanner alive — v37.00 fresh leaders + news fallback + elite cooldown bypass + continuation lane", 200
 
 
 @app.route("/health")
@@ -1359,13 +1361,17 @@ def merge_leader_sources(items):
 def get_multi_source_leaders():
     sources = []
 
+    # v37: primary discovery is StockAnalysis + TradingView because Yahoo custom
+    # screeners often return zero during the open. Yahoo still fills quote fields,
+    # but it no longer controls who gets into the deep-scan queue.
+    sources.extend(get_stockanalysis_gainers())
+    sources.extend(get_tradingview_gainers())
+
     try:
         sources.extend(get_yahoo_gainers())
     except Exception as e:
         print(f"[GAINERS ERROR] Yahoo source stack: {e}")
 
-    sources.extend(get_stockanalysis_gainers())
-    sources.extend(get_tradingview_gainers())
     sources.extend(get_webull_gainers())
     sources.extend(get_nasdaq_gainers())
     sources.extend(get_finviz_smallcap_gainers())
@@ -2538,12 +2544,22 @@ def rank_news_candidates(headlines, ticker):
 
 
 def get_best_news(ticker, priority=False):
+    """
+    v37 news stack: do not let Finnhub timeouts decide catalyst quality.
+
+    Priority order:
+    1) GlobeNewswire
+    2) PR Newswire
+    3) Yahoo News
+    4) Benzinga, if key exists
+    5) Finnhub last, because it timed out heavily in live logs
+    """
     global NEWS_CALLS_THIS_CYCLE
 
     cached = cached_get(NEWS_CACHE, ticker)
-    # v36.17: if an earlier low-priority pass cached a speed-mode skip,
-    # allow a priority runner to refresh instead of inheriting "NO NEWS".
-    if cached and not (priority and "skipped" in str(cached.get("explain", "")).lower()):
+    # If a previous low-priority pass cached a speed-mode skip/no-news, a priority
+    # runner gets one real refresh so names like NAMM/AIIO do not stay "NO NEWS".
+    if cached and not (priority and str(cached.get("quality", "")).upper() in {"NONE", "JUNK", "STALE"}):
         return cached
 
     normal_cap_hit = LIVE_SPEED_MODE and NEWS_CALLS_THIS_CYCLE >= MAX_NEWS_NAMES_PER_CYCLE
@@ -2562,13 +2578,15 @@ def get_best_news(ticker, priority=False):
     NEWS_CALLS_THIS_CYCLE += 1
     all_headlines = []
 
-    # v36.12 speed mode: fast sources only first. PRNewswire is disabled intraday
-    # unless the faster sources fail AND speed mode is off, because repeated 2s
-    # PR timeouts were slowing the whole scanner cycle.
-    fast_sources = [fetch_finnhub_company_news, fetch_benzinga_news, scrape_globenewswire]
+    # Run publisher/PR sources first. These are more likely to contain the real
+    # catalyst than generic quote pages, and they avoid Finnhub timeout traps.
+    primary_sources = [scrape_globenewswire, scrape_prnewswire, scrape_yahoo_news]
+    if BENZINGA_API_KEY:
+        primary_sources.append(fetch_benzinga_news)
+
     try:
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(fn, ticker): fn.__name__ for fn in fast_sources}
+        with ThreadPoolExecutor(max_workers=min(4, len(primary_sources))) as executor:
+            futures = {executor.submit(fn, ticker): fn.__name__ for fn in primary_sources}
             for fut in as_completed(futures, timeout=NEWS_PARALLEL_TIMEOUT):
                 name = futures[fut]
                 try:
@@ -2576,31 +2594,20 @@ def get_best_news(ticker, priority=False):
                 except Exception as e:
                     print(f"[NEWS ERROR] {ticker} {name}: {e}")
     except Exception as e:
-        print(f"[NEWS TIMEBOX] {ticker}: fast news timebox hit ({e})")
+        print(f"[NEWS TIMEBOX] {ticker}: primary news timebox hit ({e})")
 
     ranked = rank_news_candidates(all_headlines, ticker)
     if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
         best = ranked[0]
-        print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
+        print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 PRIMARY)")
         return cached_set(NEWS_CACHE, ticker, best)
 
-    # Yahoo is a quick fallback. PRNewswire is last and disabled intraday in speed mode.
-    yahoo_headlines = scrape_yahoo_news(ticker)
-    if yahoo_headlines:
-        all_headlines.extend(yahoo_headlines)
+    # Finnhub is last. If it works, great. If it times out, the scanner already
+    # had the best public PR/news sources first and will not freeze on it.
+    fh = fetch_finnhub_company_news(ticker)
+    if fh:
+        all_headlines.extend(fh)
         ranked = rank_news_candidates(all_headlines, ticker)
-        if ranked and safe_float(ranked[0].get("score", 0)) >= 7:
-            best = ranked[0]
-            print(f"[NEWS] {ticker}: {best.get('headline','')[:120]} ({best['quality']} {best['score']}/10 FAST)")
-            return cached_set(NEWS_CACHE, ticker, best)
-
-    if not (LIVE_SPEED_MODE and ENABLE_PRNEWSWIRE_INTRADAY is False):
-        pr_headlines = scrape_prnewswire(ticker)
-        if pr_headlines:
-            all_headlines.extend(pr_headlines)
-            ranked = rank_news_candidates(all_headlines, ticker)
-    else:
-        print(f"[PR SKIP] {ticker}: disabled intraday speed mode")
 
     if not ranked:
         news = classify_news("", ticker)
@@ -4054,6 +4061,12 @@ def meaningful_change_since_alert(ticker, result):
     score_improved = score >= last_score + 1.0 and fresh_again
     upgraded = item.get("bias") != bias and "RUNNER" in str(bias).upper() and fresh_again
 
+    # v37: do not bury the best names of the day. A 9/10+ runner can re-alert
+    # on a fresh trigger much sooner than the normal 15-minute cooldown, but it
+    # still needs a small price push/new-HOD style confirmation to avoid spam.
+    if score >= 9.0 and elapsed >= 120 and fresh_again and (true_new_high or price >= last_price * 1.005):
+        return True, "elite runner cooldown bypass"
+
     if elapsed >= ALERT_COOLDOWN_SECONDS and ((price_push and true_new_high and fresh_again) or score_improved or upgraded):
         reason = []
         if price_push and true_new_high:
@@ -4257,6 +4270,60 @@ def dynamic_alert_volume_floor(result):
     return ALERT_MIN_VOLUME
 
 
+def dynamic_elite_score_floor(result):
+    """v37: elite floor adapts to market regime instead of hard-blocking every 7.x hot-tape runner."""
+    regime = result.get("regime") or {}
+    label = str(regime.get("label", regime)).upper() if regime else ""
+    if "HOT" in label:
+        return 7.5
+    if "COLD" in label or "THIN" in label:
+        return 8.5
+    return ALERT_MIN_SCORE
+
+
+def has_continuation_trigger(result):
+    """v37: continuation/reclaim lane for clean setups that are below the new-alert 25% floor."""
+    structure = result.get("structure") or {}
+    chart_timing = result.get("chart_timing") or {}
+    second_leg = result.get("second_leg") or {}
+    coil = result.get("coil") or {}
+    decay = result.get("decay") or {}
+    exhaustion = result.get("exhaustion") or {}
+    fakeout = result.get("fakeout") or {}
+
+    above_vwap = bool(get_struct(structure, "above_vwap", False))
+    breakout = bool(get_struct(structure, "breakout", False))
+    near_high = bool(get_struct(structure, "near_high", False))
+    higher_lows = bool(get_struct(structure, "higher_lows", False))
+    score = safe_float(result.get("score"))
+    gain = safe_float(result.get("gain"))
+    volume = safe_int(result.get("volume"))
+
+    trigger = bool(
+        chart_timing.get("fresh_breakout")
+        or chart_timing.get("vwap_reclaim")
+        or chart_timing.get("second_leg_ready")
+        or second_leg.get("detected")
+        or (breakout and near_high and higher_lows)
+        or (coil.get("detected") and near_high and higher_lows)
+    )
+
+    return bool(
+        gain >= CONTINUATION_MIN_GAIN
+        and score >= CONTINUATION_MIN_SCORE
+        and volume >= dynamic_alert_volume_floor(result)
+        and above_vwap
+        and trigger
+        and not chart_timing.get("stale")
+        and not decay.get("detected")
+        and not exhaustion.get("detected")
+        and not fakeout.get("detected")
+    )
+
+
+def dynamic_required_alert_gain(result):
+    return CONTINUATION_MIN_GAIN if has_continuation_trigger(result) else ALERT_HARD_MIN_GAIN
+
 def is_awareness_lane(result):
     """Phone-visible potential runner lane. Still requires 25%+ gain, real structure, and no decay/fakeout."""
     structure = result.get("structure") or {}
@@ -4301,7 +4368,7 @@ def is_super_momo_override(result):
     phone alert must still be score >= ALERT_MIN_SCORE.
     """
     score = safe_float(result.get("score"))
-    return bool(score >= ALERT_MIN_SCORE)
+    return bool(score >= dynamic_elite_score_floor(result))
 
 def is_in_play_alert(result):
     """
@@ -4340,20 +4407,23 @@ def is_in_play_alert(result):
     early_open_drive = bool(result.get("early_open_drive"))
     chart_timing = result.get("chart_timing") or {}
 
-    elite_alert_lane = bool(score >= ALERT_MIN_SCORE)
+    elite_floor = dynamic_elite_score_floor(result)
+    elite_alert_lane = bool(score >= elite_floor)
+    continuation_alert_lane = bool(has_continuation_trigger(result))
     awareness_alert_lane = bool(is_awareness_lane(result))
 
     # Absolute phone-alert gates first. These stop watchlist/rank names from
     # slipping through via old text overrides.
-    if gain < ALERT_HARD_MIN_GAIN:
-        return False, f"gain {gain:.1f}% below hard alert floor {ALERT_HARD_MIN_GAIN:.0f}%"
+    required_gain = dynamic_required_alert_gain(result)
+    if gain < required_gain:
+        return False, f"gain {gain:.1f}% below alert floor {required_gain:.0f}%"
 
     min_alert_volume = dynamic_alert_volume_floor(result)
     if volume < min_alert_volume:
         return False, f"volume {fmt_big_num(volume)} below alert confirmation floor {fmt_big_num(min_alert_volume)}"
 
-    if not (elite_alert_lane or awareness_alert_lane):
-        return False, f"score {score:.1f} below elite {ALERT_MIN_SCORE:.1f} and awareness {AWARENESS_MIN_SCORE:.1f} lanes"
+    if not (elite_alert_lane or continuation_alert_lane or awareness_alert_lane):
+        return False, f"score {score:.1f} below elite {elite_floor:.1f}, continuation {CONTINUATION_MIN_SCORE:.1f}, and awareness {AWARENESS_MIN_SCORE:.1f} lanes"
 
     if not above_vwap:
         return False, "not in play — below/lost VWAP"
@@ -4408,7 +4478,7 @@ def is_in_play_alert(result):
 
     high_quality_above_vwap = bool(
         above_vwap
-        and (score >= ALERT_MIN_SCORE or awareness_alert_lane)
+        and (score >= elite_floor or continuation_alert_lane or awareness_alert_lane)
         and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE
         and structure_score >= TRADE_ALERT_MIN_STRUCTURE_SCORE
         and (near_high or breakout or higher_lows or coil.get("detected"))
@@ -4424,7 +4494,7 @@ def is_in_play_alert(result):
         or (breakout and near_high and higher_lows)
         or (coil.get("detected") and (near_high or higher_lows) and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE)
         or high_quality_above_vwap
-        or (clean_phase and elite_alert_lane and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE)
+        or (clean_phase and (elite_alert_lane or continuation_alert_lane) and entry_score >= TRADE_ALERT_MIN_ENTRY_SCORE)
     )
 
     if not clean_trigger:
@@ -4454,6 +4524,10 @@ def is_in_play_alert(result):
     # Weak/no-news setups must have a real technical trigger.
     if news_score < 5.0 and not (second_leg.get("detected") or breakout or clean_phase or awareness_alert_lane):
         return False, "not in play — weak news without breakout/second leg"
+
+    if continuation_alert_lane and not elite_alert_lane:
+        result["continuation_alert"] = True
+        return True, "continuation/reclaim lane"
 
     if awareness_alert_lane and not elite_alert_lane:
         result["awareness_alert"] = True
@@ -4497,6 +4571,8 @@ def should_alert(result):
 # ============================================================
 
 def alert_title(result):
+    if result.get("continuation_alert"):
+        return "🔁 IN PLAY — CONTINUATION"
     if result.get("awareness_alert"):
         return "👀 POTENTIAL RUNNER — EARLY"
     # v36.1: open-drive ignition gets its own clean title.
