@@ -7133,6 +7133,278 @@ def run_scanner():
             time.sleep(30 if market_is_active() else CLOSED_ERROR_SLEEP_SECONDS)
 
 
+
+
+# ============================================================
+# v41.1 SPEED FIX — LEADER ONLY, NO DEAD SOURCES, NONBLOCKING NEWS
+# ============================================================
+BOOT_MARKER = "elite scanner v41.1 — LEADER ONLY SPEED FIX"
+MAX_ALERTS_PER_CYCLE = 2
+LEADER_NEWS_PREFETCH_MAX = 0  # disable during scan; alert uses cached/unknown only
+FAST_QUOTE_TTL_SECONDS = 12
+PROFILE_FAST_CACHE_TTL_SECONDS = 6 * 3600
+
+
+def get_multi_source_leaders():
+    """v41.1: market-hours speed source stack.
+
+    StockAnalysis + TradingView are the only sources that consistently found the real leaders.
+    Yahoo/Webull/Nasdaq/Finviz/MarketWatch were adding seconds and mostly returning 0/429/417.
+    """
+    sources = []
+    sources.extend(get_stockanalysis_gainers())
+    sources.extend(get_tradingview_gainers())
+    merged = merge_leader_sources(sources)
+    print(f"[v41.1 LEADERS] fast sources merged {len(merged)} candidates from {len(sources)} raw names")
+    return merged
+
+
+def get_live_quote(ticker):
+    """v41.1 fast quote path.
+
+    Use Finnhub first and validate later against source gain + 1m candle close.
+    Do not burn time on Yahoo/TwelveData during active scans because Yahoo is 429ing and TwelveData is limiting.
+    """
+    cached = cached_get(QUOTE_CACHE, ticker, ttl=FAST_QUOTE_TTL_SECONDS)
+    if cached:
+        return cached
+
+    q = None
+    if FINNHUB_API_KEY:
+        try:
+            url = "https://finnhub.io/api/v1/quote"
+            r = http_get(url, params={"symbol": ticker, "token": FINNHUB_API_KEY}, timeout=1.8)
+            data = safe_json_response(r, f"QUOTE FAST Finnhub {ticker}")
+            if data:
+                price = safe_float(data.get("c"))
+                prev_close = safe_float(data.get("pc"))
+                gain = ((price - prev_close) / prev_close) * 100 if price > 0 and prev_close > 0 else 0.0
+                q = normalize_quote(price=price, gain=gain, volume=0, source="Finnhub-fast")
+        except Exception as e:
+            print(f"[QUOTE FAST ERROR] {ticker}: Finnhub {e}")
+
+    if q and quote_is_valid(q, ticker):
+        q["confirmed"] = False
+        q["unconfirmed_quote"] = True
+        print(f"[LIVE FAST] {ticker} {fmt_money(q.get('price'))} {safe_float(q.get('gain')):.1f}% src={q.get('source')}")
+        remember_good_quote(ticker, q)
+        return cached_set(QUOTE_CACHE, ticker, q)
+
+    last_good = get_last_good_quote(ticker, max_age=90)
+    if last_good and quote_is_valid(last_good, ticker):
+        last_good["confirmed"] = False
+        last_good["unconfirmed_quote"] = True
+        print(f"[QUOTE FAST FALLBACK] {ticker}: recent last-good ({last_good.get('reason')})")
+        return cached_set(QUOTE_CACHE, ticker, last_good)
+
+    print(f"[QUOTE FAST FAIL] {ticker}: no valid quote")
+    return normalize_quote(source="none", reason="fast quote failed")
+
+
+def prefetch_news_for_leaders(candidates):
+    """v41.1: never let news slow the scanner.
+
+    News lookup can be run later or only after an alert. During live leader scans,
+    every alert can show UNKNOWN CATALYST immediately if cache is not already warm.
+    """
+    return
+
+
+def ensure_alert_news(result):
+    """v41.1: nonblocking news attach.
+
+    Do not call PR/Globe/Finnhub news inside alert build. Use cache only.
+    """
+    result = result or {}
+    ticker = str(result.get("ticker", "")).upper().strip()
+    cached = cached_get(NEWS_CACHE, ticker, ttl=CACHE_TTL_SECONDS) if ticker else None
+    if cached:
+        result["news"] = cached
+        result["news_headline"] = clean_text((cached or {}).get("headline") or "")
+        result["news_score"] = safe_float((cached or {}).get("score"))
+    else:
+        result["news"] = {"quality": "NONE", "score": 0, "headline": "", "rank_meaning": UNKNOWN_CATALYST_LABEL, "explain": UNKNOWN_CATALYST_LABEL}
+        result["news_headline"] = ""
+        result["news_score"] = 0
+    return result
+
+
+def build_fast_live_result(candidate, regime=None):
+    ticker = str((candidate or {}).get("ticker", "")).upper().strip()
+    if not ticker or is_bad_ticker(ticker):
+        return None
+
+    quote = get_live_quote(ticker)
+    if not quote_is_valid(quote, ticker):
+        return None
+
+    price = safe_float(quote.get("price"))
+    gain = safe_float(quote.get("gain"))
+    source_gain = safe_float((candidate or {}).get("gain"))
+    if gain < ALERT_HARD_MIN_GAIN:
+        print(f"[v41.1 SKIP] {ticker}: live gain {gain:.1f}% below 25%; source {source_gain:.1f}% ignored")
+        return None
+
+    volume = max(safe_int(quote.get("volume")), safe_int((candidate or {}).get("volume")))
+    if volume < LEADER_ONLY_MIN_VOLUME:
+        print(f"[v41.1 SKIP] {ticker}: volume {fmt_big_num(volume)} below leader floor")
+        return None
+
+    if price < MIN_PRICE or price > MAX_PRICE:
+        print(f"[v41.1 SKIP] {ticker}: price {fmt_money(price)} outside range")
+        return None
+
+    # Fast bad-data guard: source gain must roughly agree unless both are extreme leaders.
+    ok_source, why_source = validate_live_vs_source_gain(ticker, gain, source_gain, quote)
+    if not ok_source:
+        print(f"[v41.1 SKIP] {ticker}: bad data — {why_source}")
+        return None
+
+    candles = get_candles(ticker)
+    if not valid_candle_list(candles, min_count=MOVING_NOW_MIN_CANDLES):
+        print(f"[v41.1 SKIP] {ticker}: no reliable 1m candles")
+        return None
+
+    ok_candle, why_candle = quote_matches_candles(ticker, quote, candles)
+    if not ok_candle:
+        print(f"[v41.1 SKIP] {ticker}: bad data — {why_candle}")
+        return None
+
+    structure = get_structure(candles, ticker)
+    chart_timing = analyze_chart_timing(candles, structure, price)
+    spike_ok, spike_pct, spike_reason = detect_v41_fast_spike(ticker, price, candles, chart_timing)
+    if spike_ok:
+        chart_timing["fast_leader_spike"] = True
+        chart_timing["fast_leader_spike_pct"] = spike_pct
+        chart_timing["fast_leader_spike_reason"] = spike_reason
+
+    # Speed fix: do not call profile during scan. Use source float if available; otherwise unknown.
+    float_shares = safe_int((candidate or {}).get("float"))
+    market_cap = safe_int((candidate or {}).get("market_cap"))
+
+    result = {
+        "ticker": ticker,
+        "price": price,
+        "gain": gain,
+        "volume": volume,
+        "float": float_shares,
+        "market_cap": market_cap,
+        "score": gain / 10.0,
+        "bias": "LEADER",
+        "trade_tier": "LEADER",
+        "phase": "LIVE",
+        "source": (candidate or {}).get("source") or quote.get("source"),
+        "quote": quote,
+        "data_confirmed": bool(quote.get("confirmed")) or "quote/candle diff" in str(why_candle),
+        "news": {"quality": "NONE", "headline": "", "score": 0},
+        "news_score": 0,
+        "sec": {},
+        "structure": structure,
+        "chart_timing": chart_timing,
+        "fast_live": True,
+        "fast_leader_spike": spike_ok,
+        "regime": regime or {"label": "⚪ NORMAL", "description": "Normal momentum tape", "score_adjust": 0},
+    }
+
+    trigger, trigger_reason = classify_v41_leader_trigger(result)
+    if not trigger:
+        print(f"[v41.1 LOG ONLY] {ticker}: {trigger_reason}")
+        return None
+
+    result["v41_trigger"] = trigger
+    result["moving_now_reason"] = trigger_reason
+    ensure_alert_news(result)
+
+    print(
+        f"[v41.1 ALERTABLE] {ticker} {trigger} +{gain:.1f}% {fmt_money(price)} "
+        f"vol={fmt_big_num(volume)} offHOD={safe_float(chart_timing.get('off_high_pct')):.1f}% "
+        f"reason={trigger_reason}"
+    )
+    return result
+
+
+def build_alert(result):
+    result = normalize_alert_fields(result)
+    result = ensure_alert_news(result)
+    news = result.get("news") or {}
+
+    trigger = result.get("v41_trigger") or "LEADER_TRIGGER"
+    titles = {
+        "FAST_LEADER_SPIKE": "🚀 FAST LEADER SPIKE",
+        "FRESH_HOD_BREAKOUT": "🔥 FRESH HOD BREAKOUT",
+        "SECOND_LEG_SETUP": "📈 SECOND-LEG SETUP",
+        "VWAP_RECLAIM_PUSH": "🟢 VWAP RECLAIM PUSH",
+    }
+    title = f"{titles.get(trigger, '🔥 LEADER TRIGGER')} — {result['ticker']}"
+
+    float_text = fmt_big_num(result.get("float")) if result.get("float") else "unknown"
+    chart = result.get("chart_timing") or {}
+    data_line = "quote+candle checked" if not result.get("data_confirmed") else "confirmed"
+    headline = clean_text(news.get("headline") or result.get("news_headline") or "")
+    news_line = compact_news_line(news)
+
+    lines = [
+        title,
+        "",
+        f"{fmt_money(result['price'])} | +{safe_float(result.get('gain')):.1f}%",
+        f"Vol: {fmt_big_num(result.get('volume'))} | Float: {float_text}",
+        f"Data: {data_line}",
+        f"Why: {result.get('moving_now_reason')}",
+        f"Chart: off HOD {safe_float(chart.get('off_high_pct')):.1f}% | last3 {fmt_signed_pct(chart.get('last3_change_pct'))} | vol {max(safe_float(chart.get('volume_ratio')), safe_float(chart.get('volume_ratio_10'))):.1f}x",
+        "",
+        news_line,
+    ]
+    if headline and UNKNOWN_CATALYST_LABEL not in news_line:
+        lines.append(f"Headline: {headline[:220]}")
+    elif UNKNOWN_CATALYST_LABEL in news_line:
+        lines.append("Headline: pending/background — investigate Webull/filings manually")
+    return "\n".join(lines)
+
+
+def run_scanner():
+    print(f"[BOOT] {BOOT_MARKER}")
+    while True:
+        try:
+            if not market_is_active():
+                sleep_for = seconds_until_next_scan_window()
+                print(f"[SLEEP] market inactive — sleeping {sleep_for}s")
+                time.sleep(sleep_for)
+                continue
+
+            SENT_THIS_CYCLE.clear()
+            global NEWS_CALLS_THIS_CYCLE, SEC_CALLS_THIS_CYCLE
+            NEWS_CALLS_THIS_CYCLE = 0
+            SEC_CALLS_THIS_CYCLE = 0
+
+            print(f"[SCAN] v41.1 leader-only speed scan ({get_market_session_label()})")
+            candidates = prioritize_live_leaders(get_candidates())
+            regime = estimate_market_regime(candidates)
+            print(f"[REGIME] {regime['label']} — {regime['description']}")
+
+            sent = 0
+            for candidate in candidates:
+                if sent >= MAX_ALERTS_PER_CYCLE:
+                    break
+                try:
+                    result = build_fast_live_result(candidate, regime)
+                    if result and should_alert(result):
+                        send_alert(build_alert(result))
+                        print(f"[v41.1 ALERT SENT] {result['ticker']} {result.get('v41_trigger')}")
+                        sent += 1
+                except Exception as e:
+                    print(f"[v41.1 ERROR] {candidate.get('ticker')}: {e}")
+
+            if sent:
+                print(f"[SCAN] Cycle complete — {sent} leader-only alert(s) sent")
+            else:
+                print("[SCAN] Cycle complete — no leader spike/setup alerts")
+            time.sleep(dynamic_scan_sleep())
+
+        except Exception as e:
+            print(f"[SCANNER ERROR] {e}")
+            time.sleep(30 if market_is_active() else CLOSED_ERROR_SLEEP_SECONDS)
+
+
 if __name__ == "__main__":
     Thread(target=start_web_server, daemon=True).start()
     run_scanner()
