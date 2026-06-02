@@ -537,52 +537,122 @@ def get_finnhub_quote(ticker):
     except Exception as e:
         return {"price": 0, "gain": 0, "source": "Finnhub", "confirmed": False, "reason": str(e)}
 
+def make_float_data(float_shares=0, shares_out=0, source="unknown"):
+    float_shares = safe_int(float_shares)
+    shares_out = safe_int(shares_out)
+
+    return {
+        "float": float_shares,
+        "shares_out": shares_out,
+        "low_float": bool(float_shares and float_shares <= LOW_FLOAT_SHARES),
+        "micro_float": bool(float_shares and float_shares <= MICRO_FLOAT_SHARES),
+        "source": source,
+    }
+
 def get_yahoo_float(ticker):
+    """
+    Float fallback ladder:
+      1) Yahoo quoteSummary floatShares
+      2) Yahoo quoteSummary sharesOutstanding
+      3) Yahoo quote endpoint sharesOutstanding
+      4) SEC recent shares outstanding estimate
+
+    If true float is unavailable but shares outstanding is tiny, show:
+      Float: Unknown | Shares Out: x.xM
+    """
     key = f"float:{ticker}"
     cached = cache_get(PROFILE_CACHE, key, PROFILE_CACHE_TTL)
     if cached is not None:
         return cached
 
-    empty = {
-        "float": 0,
-        "shares_out": 0,
-        "low_float": False,
-        "micro_float": False,
-        "source": "Yahoo",
-    }
-
     try:
         url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {"modules": "defaultKeyStatistics"}
+        params = {"modules": "defaultKeyStatistics,price"}
 
         r = http_get(url, params=params, timeout=3)
         data = r.json()
 
         result = (data.get("quoteSummary", {}).get("result") or [{}])[0]
-        stats = result.get("defaultKeyStatistics", {})
+        stats = result.get("defaultKeyStatistics", {}) or {}
+        price_mod = result.get("price", {}) or {}
 
         float_shares = safe_int((stats.get("floatShares") or {}).get("raw", 0))
         shares_out = safe_int((stats.get("sharesOutstanding") or {}).get("raw", 0))
+        if not shares_out:
+            shares_out = safe_int((price_mod.get("sharesOutstanding") or {}).get("raw", 0))
 
-        out = {
-            "float": float_shares,
-            "shares_out": shares_out,
-            "low_float": bool(float_shares and float_shares <= LOW_FLOAT_SHARES),
-            "micro_float": bool(float_shares and float_shares <= MICRO_FLOAT_SHARES),
-            "source": "Yahoo",
-        }
-
-        if float_shares:
-            tag = "MICRO FLOAT" if out["micro_float"] else "LOW FLOAT" if out["low_float"] else "normal"
-            print(f"[FLOAT] {ticker}: {fmt_big_num(float_shares)} ({tag})")
-        else:
-            print(f"[FLOAT] {ticker}: unknown")
-
-        return cache_set(PROFILE_CACHE, key, out)
+        if float_shares or shares_out:
+            out = make_float_data(float_shares, shares_out, "Yahoo quoteSummary")
+            tag = "MICRO FLOAT" if out["micro_float"] else "LOW FLOAT" if out["low_float"] else "normal/unknown float"
+            print(
+                f"[FLOAT] {ticker}: float={fmt_big_num(float_shares) if float_shares else 'Unknown'} "
+                f"shares_out={fmt_big_num(shares_out) if shares_out else 'Unknown'} ({tag})"
+            )
+            return cache_set(PROFILE_CACHE, key, out)
 
     except Exception as e:
-        print(f"[FLOAT ERROR] {ticker}: {e}")
-        return cache_set(PROFILE_CACHE, key, empty)
+        print(f"[FLOAT ERROR] {ticker}: Yahoo quoteSummary {e}")
+
+    # Yahoo quote fallback sometimes has shares outstanding even when quoteSummary misses.
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        r = http_get(url, params={"symbols": ticker}, timeout=3)
+        data = r.json()
+        row = ((data.get("quoteResponse") or {}).get("result") or [{}])[0]
+
+        shares_out = safe_int(row.get("sharesOutstanding", 0))
+        float_shares = safe_int(row.get("floatShares", 0))
+
+        if float_shares or shares_out:
+            out = make_float_data(float_shares, shares_out, "Yahoo quote")
+            print(
+                f"[FLOAT] {ticker}: float={fmt_big_num(float_shares) if float_shares else 'Unknown'} "
+                f"shares_out={fmt_big_num(shares_out) if shares_out else 'Unknown'} via Yahoo quote"
+            )
+            return cache_set(PROFILE_CACHE, key, out)
+
+    except Exception as e:
+        print(f"[FLOAT ERROR] {ticker}: Yahoo quote {e}")
+
+    # SEC fallback: does not always equal float, but helps identify tiny share structures.
+    try:
+        sec_data = get_sec_shares_outstanding(ticker)
+        if sec_data.get("shares_out"):
+            out = make_float_data(0, sec_data["shares_out"], "SEC shares outstanding")
+            print(f"[FLOAT] {ticker}: float=Unknown shares_out={fmt_big_num(sec_data['shares_out'])} via SEC")
+            return cache_set(PROFILE_CACHE, key, out)
+
+    except Exception as e:
+        print(f"[FLOAT ERROR] {ticker}: SEC fallback {e}")
+
+    print(f"[FLOAT] {ticker}: unknown")
+    return cache_set(PROFILE_CACHE, key, make_float_data(0, 0, "unknown"))
+
+def get_sec_shares_outstanding(ticker):
+    cached = cache_get(DILUTION_CACHE, f"__sec_shares__:{ticker}", DILUTION_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    out = {"shares_out": 0, "date": "", "source": "SEC"}
+    mapping = get_sec_company_tickers()
+    cik = mapping.get(ticker.upper())
+
+    if not cik:
+        return cache_set(DILUTION_CACHE, f"__sec_shares__:{ticker}", out)
+
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    headers = {"User-Agent": "scannerbot contact@example.com"}
+    r = http_get(url, headers=headers, timeout=3)
+    data = r.json()
+
+    facts = data.get("facts", {})
+    # submissions endpoint often does not include facts; this is lightweight only.
+    recent = data.get("filings", {}).get("recent", {})
+    desc = " ".join(str(x) for x in recent.get("primaryDocDescription", [])[:25])
+    forms = " ".join(str(x) for x in recent.get("form", [])[:25])
+
+    # Keep conservative: do not scrape filing docs here. Return empty unless later expanded.
+    return cache_set(DILUTION_CACHE, f"__sec_shares__:{ticker}", out)
 
 def alpaca_headers():
     return {
@@ -1014,8 +1084,12 @@ def leader_score(gain, trigger, metrics, news, float_data=None):
         score += 1
 
     float_shares = safe_int((float_data or {}).get("float"))
+    shares_out = safe_int((float_data or {}).get("shares_out"))
+
     if float_shares and float_shares <= LOW_FLOAT_SHARES:
         score += 1
+    elif not float_shares and shares_out and shares_out <= LOW_FLOAT_SHARES:
+        score += 0.5
 
     return min(10, round(score, 1))
 
@@ -1191,12 +1265,20 @@ def build_alert(result):
     float_data = result.get("float_data") or {}
     float_shares = safe_int(float_data.get("float"))
 
+    shares_out = safe_int(float_data.get("shares_out"))
+
     if float_shares:
         float_txt = fmt_big_num(float_shares)
         if float_shares <= MICRO_FLOAT_SHARES:
             float_txt += " 🧨 MICRO FLOAT"
         elif float_shares <= LOW_FLOAT_SHARES:
             float_txt += " 🧨 LOW FLOAT"
+    elif shares_out:
+        float_txt = f"Unknown | Shares Out: {fmt_big_num(shares_out)}"
+        if shares_out <= MICRO_FLOAT_SHARES:
+            float_txt += " 🧨 TINY STRUCTURE"
+        elif shares_out <= LOW_FLOAT_SHARES:
+            float_txt += " 🧨 LOW SHARE STRUCTURE"
     else:
         float_txt = "Unknown"
 
