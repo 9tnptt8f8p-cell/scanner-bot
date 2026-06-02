@@ -17,7 +17,7 @@ from alerts import send_alert
 load_dotenv()
 
 # ============================================================
-# CLEAN LEADER-ONLY SCANNER v42.6
+# CLEAN LEADER-ONLY SCANNER v42.7
 #
 # Built fresh:
 #   - Leader-only scanner
@@ -46,7 +46,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v42.6 — YAHOO 1M FALLBACK + STALE BLOCK"
+BOOT_MARKER = "elite scanner v42.7 — SMART YAHOO FALLBACK + LAG FILTER"
 
 # ============================================================
 # ENV
@@ -101,8 +101,13 @@ MIN_RE_ALERT_LAST3_CHANGE = 3.0           # last3 metric must improve by 3 pts
 
 # Stale candle protection.
 # If bars are stale, do not send structure/spike alerts from old data.
-STALE_CANDLE_WARN_SECONDS = 90
-STALE_CANDLE_BLOCK_SECONDS = 180
+# Yahoo 1m finalized bars are usually 60-120s behind by design.
+# Warn too early and every alert looks broken, even when usable.
+STALE_CANDLE_WARN_SECONDS = 150
+STALE_CANDLE_BLOCK_SECONDS = 240
+
+# If Alpaca is older than this, try Yahoo before judging the setup.
+ALPACA_FALLBACK_SECONDS = 90
 
 # Trigger thresholds
 FAST_SPIKE_PCT = 10.0
@@ -501,10 +506,10 @@ def get_true_leaders():
 
     true = true[:MAX_TRACKED_LEADERS]
 
-    print(f"[v42.6 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
+    print(f"[v42.7 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
 
     if true:
-        print("[v42.6 TRACKING] " + " | ".join(
+        print("[v42.7 TRACKING] " + " | ".join(
             f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
             for x in true[:12]
         ))
@@ -805,10 +810,11 @@ def get_best_candles(ticker):
     alpaca = get_alpaca_candles(ticker)
     alpaca_metrics = moving_now_metrics(alpaca) if alpaca else {"ok": False, "last_bar_age_seconds": 999999}
 
-    if alpaca_metrics.get("ok") and safe_float(alpaca_metrics.get("last_bar_age_seconds")) < STALE_CANDLE_BLOCK_SECONDS:
+    alpaca_age = safe_float(alpaca_metrics.get("last_bar_age_seconds", 999999))
+
+    if alpaca_metrics.get("ok") and alpaca_age < ALPACA_FALLBACK_SECONDS:
         return alpaca, "Alpaca candles"
 
-    alpaca_age = safe_float(alpaca_metrics.get("last_bar_age_seconds", 999999))
     print(f"[CANDLES FALLBACK] {ticker}: Alpaca stale/missing age={int(alpaca_age)}s — trying Yahoo 1m")
 
     yahoo = get_yahoo_candles(ticker)
@@ -817,7 +823,9 @@ def get_best_candles(ticker):
     if yahoo_metrics.get("ok"):
         yahoo_age = safe_float(yahoo_metrics.get("last_bar_age_seconds", 999999))
         print(f"[CANDLES FALLBACK] {ticker}: Yahoo age={int(yahoo_age)}s")
-        return yahoo, "Yahoo 1m candles"
+        if yahoo_age < STALE_CANDLE_BLOCK_SECONDS:
+            return yahoo, "Yahoo 1m candles"
+        print(f"[CANDLES FALLBACK] {ticker}: Yahoo also stale — falling back to Alpaca")
 
     return alpaca, "Alpaca candles"
 
@@ -1488,14 +1496,14 @@ def evaluate_leader(item):
     quote_ok, quote_reason = validate_quote_against_source(ticker, source_gain, quote)
 
     if not quote_ok:
-        print(f"[v42.6 SKIP] {ticker}: {quote_reason}")
+        print(f"[v42.7 SKIP] {ticker}: {quote_reason}")
         return None
 
     candles, candle_source = get_best_candles(ticker)
     metrics = moving_now_metrics(candles)
 
     if not metrics.get("ok"):
-        print(f"[v42.6 LOG ONLY] {ticker}: {metrics.get('reason')}")
+        print(f"[v42.7 LOG ONLY] {ticker}: {metrics.get('reason')}")
         return None
 
     candle_price = safe_float(metrics.get("price"))
@@ -1514,10 +1522,10 @@ def evaluate_leader(item):
     trigger, why = classify_trigger(metrics)
 
     if candle_age >= STALE_CANDLE_WARN_SECONDS:
-        why = f"{why} | ⚠️ candle stale {int(candle_age)}s"
+        why = f"{why} | ⚠️ candle lag {int(candle_age)}s"
 
     if not trigger:
-        print(f"[v42.6 LOG ONLY] {ticker}: {why}")
+        print(f"[v42.7 LOG ONLY] {ticker}: {why}")
         return None
 
     allowed, reason = can_alert(ticker, trigger, metrics)
@@ -1564,7 +1572,7 @@ def evaluate_leader(item):
     }
 
     print(
-        f"[v42.6 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
+        f"[v42.7 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
         f"price={fmt_money(price)} gain={live_gain:.1f}% "
         f"float={fmt_big_num(float_data.get('float', 0)) if float_data.get('float') else 'Unknown'}"
     )
@@ -1576,7 +1584,7 @@ def run_scan_cycle():
         return 0
 
     session = get_session_label()
-    print(f"[SCAN] v42.6 clean leader-only scan ({session})")
+    print(f"[SCAN] v42.7 clean leader-only scan ({session})")
 
     leaders = get_true_leaders()
 
