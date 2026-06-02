@@ -1539,6 +1539,3 @@ def scanner_loop():
 if __name__ == "__main__":
     Thread(target=start_web_server, daemon=True).start()
     scanner_loop()
-
-
-    
