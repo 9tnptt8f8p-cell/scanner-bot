@@ -33,7 +33,6 @@ import time
 import json
 import math
 import html
-import pytz
 import queue
 import random
 import logging
@@ -41,6 +40,7 @@ import threading
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Any, Tuple
 
 import requests
@@ -56,9 +56,9 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "v43.3-no-score-fast-news"
+VERSION = "v43.4-no-pytz-render-fix"
 
-TZ = pytz.timezone("America/New_York")
+TZ = ZoneInfo("America/New_York")
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
@@ -503,7 +503,7 @@ def alpaca_bars_1m(ticker: str) -> Optional[CandleBundle]:
     if not ALPACA_KEY or not ALPACA_SECRET:
         return None
 
-    end = datetime.utcnow()
+    end = datetime.now(ZoneInfo("UTC")).replace(tzinfo=None)
     start = end - timedelta(hours=10)
     url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
     params = {
@@ -1483,6 +1483,7 @@ def scan_cycle():
 
 def scanner_loop():
     logging.info(f"[START] {VERSION}")
+    logging.info("[BOOT CHECK] If logs show v42.7, Render is still running old simple_main.py or old service instance.")
     while True:
         try:
             last_heartbeat["ts"] = now_et().isoformat()
@@ -1505,6 +1506,7 @@ def home():
     return jsonify({
         "ok": True,
         "version": VERSION,
+        "deploy_check": "v43.4 active — no pytz dependency",
         "session": market_session(),
         "active": scanner_active(),
         "heartbeat": last_heartbeat,
