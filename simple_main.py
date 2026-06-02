@@ -56,7 +56,7 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "v43.0-leader-news-rebuild"
+VERSION = "v43.1-hod-leader-override"
 
 TZ = pytz.timezone("America/New_York")
 
@@ -81,6 +81,11 @@ ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "10"))
 
 FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
 FAST_SPIKE_LOOKBACK_MIN = int(os.getenv("FAST_SPIKE_LOOKBACK_MIN", "5"))
+
+# v43.1 leader override rules
+FRESH_HOD_LEADER_GAIN = float(os.getenv("FRESH_HOD_LEADER_GAIN", "50"))
+FRESH_HOD_NEAR_HIGH_PCT = float(os.getenv("FRESH_HOD_NEAR_HIGH_PCT", "3.0"))
+LEADER_TRACK_BELOW_VWAP_GAIN = float(os.getenv("LEADER_TRACK_BELOW_VWAP_GAIN", "50"))
 
 STALE_CANDLE_SECONDS = int(os.getenv("STALE_CANDLE_SECONDS", "180"))
 
@@ -1196,23 +1201,41 @@ def fast_spike_detected(ticker: str, price: float) -> Tuple[bool, float]:
 
 
 def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: float) -> Tuple[bool, str]:
+    """
+    v43.1 alert rules:
+    - No alerts under MIN_ALERT_GAIN.
+    - Below VWAP leaders are tracked/logged, not pushed to Discord.
+    - Fresh HOD breakout on a +50% true leader bypasses score/weak catalyst.
+    - PUSH requires VWAP + expansion.
+    - Fast +10% leader spike still alerts.
+    """
     if c.gain_pct < MIN_ALERT_GAIN:
         return False, f"gain under {MIN_ALERT_GAIN:.0f}%"
 
     if sr.stale:
         return False, "stale candle"
 
+    leader_override = c.rank <= 5 or c.volume >= LEADER_DAY_VOLUME or c.gain_pct >= FRESH_HOD_LEADER_GAIN
+    fresh_hod_breakout = (
+        leader_override
+        and c.gain_pct >= FRESH_HOD_LEADER_GAIN
+        and sr.new_high_push
+        and sr.off_hod_pct <= FRESH_HOD_NEAR_HIGH_PCT
+    )
+
+    fast_spike, spike_pct = fast_spike_detected(c.ticker, price)
+
+    # Important: below VWAP should not alert as a PUSH, but it should be logged as a tracked leader.
     if not sr.above_vwap:
+        if c.gain_pct >= LEADER_TRACK_BELOW_VWAP_GAIN or leader_override:
+            return False, "LEADER BELOW VWAP — WATCH RECLAIM"
         return False, "below VWAP"
 
-    if sr.off_hod_pct > 15:
+    if sr.off_hod_pct > 15 and not fast_spike:
         return False, f"{sr.off_hod_pct:.1f}% off HOD"
 
     if c.volume < MIN_DAY_VOLUME:
         return False, "volume too low"
-
-    leader_override = c.rank <= 5 or c.volume >= LEADER_DAY_VOLUME or c.gain_pct >= 50
-    fast_spike, spike_pct = fast_spike_detected(c.ticker, price)
 
     structure_ok = (
         sr.new_high_push
@@ -1221,8 +1244,21 @@ def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: flo
         or sr.higher_lows
     )
 
-    if not (leader_override or fast_spike or structure_ok):
+    # v43.1: HOD leader breakout can bypass weak score/news. This fixes LASE-style block.
+    if fresh_hod_breakout:
+        raw_reason = "fresh HOD breakout leader override"
+    elif fast_spike:
+        raw_reason = f"fast +{spike_pct:.1f}% leader spike"
+    elif sr.new_high_push:
+        raw_reason = "new high push"
+    elif sr.last3_pct >= 2:
+        raw_reason = "VWAP reclaim push"
+    elif leader_override and structure_ok:
+        raw_reason = "market leader continuation"
+    elif not structure_ok:
         return False, "no meaningful push"
+    else:
+        raw_reason = "valid leader setup"
 
     state = ALERT_STATE.setdefault(c.ticker, AlertState())
     minutes_since = (time.time() - state.last_alert_ts) / 60 if state.last_alert_ts else 999
@@ -1237,6 +1273,8 @@ def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: flo
         meaningful_change = True
     if fast_spike:
         meaningful_change = True
+    if fresh_hod_breakout:
+        meaningful_change = True
     if news.found and news.headline != state.last_title:
         meaningful_change = True
 
@@ -1246,23 +1284,12 @@ def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: flo
     if not meaningful_change:
         return False, "repeat alert suppressed"
 
-    if fast_spike:
-        return True, f"fast +{spike_pct:.1f}% leader spike"
-
-    if sr.new_high_push:
-        return True, "new high push"
-
-    if sr.last3_pct >= 2:
-        return True, "VWAP reclaim push"
-
-    if leader_override:
-        return True, "market leader override"
-
-    return True, "valid leader setup"
-
+    return True, raw_reason
 
 def alert_title(reason: str) -> str:
     r = reason.lower()
+    if "fresh hod" in r:
+        return "🔥 FRESH HOD LEADER BREAKOUT"
     if "fast" in r:
         return "🔥 FAST LEADER PUSH"
     if "new high" in r:
@@ -1354,6 +1381,11 @@ def scan_one(c: Candidate) -> Optional[str]:
     news = find_ranked_news(ticker)
 
     should, reason = should_alert(c, sr, news, c.price)
+
+    if not should and "WATCH RECLAIM" in reason:
+        logging.info(f"[TRACK ONLY] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {reason}")
+        return None
+
     logging.info(f"[CHECK] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {should} {reason}")
 
     if not should:
