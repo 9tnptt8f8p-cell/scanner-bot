@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v43-clean-rebuild-leader-first"
+VERSION = "v43.8-full-file-fix-telegram-quotes-news"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -75,11 +75,23 @@ YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
 LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "").strip()
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "").strip()
+def env_first(*names: str) -> str:
+    """Return the first non-empty env var, stripped of spaces and accidental quotes."""
+    for name in names:
+        value = os.getenv(name, "")
+        if value is None:
+            continue
+        value = str(value).strip().strip('"').strip("'")
+        if value:
+            return value
+    return ""
+
+
+TELEGRAM_BOT_TOKEN = env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "BOT_TOKEN")
+TELEGRAM_CHAT_ID = env_first("TELEGRAM_CHAT_ID", "TELEGRAM_CHANNEL_ID", "CHAT_ID")
+FINNHUB_API_KEY = env_first("FINNHUB_API_KEY", "FINNHUB_TOKEN")
+ALPACA_API_KEY = env_first("ALPACA_API_KEY", "APCA_API_KEY_ID", "APCA_API_KEY")
+ALPACA_SECRET_KEY = env_first("ALPACA_SECRET_KEY", "APCA_API_SECRET_KEY", "APCA_SECRET_KEY")
 
 USER_AGENT = os.getenv(
     "USER_AGENT",
@@ -295,7 +307,11 @@ def http_get(url: str, *, source: str, params: Optional[Dict[str, Any]] = None, 
         resp = SESSION.get(url, params=params, headers=headers, timeout=timeout)
         log.info("[HTTP] %s status=%s", url.split("?")[0], resp.status_code)
         if resp.status_code == 429:
-            block_source(source, YAHOO_COOLDOWN_SECONDS if source == "yahoo" else SOURCE_COOLDOWN_SECONDS, "429")
+            block_source(source, YAHOO_COOLDOWN_SECONDS if source in {"yahoo", "yahoo_quote"} else SOURCE_COOLDOWN_SECONDS, "429")
+            return None
+        if resp.status_code == 401:
+            block_source(source, YAHOO_COOLDOWN_SECONDS if source.startswith("yahoo") else SOURCE_COOLDOWN_SECONDS, "401")
+            log.warning("[%s HTTP] status=%s body=%s", source.upper(), resp.status_code, resp.text[:200])
             return None
         if resp.status_code >= 500:
             block_source(source, SOURCE_COOLDOWN_SECONDS, f"{resp.status_code}")
@@ -583,18 +599,35 @@ def get_yahoo_quote(ticker: str) -> Optional[Quote]:
 
 
 def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
-    # Prefer Finnhub live quote if key exists, but do not require it.
-    for fn in (get_finnhub_quote, get_yahoo_quote):
-        q = fn(ticker)
-        if q and q.price > 0:
-            if leader:
-                if not q.change_pct and leader.change_pct:
-                    q.change_pct = leader.change_pct
-                if not q.day_volume and leader.volume:
-                    q.day_volume = leader.volume
-            return q
+    """
+    Quote priority:
+    1) Finnhub live quote while available.
+    2) Leader snapshot from Nasdaq/Yahoo gainers, so scanner keeps working during Finnhub 429s.
+    3) Yahoo quote only if it is not blocked. Yahoo quote often returns 401 on Render.
+    """
+    q = get_finnhub_quote(ticker)
+    if q and q.price > 0:
+        if leader:
+            if not q.change_pct and leader.change_pct:
+                q.change_pct = leader.change_pct
+            if not q.day_volume and leader.volume:
+                q.day_volume = leader.volume
+        return q
+
     if leader and leader.price > 0:
-        return Quote(ticker=ticker, price=leader.price, change_pct=leader.change_pct, day_volume=leader.volume, source=f"leader:{leader.source}")
+        return Quote(
+            ticker=ticker,
+            price=leader.price,
+            change_pct=leader.change_pct,
+            day_volume=leader.volume,
+            source=f"leader:{leader.source}",
+        )
+
+    if source_allowed("yahoo_quote"):
+        q = get_yahoo_quote(ticker)
+        if q and q.price > 0:
+            return q
+
     return None
 
 
@@ -763,6 +796,8 @@ WEAK_NEWS_TERMS = [
 JUNK_NEWS_PHRASES = [
     "stocks moving", "stock moving", "why shares are trading", "premarket movers", "most active",
     "gap-ups and gap-downs", "top gainers", "market movers", "52-week", "benzinga pro's top",
+    "stocks that are on the move", "on the move in today", "moving in today", "closing bell",
+    "intraday session", "pre-market session", "after the closing bell",
 ]
 DILUTION_TERMS = [
     "registered direct", "private placement", "atm", "at-the-market", "shelf", "s-3", "s-1",
@@ -849,14 +884,32 @@ def get_yahoo_news(ticker: str) -> Optional[NewsResult]:
 
 
 def best_news(ticker: str) -> NewsResult:
+    """
+    Return the best real catalyst headline. Junk aggregator headlines are never used as the displayed headline.
+    """
+    fallback_dilution = False
+    fallback_dilution_note = ""
     for fn in (get_finnhub_news, get_yahoo_news):
         try:
             nr = fn(ticker)
-            if nr and nr.headline:
+            if not nr or not nr.headline:
+                continue
+            if nr.dilution_flag:
+                fallback_dilution = True
+                fallback_dilution_note = nr.dilution_note
+            if nr.grade == "JUNK":
+                continue
+            if nr.grade in {"STRONG", "WEAK"}:
                 return nr
         except Exception as exc:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
-    return NewsResult(grade="NONE", headline="UNKNOWN CATALYST — INVESTIGATE", source="none")
+    return NewsResult(
+        grade="NONE",
+        headline="UNKNOWN CATALYST — INVESTIGATE",
+        source="none",
+        dilution_flag=fallback_dilution,
+        dilution_note=fallback_dilution_note,
+    )
 
 
 # =============================================================================
@@ -1044,19 +1097,28 @@ def format_alert(d: CandidateDecision) -> str:
 
 
 def send_telegram(text: str) -> bool:
+    ticker = text.split("—")[-1].splitlines()[0].strip() if "—" in text else "unknown"
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.info("[ALERT DRY RUN]\n%s", text)
+        log.warning(
+            "[ALERT DRY RUN] missing Telegram config token=%s chat=%s ticker=%s\n%s",
+            bool(TELEGRAM_BOT_TOKEN),
+            bool(TELEGRAM_CHAT_ID),
+            ticker,
+            text,
+        )
         return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
     try:
-        resp = SESSION.post(url, json=payload, timeout=HTTP_TIMEOUT)
+        resp = SESSION.post(url, json=payload, timeout=10)
+        log.info("[TELEGRAM SEND] ticker=%s status=%s", ticker, resp.status_code)
         if resp.status_code >= 300:
-            log.warning("[TELEGRAM ERROR] status=%s body=%s", resp.status_code, resp.text[:200])
+            log.warning("[TELEGRAM ERROR] status=%s body=%s", resp.status_code, resp.text[:300])
             return False
         return True
     except Exception as exc:
-        log.warning("[TELEGRAM ERROR] %s", exc)
+        log.warning("[TELEGRAM ERROR] ticker=%s error=%s", ticker, exc)
         return False
 
 
@@ -1090,12 +1152,15 @@ def run_scan_cycle() -> Dict[str, Any]:
     alertable = [d for d in decisions if d.should_alert]
     alertable.sort(key=lambda d: (d.quality, max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0), d.quote.day_volume if d.quote else 0), reverse=True)
 
+    attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
     for d in alertable[:MAX_ALERTS_PER_CYCLE]:
         text = format_alert(d)
-        send_telegram(text)
-        mark_alerted(d.ticker, d.alert_type, d.quote or Quote(d.ticker), d.structure or Structure(), d.quality)
-        alerts.append(d.ticker)
-        sent += 1
+        if send_telegram(text):
+            mark_alerted(d.ticker, d.alert_type, d.quote or Quote(d.ticker), d.structure or Structure(), d.quality)
+            alerts.append(d.ticker)
+            sent += 1
+        else:
+            log.warning("[ALERT FAILED] %s not delivered; cooldown not applied", d.ticker)
 
     elapsed = round(time.time() - started, 2)
     summary = {
@@ -1104,11 +1169,13 @@ def run_scan_cycle() -> Dict[str, Any]:
         "leaders": len(leaders),
         "checked": checked,
         "alertable": len(alertable),
+        "attempted": attempted,
         "sent": sent,
         "alerts": alerts,
         "elapsed": elapsed,
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
     }
+    log.info("[DELIVERY] attempted=%s delivered=%s", attempted, sent)
     log.info("[CYCLE DONE] %s", json.dumps(summary, default=str))
     return summary
 
@@ -1116,6 +1183,19 @@ def run_scan_cycle() -> Dict[str, Any]:
 def scanner_loop() -> None:
     global LAST_CYCLE_SUMMARY
     log.info("[START] %s interval=%ss min_alert_gain=%s", VERSION, SCAN_INTERVAL_SECONDS, MIN_ALERT_GAIN_PCT)
+    log.info(
+        "[TELEGRAM CONFIG] token=%s chat=%s token_len=%s chat_len=%s",
+        bool(TELEGRAM_BOT_TOKEN),
+        bool(TELEGRAM_CHAT_ID),
+        len(TELEGRAM_BOT_TOKEN),
+        len(TELEGRAM_CHAT_ID),
+    )
+    log.info(
+        "[DATA CONFIG] finnhub=%s alpaca_key=%s alpaca_secret=%s",
+        bool(FINNHUB_API_KEY),
+        bool(ALPACA_API_KEY),
+        bool(ALPACA_SECRET_KEY),
+    )
     while RUNNING:
         try:
             LAST_CYCLE_SUMMARY = run_scan_cycle()
