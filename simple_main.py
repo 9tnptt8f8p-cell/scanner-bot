@@ -52,13 +52,15 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v44-leader-first-fast-spike-data-fix"
+VERSION = "v45-spike-spam-news-cache-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "5.5"))
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "12"))
+NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "5"))
 
 MIN_ALERT_GAIN_PCT = float(os.getenv("MIN_ALERT_GAIN_PCT", "25"))
 MIN_SCAN_GAIN_PCT = float(os.getenv("MIN_SCAN_GAIN_PCT", "20"))
@@ -69,8 +71,10 @@ MIN_RECENT_VOLUME = int(os.getenv("MIN_RECENT_VOLUME", "75000"))
 MAJOR_LEADER_GAIN_PCT = float(os.getenv("MAJOR_LEADER_GAIN_PCT", "50"))
 FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
 FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
-MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "4"))
-ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "600"))
+FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "180"))
+FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
+MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "6"))
+ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
 LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
@@ -221,8 +225,10 @@ RUNNING = True
 LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
 QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
 NEWS_CACHE: Dict[str, Tuple[float, NewsResult]] = {}
+CANDLE_CACHE: Dict[str, Tuple[float, List[Candle]]] = {}
 QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "30"))
-NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "180"))
+NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
+CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "30"))
 
 
 # =============================================================================
@@ -714,10 +720,18 @@ def get_alpaca_candles(ticker: str) -> List[Candle]:
 
 
 def best_candles(ticker: str) -> List[Candle]:
+    ticker = normalize_ticker(ticker)
+    cached = CANDLE_CACHE.get(ticker)
+    if cached:
+        ts, candles = cached
+        if time.time() - ts <= CANDLE_CACHE_TTL_SECONDS and candles:
+            return candles
+
     candles = get_alpaca_candles(ticker)
-    if len(candles) >= 20:
-        return candles
-    candles = get_yahoo_candles(ticker)
+    if len(candles) < 20:
+        candles = get_yahoo_candles(ticker)
+    if candles:
+        CANDLE_CACHE[ticker] = (time.time(), candles)
     return candles
 
 
@@ -837,7 +851,7 @@ def get_finnhub_news(ticker: str) -> Optional[NewsResult]:
     start = end - timedelta(days=3)
     url = "https://finnhub.io/api/v1/company-news"
     params = {"symbol": ticker, "from": str(start), "to": str(end), "token": FINNHUB_API_KEY}
-    resp = http_get(url, source="finnhub_news", params=params)
+    resp = http_get(url, source="finnhub_news", params=params, timeout=min(HTTP_TIMEOUT, 2.5))
     rows = parse_json_response(resp, "finnhub_news")
     if not isinstance(rows, list):
         return None
@@ -936,7 +950,7 @@ def best_news(ticker: str) -> NewsResult:
 
 
 def should_check_news(ticker: str) -> bool:
-    top = {x.ticker for x in LAST_GOOD_LEADERS[:10]}
+    top = {x.ticker for x in LAST_GOOD_LEADERS[:NEWS_TOP_N]}
     return normalize_ticker(ticker) in top
 
 
@@ -979,16 +993,33 @@ def update_baseline(ticker: str, price: float) -> AlertState:
 
 
 def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> bool:
+    """Anti-spam gate.
+
+    First alert is allowed. After that:
+    - FAST LEADER SPIKE must be a true fresh +10% push from the last alert price/high.
+    - Normal leader repeats need the full cooldown plus meaningful new high/price push or quality upgrade.
+    - Simple type changes alone no longer bypass cooldown, which prevents spammy repeated leader alerts.
+    """
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
     if st.last_alert_ts <= 0:
         return True
-    cooldown_done = (now - st.last_alert_ts) >= ALERT_COOLDOWN_SECONDS
-    price_push = st.last_alert_price > 0 and quote.price >= st.last_alert_price * (1 + MEANINGFUL_NEW_HIGH_PCT / 100.0)
-    high_push = st.last_alert_high > 0 and structure.hod and structure.hod >= st.last_alert_high * (1 + MEANINGFUL_NEW_HIGH_PCT / 100.0)
+
+    seconds_since = now - st.last_alert_ts
+    price_push_pct = pct_change(quote.price, st.last_alert_price) if st.last_alert_price > 0 else 0.0
+    high_push_pct = pct_change(structure.hod or quote.price, st.last_alert_high) if st.last_alert_high > 0 else 0.0
     quality_upgrade = quality >= st.last_quality + 2
-    type_upgrade = alert_type != st.last_alert_type and alert_type in {"FAST SPIKE", "BREAKOUT OVER HOD"}
-    return (cooldown_done and (price_push or high_push or quality_upgrade or type_upgrade)) or type_upgrade
+
+    if alert_type == "FAST LEADER SPIKE":
+        return (
+            seconds_since >= FAST_SPIKE_REALERT_SECONDS
+            and (price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT or high_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT)
+        )
+
+    cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
+    meaningful_push = price_push_pct >= MEANINGFUL_NEW_HIGH_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
+    type_upgrade = alert_type != st.last_alert_type and alert_type in {"BREAKOUT OVER HOD", "VWAP HOLD CONTINUATION"}
+    return cooldown_done and (meaningful_push or quality_upgrade or type_upgrade)
 
 
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
@@ -1044,7 +1075,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         risks.append("not above VWAP")
 
     alert_type = ""
-    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT:
+    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
         alert_type = "FAST LEADER SPIKE"
         reasons.append(f"fast +{spike_from_base:.1f}% push")
     elif spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
@@ -1181,7 +1212,7 @@ def run_scan_cycle() -> Dict[str, Any]:
 
     leaders = get_leaders()
     decisions: List[CandidateDecision] = []
-    for leader in leaders[:20]:
+    for leader in leaders[:MAX_LEADERS_PER_CYCLE]:
         checked += 1
         try:
             d = decide_candidate(leader)
@@ -1214,6 +1245,9 @@ def run_scan_cycle() -> Dict[str, Any]:
         "sent": sent,
         "alerts": alerts,
         "elapsed": elapsed,
+        "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
+        "news_top_n": NEWS_TOP_N,
+        "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
     }
     log.info("[DELIVERY] attempted=%s delivered=%s", attempted, sent)
@@ -1264,7 +1298,10 @@ def build_app():
             "session": market_session(),
             "last_cycle": LAST_CYCLE_SUMMARY,
             "last_good_leaders": [x.ticker for x in LAST_GOOD_LEADERS[:20]],
-            "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
+            "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
+        "news_top_n": NEWS_TOP_N,
+        "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
+        "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
         }
 
     @app.get("/scan")
