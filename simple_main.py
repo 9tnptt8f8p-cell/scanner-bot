@@ -1,1635 +1,1450 @@
+#!/usr/bin/env python3
+# ============================================================
+# SIMPLE LEADER SCANNER v43
+# Leader-first momentum scanner with ranked catalyst engine
+# ============================================================
+#
+# Core goals:
+# - Focus only live market leaders
+# - No alerts under 25%
+# - Reject junk headlines
+# - Rank news sources: SEC/PR/Globe > Alpaca > Finnhub > Yahoo
+# - Use UNKNOWN CATALYST — INVESTIGATE instead of fake catalyst
+# - Include dilution as awareness, not auto-kill
+# - Fast +10% leader spike trigger
+# - Anti-spam: alert only on meaningful change
+#
+# Required env:
+#   DISCORD_WEBHOOK_URL optional
+#   ALPACA_KEY optional
+#   ALPACA_SECRET optional
+#   FINNHUB_KEY optional
+#
+# Install:
+#   pip install requests flask pytz pandas
+#
+# Run:
+#   python scanner_v43.py
+# ============================================================
+
 import os
 import re
 import time
+import json
+import math
 import html
+import pytz
+import queue
+import random
+import logging
+import threading
+import traceback
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dtime
-from zoneinfo import ZoneInfo
-from threading import Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Any, Tuple
 
 import requests
-from bs4 import BeautifulSoup
-from flask import Flask
-from dotenv import load_dotenv
+from flask import Flask, jsonify
 
-from alerts import send_alert
+try:
+    import pandas as pd
+except Exception:
+    pd = None
 
-load_dotenv()
-
-# ============================================================
-# CLEAN LEADER-ONLY SCANNER v42.7
-#
-# Built fresh:
-#   - Leader-only scanner
-#   - Fast leader spike trigger
-#   - Fresh HOD breakout trigger
-#   - VWAP reclaim trigger
-#   - Second-leg setup trigger
-#   - Float detection/display
-#   - Low-float score boost
-#   - Junk news cleanup
-#   - Dilution awareness only, never blocks
-#
-# Mission:
-#   Track only true market leaders and alert only when they are spiking,
-#   breaking HOD, reclaiming VWAP, or setting up a clean second leg.
-#
-# Live sources:
-#   1) StockAnalysis leader table
-#   2) TradingView scanner
-#   3) Alpaca 1-minute candles
-#   4) Finnhub quote fallback
-#   5) Yahoo quoteSummary float fallback
-#
-# Background news:
-#   Finnhub news + GlobeNewswire scrape + PRNewswire scrape
-# ============================================================
-
-ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v42.7 — SMART YAHOO FALLBACK + LAG FILTER"
-
-# ============================================================
-# ENV
-# ============================================================
-
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_IDS")
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-# Market window
-SCAN_START = dtime(9, 20)
-SCAN_END = dtime(16, 10)
-SCAN_SLEEP_OPEN = 15
-SCAN_SLEEP_NORMAL = 20
-SCAN_SLEEP_CLOSED = 900
-SCAN_SLEEP_WEEKEND = 1800
+VERSION = "v43.0-leader-news-rebuild"
 
-# Universe
-MIN_PRICE = 0.50
-MAX_PRICE = 80.0
-DISCOVERY_MIN_GAIN = 25.0
-TRUE_LEADER_MIN_GAIN = 50.0
-TRUE_LEADER_MIN_VOLUME = 1_000_000
-MAX_TRACKED_LEADERS = 15
+TZ = pytz.timezone("America/New_York")
 
-# Float
-LOW_FLOAT_SHARES = 10_000_000
-MICRO_FLOAT_SHARES = 2_000_000
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# Alert controls
-MAX_ALERTS_PER_CYCLE = 2
-ALERT_COOLDOWN_SECONDS = 480
-SPIKE_RE_ALERT_COOLDOWN_SECONDS = 240
-MAX_OFF_HOD_SPIKE = 12.0
-MAX_OFF_HOD_SETUP = 18.0
-DEAD_OFF_HOD = 30.0
+ALPACA_KEY = os.getenv("ALPACA_KEY", "").strip()
+ALPACA_SECRET = os.getenv("ALPACA_SECRET", "").strip()
+FINNHUB_KEY = os.getenv("FINNHUB_KEY", "").strip()
 
-# Re-alert must be meaningfully different. Prevents same-price / same-WHY spam.
-MIN_RE_ALERT_PRICE_EXPANSION = 0.06       # +6% over last alert price
-MIN_RE_ALERT_HIGH_EXPANSION = 0.02        # +2% new high expansion
-MIN_RE_ALERT_FROM_LOW5_CHANGE = 3.0       # from-low metric must improve by 3 pts
-MIN_RE_ALERT_LAST3_CHANGE = 3.0           # last3 metric must improve by 3 pts
+PORT = int(os.getenv("PORT", "10000"))
 
-# Stale candle protection.
-# If bars are stale, do not send structure/spike alerts from old data.
-# Yahoo 1m finalized bars are usually 60-120s behind by design.
-# Warn too early and every alert looks broken, even when usable.
-STALE_CANDLE_WARN_SECONDS = 150
-STALE_CANDLE_BLOCK_SECONDS = 240
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "45"))
 
-# If Alpaca is older than this, try Yahoo before judging the setup.
-ALPACA_FALLBACK_SECONDS = 90
+MIN_ALERT_GAIN = float(os.getenv("MIN_ALERT_GAIN", "25"))
+MIN_PRICE = float(os.getenv("MIN_PRICE", "0.50"))
+MAX_PRICE = float(os.getenv("MAX_PRICE", "80"))
+MIN_DAY_VOLUME = int(os.getenv("MIN_DAY_VOLUME", "500000"))
+LEADER_DAY_VOLUME = int(os.getenv("LEADER_DAY_VOLUME", "2000000"))
 
-# Trigger thresholds
-FAST_SPIKE_PCT = 10.0
-FAST_SPIKE_MIN_VOL_RATIO = 1.5
-HOD_BREAKOUT_MIN_VOL_RATIO = 1.4
-VWAP_RECLAIM_MIN_LAST3 = 1.5
-SECOND_LEG_MAX_PULLBACK = 8.0
-SECOND_LEG_MIN_VOL_RATIO = 1.1
+MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "4"))
+ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "10"))
 
-# Data
-MIN_CANDLES = 8
-CANDLE_LIMIT = 90
-QUOTE_CACHE_TTL = 15
-CANDLE_CACHE_TTL = 12
-NEWS_CACHE_TTL = 900
-SOURCE_CACHE_TTL = 20
-PROFILE_CACHE_TTL = 86400
+FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
+FAST_SPIKE_LOOKBACK_MIN = int(os.getenv("FAST_SPIKE_LOOKBACK_MIN", "5"))
 
-# News
-NEWS_PREFETCH_TOP_N = 8
-NEWS_TIMEOUT = 2.0
-NEWS_WORKERS = 3
+STALE_CANDLE_SECONDS = int(os.getenv("STALE_CANDLE_SECONDS", "180"))
 
-# Score / risk / display
-ALERT_MIN_SCORE = 4
-FAST_SPIKE_SCORE_FLOOR = 7
-HOD_BREAKOUT_SCORE_FLOOR = 6
-SETUP_SCORE_FLOOR = 4
+GAINERS_LIMIT = int(os.getenv("GAINERS_LIMIT", "40"))
+MAX_DEEP_SCAN = int(os.getenv("MAX_DEEP_SCAN", "15"))
 
-# RVOL is estimated from Alpaca 1m candles if historical avg volume is unavailable.
-RVOL_STRONG = 10.0
-RVOL_EXTREME = 25.0
+BLOCK_SUFFIXES = (
+    "W", "WS", "WT", "WQ", "WSA", "WSC", "IW",
+    "R", "U"
+)
 
-# Dilution awareness: never blocks alerts and never lowers score.
-ENABLE_DILUTION_AWARENESS = True
-DILUTION_CACHE_TTL = 21600
+USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+    "Mobile/15E148 Safari/604.1"
+)
 
-# ============================================================
-# STATE / CACHES
-# ============================================================
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json,text/html,*/*",
+}
 
-QUOTE_CACHE = {}
-CANDLE_CACHE = {}
-SOURCE_CACHE = {}
-NEWS_CACHE = {}
-PROFILE_CACHE = {}
-DILUTION_CACHE = {}
-
-LAST_ALERT = {}
-NEWS_PREFETCH_RUNNING = set()
-
-# ============================================================
-# WEB HEALTH
-# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
 app = Flask(__name__)
+last_heartbeat = {"ts": None, "version": VERSION, "last_cycle": None}
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+@dataclass
+class AlertState:
+    last_alert_ts: float = 0.0
+    last_price: float = 0.0
+    last_gain: float = 0.0
+    last_high: float = 0.0
+    last_title: str = ""
+    alert_count: int = 0
+
+
+@dataclass
+class TickerMemory:
+    rolling_prices: List[Tuple[float, float]] = field(default_factory=list)
+
+
+ALERT_STATE: Dict[str, AlertState] = {}
+TICKER_MEMORY: Dict[str, TickerMemory] = {}
+
+
+# ============================================================
+# UTIL
+# ============================================================
+
+def now_et() -> datetime:
+    return datetime.now(TZ)
+
+
+def market_session() -> str:
+    n = now_et().time()
+    if dtime(4, 0) <= n < dtime(9, 30):
+        return "PREMARKET"
+    if dtime(9, 30) <= n < dtime(11, 0):
+        return "OPEN"
+    if dtime(11, 0) <= n < dtime(14, 0):
+        return "MIDDAY"
+    if dtime(14, 0) <= n < dtime(16, 0):
+        return "POWER HOUR"
+    if dtime(16, 0) <= n < dtime(20, 0):
+        return "AFTERHOURS"
+    return "CLOSED"
+
+
+def scanner_active() -> bool:
+    n = now_et()
+    if n.weekday() >= 5:
+        return False
+    return dtime(4, 0) <= n.time() <= dtime(16, 10)
+
+
+def safe_float(x, default=0.0) -> float:
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def safe_int(x, default=0) -> int:
+    try:
+        if x is None:
+            return default
+        return int(float(x))
+    except Exception:
+        return default
+
+
+def pct_change(a: float, b: float) -> float:
+    if not a:
+        return 0.0
+    return ((b - a) / a) * 100.0
+
+
+def clean_text(s: str) -> str:
+    if not s:
+        return ""
+    s = html.unescape(str(s))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def ticker_allowed(ticker: str) -> bool:
+    t = ticker.upper().strip()
+    if not re.match(r"^[A-Z]{1,5}$", t):
+        return False
+    for suf in BLOCK_SUFFIXES:
+        if t.endswith(suf) and len(t) > 4:
+            return False
+    return True
+
+
+def strict_ticker_match(ticker: str, text: str) -> bool:
+    if not text:
+        return False
+    return re.search(rf"(?<![A-Z0-9]){re.escape(ticker.upper())}(?![A-Z0-9])", text.upper()) is not None
+
+
+def requests_get(url: str, params=None, timeout=8, headers=None) -> Optional[requests.Response]:
+    try:
+        r = requests.get(url, params=params, timeout=timeout, headers=headers or HEADERS)
+        if r.status_code == 200:
+            return r
+        logging.info(f"[HTTP] {url} status={r.status_code}")
+    except Exception as e:
+        logging.info(f"[HTTP ERR] {url} {e}")
+    return None
+
+
+# ============================================================
+# DATA MODELS
+# ============================================================
+
+@dataclass
+class Candidate:
+    ticker: str
+    price: float
+    gain_pct: float
+    volume: int
+    source: str = "unknown"
+    rank: int = 999
+    name: str = ""
+
+
+@dataclass
+class CandleBundle:
+    source: str
+    bars: List[Dict[str, Any]]
+    age_seconds: Optional[int] = None
+
+
+@dataclass
+class StructureResult:
+    above_vwap: bool = False
+    vwap: float = 0.0
+    recent_high: float = 0.0
+    hod: float = 0.0
+    off_hod_pct: float = 0.0
+    last3_pct: float = 0.0
+    vol_ratio: float = 0.0
+    higher_lows: bool = False
+    new_high_push: bool = False
+    stale: bool = False
+    reason: List[str] = field(default_factory=list)
+
+
+@dataclass
+class NewsCandidate:
+    source: str
+    headline: str
+    url: str = ""
+    published_at: str = ""
+
+
+@dataclass
+class NewsResult:
+    found: bool
+    source: Optional[str]
+    headline: str
+    grade: str
+    type: str
+    confidence: str
+    score: float
+    ranked: List[Dict[str, Any]] = field(default_factory=list)
+    dilution_flags: List[str] = field(default_factory=list)
+
+
+# ============================================================
+# GAINER SOURCES
+# ============================================================
+
+def yahoo_quote_summary(symbols: List[str]) -> Dict[str, Any]:
+    if not symbols:
+        return {}
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    params = {"symbols": ",".join(symbols)}
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return {}
+    try:
+        data = r.json()
+        out = {}
+        for q in data.get("quoteResponse", {}).get("result", []):
+            sym = q.get("symbol", "").upper()
+            out[sym] = q
+        return out
+    except Exception:
+        return {}
+
+
+def yahoo_gainers() -> List[Candidate]:
+    """
+    Uses Yahoo predefined screener endpoint.
+    """
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    params = {
+        "scrIds": "day_gainers",
+        "count": GAINERS_LIMIT,
+    }
+    r = requests_get(url, params=params, timeout=10)
+    candidates = []
+    if not r:
+        return candidates
+
+    try:
+        data = r.json()
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        for i, q in enumerate(quotes, start=1):
+            ticker = q.get("symbol", "").upper()
+            if not ticker_allowed(ticker):
+                continue
+            price = safe_float(q.get("regularMarketPrice"))
+            gain = safe_float(q.get("regularMarketChangePercent"))
+            volume = safe_int(q.get("regularMarketVolume"))
+            if price < MIN_PRICE or price > MAX_PRICE:
+                continue
+            if volume < MIN_DAY_VOLUME:
+                continue
+            candidates.append(Candidate(
+                ticker=ticker,
+                price=price,
+                gain_pct=gain,
+                volume=volume,
+                source="Yahoo Gainers",
+                rank=i,
+                name=q.get("shortName", "") or q.get("longName", "")
+            ))
+    except Exception as e:
+        logging.info(f"[GAINERS ERR] {e}")
+    return candidates
+
+
+def yahoo_most_actives_backup() -> List[Candidate]:
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    params = {
+        "scrIds": "most_actives",
+        "count": GAINERS_LIMIT,
+    }
+    r = requests_get(url, params=params, timeout=10)
+    candidates = []
+    if not r:
+        return candidates
+    try:
+        data = r.json()
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        for i, q in enumerate(quotes, start=1):
+            ticker = q.get("symbol", "").upper()
+            if not ticker_allowed(ticker):
+                continue
+            price = safe_float(q.get("regularMarketPrice"))
+            gain = safe_float(q.get("regularMarketChangePercent"))
+            volume = safe_int(q.get("regularMarketVolume"))
+            if gain < 12:
+                continue
+            if price < MIN_PRICE or price > MAX_PRICE:
+                continue
+            if volume < MIN_DAY_VOLUME:
+                continue
+            candidates.append(Candidate(
+                ticker=ticker,
+                price=price,
+                gain_pct=gain,
+                volume=volume,
+                source="Yahoo Actives",
+                rank=100 + i,
+                name=q.get("shortName", "") or q.get("longName", "")
+            ))
+    except Exception as e:
+        logging.info(f"[ACTIVES ERR] {e}")
+    return candidates
+
+
+def get_leaders() -> List[Candidate]:
+    raw = yahoo_gainers() + yahoo_most_actives_backup()
+    by_ticker: Dict[str, Candidate] = {}
+    for c in raw:
+        old = by_ticker.get(c.ticker)
+        if old is None or c.gain_pct > old.gain_pct:
+            by_ticker[c.ticker] = c
+
+    leaders = list(by_ticker.values())
+    leaders.sort(key=lambda x: (x.gain_pct, x.volume), reverse=True)
+
+    # Keep top names only
+    leaders = leaders[:MAX_DEEP_SCAN]
+    logging.info(f"[LEADERS] {len(leaders)} candidates: " + ", ".join([f"{c.ticker}+{c.gain_pct:.1f}%" for c in leaders[:10]]))
+    return leaders
+
+
+# ============================================================
+# QUOTES / CANDLES
+# ============================================================
+
+def finnhub_quote(ticker: str) -> Optional[Dict[str, Any]]:
+    if not FINNHUB_KEY:
+        return None
+    url = "https://finnhub.io/api/v1/quote"
+    r = requests_get(url, params={"symbol": ticker, "token": FINNHUB_KEY}, timeout=6)
+    if not r:
+        return None
+    try:
+        j = r.json()
+        if "c" in j and safe_float(j.get("c")) > 0:
+            return j
+    except Exception:
+        pass
+    return None
+
+
+def yahoo_chart_1m(ticker: str) -> Optional[CandleBundle]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {
+        "range": "1d",
+        "interval": "1m",
+        "includePrePost": "true",
+    }
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return None
+    try:
+        data = r.json()
+        result = data.get("chart", {}).get("result", [None])[0]
+        if not result:
+            return None
+        ts = result.get("timestamp", [])
+        quote = result.get("indicators", {}).get("quote", [{}])[0]
+
+        opens = quote.get("open", [])
+        highs = quote.get("high", [])
+        lows = quote.get("low", [])
+        closes = quote.get("close", [])
+        vols = quote.get("volume", [])
+
+        bars = []
+        for i, epoch in enumerate(ts):
+            try:
+                o, h, l, c, v = opens[i], highs[i], lows[i], closes[i], vols[i]
+                if o is None or h is None or l is None or c is None:
+                    continue
+                bars.append({
+                    "t": int(epoch),
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": int(v or 0),
+                })
+            except Exception:
+                continue
+
+        if not bars:
+            return None
+
+        age = int(time.time() - bars[-1]["t"])
+        return CandleBundle(source="Yahoo 1m candles", bars=bars, age_seconds=age)
+    except Exception as e:
+        logging.info(f"[CANDLE ERROR] {ticker}: {e}")
+        return None
+
+
+def alpaca_bars_1m(ticker: str) -> Optional[CandleBundle]:
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return None
+
+    end = datetime.utcnow()
+    start = end - timedelta(hours=10)
+    url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
+    params = {
+        "timeframe": "1Min",
+        "start": start.isoformat() + "Z",
+        "end": end.isoformat() + "Z",
+        "adjustment": "raw",
+        "limit": 500,
+    }
+    headers = {
+        **HEADERS,
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    }
+    r = requests_get(url, params=params, headers=headers, timeout=8)
+    if not r:
+        return None
+    try:
+        j = r.json()
+        raw = j.get("bars", [])
+        bars = []
+        for b in raw:
+            t = b.get("t")
+            epoch = int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp())
+            bars.append({
+                "t": epoch,
+                "open": float(b.get("o")),
+                "high": float(b.get("h")),
+                "low": float(b.get("l")),
+                "close": float(b.get("c")),
+                "volume": int(b.get("v") or 0),
+            })
+        if not bars:
+            return None
+        age = int(time.time() - bars[-1]["t"])
+        return CandleBundle(source="Alpaca 1m candles", bars=bars, age_seconds=age)
+    except Exception as e:
+        logging.info(f"[ALPACA CANDLE ERROR] {ticker}: {e}")
+        return None
+
+
+def get_candles(ticker: str) -> Optional[CandleBundle]:
+    cb = alpaca_bars_1m(ticker)
+    if cb and cb.bars and (cb.age_seconds is None or cb.age_seconds <= STALE_CANDLE_SECONDS):
+        return cb
+
+    y = yahoo_chart_1m(ticker)
+    if y and y.bars:
+        return y
+
+    return cb
+
+
+# ============================================================
+# STRUCTURE ENGINE
+# ============================================================
+
+def compute_vwap(bars: List[Dict[str, Any]]) -> float:
+    total_pv = 0.0
+    total_v = 0.0
+    for b in bars:
+        typical = (b["high"] + b["low"] + b["close"]) / 3.0
+        v = b.get("volume", 0)
+        total_pv += typical * v
+        total_v += v
+    return total_pv / total_v if total_v else 0.0
+
+
+def detect_higher_lows(bars: List[Dict[str, Any]], lookback=8) -> bool:
+    if len(bars) < lookback:
+        return False
+    lows = [b["low"] for b in bars[-lookback:]]
+    count = 0
+    for i in range(1, len(lows)):
+        if lows[i] >= lows[i-1] * 0.995:
+            count += 1
+    return count >= max(4, lookback // 2)
+
+
+def analyze_structure(ticker: str, candles: CandleBundle) -> StructureResult:
+    bars = candles.bars
+    sr = StructureResult()
+    if not bars or len(bars) < 10:
+        sr.reason.append("not enough candles")
+        return sr
+
+    last = bars[-1]
+    close = last["close"]
+    recent = bars[-12:]
+    prev = bars[-20:-5] if len(bars) >= 25 else bars[:-5]
+
+    sr.vwap = compute_vwap(bars)
+    sr.above_vwap = close > sr.vwap if sr.vwap else False
+    sr.hod = max(b["high"] for b in bars)
+    sr.recent_high = max(b["high"] for b in recent)
+    sr.off_hod_pct = pct_change(sr.hod, close) * -1 if sr.hod else 0
+    sr.higher_lows = detect_higher_lows(bars)
+
+    if len(bars) >= 4:
+        old = bars[-4]["close"]
+        sr.last3_pct = pct_change(old, close)
+
+    recent_vol = sum(b.get("volume", 0) for b in bars[-3:]) / 3
+    base_vol = sum(b.get("volume", 0) for b in bars[-20:-5]) / max(1, len(bars[-20:-5]))
+    sr.vol_ratio = recent_vol / base_vol if base_vol else 0.0
+
+    prev_high = max([b["high"] for b in prev], default=0)
+    sr.new_high_push = close >= prev_high * 1.005 if prev_high else False
+    sr.stale = candles.age_seconds is not None and candles.age_seconds > STALE_CANDLE_SECONDS
+
+    if sr.above_vwap:
+        sr.reason.append("above VWAP")
+    else:
+        sr.reason.append("below VWAP")
+
+    if sr.last3_pct >= 2:
+        sr.reason.append(f"last3 +{sr.last3_pct:.1f}%")
+    if sr.vol_ratio >= 1.5:
+        sr.reason.append(f"vol {sr.vol_ratio:.1f}x")
+    if sr.higher_lows:
+        sr.reason.append("higher lows")
+    if sr.new_high_push:
+        sr.reason.append("new high push")
+    if sr.off_hod_pct <= 6:
+        sr.reason.append("near HOD")
+    if sr.stale:
+        sr.reason.append(f"stale candle {candles.age_seconds}s")
+
+    return sr
+
+
+# ============================================================
+# NEWS ENGINE v43
+# ============================================================
+
+JUNK_HEADLINE_PHRASES = [
+    "stocks moving", "stock moving", "why shares are trading",
+    "gap up", "gap down", "top gainers", "premarket movers",
+    "most active", "biggest movers", "market update",
+    "midday movers", "after-hours movers", "session:",
+    "watch these stocks", "hot penny stocks", "trending stocks",
+    "movers to watch", "stock market today",
+]
+
+STRONG_CATALYST_WORDS = [
+    "fda", "approval", "clearance", "contract", "purchase order",
+    "partnership", "strategic", "acquisition", "merger",
+    "license", "distribution", "earnings beat", "raises guidance",
+    "guidance", "clinical", "phase 1", "phase 2", "phase 3",
+    "trial", "positive results", "ai", "nvidia", "government",
+    "award", "order", "mou", "memorandum of understanding",
+    "collaboration", "launches", "commercialization",
+]
+
+DILUTION_WORDS = [
+    "shelf", "atm", "at-the-market", "registered direct",
+    "private placement", "warrants", "convertible", "resale",
+    "offering", "securities purchase agreement", "equity line",
+    "s-1", "s-3", "f-1", "f-3", "424b5", "424b3",
+]
+
+SEC_BULLISH_ITEMS = [
+    "1.01", "2.02", "7.01", "8.01", "9.01",
+    "material definitive agreement",
+    "results of operations",
+    "regulation fd",
+    "other events",
+    "financial statements and exhibits",
+]
+
+
+def is_junk_headline(title: str) -> bool:
+    if not title:
+        return True
+    t = clean_text(title).lower()
+    return any(p in t for p in JUNK_HEADLINE_PHRASES)
+
+
+def classify_headline(title: str) -> Dict[str, Any]:
+    if not title or is_junk_headline(title):
+        return {"grade": "F", "score": 0, "type": "JUNK", "headline": None}
+
+    t = title.lower()
+
+    if any(w in t for w in DILUTION_WORDS):
+        return {"grade": "X", "score": 2, "type": "DILUTION", "headline": clean_text(title)}
+
+    if any(w in t for w in STRONG_CATALYST_WORDS):
+        return {"grade": "A", "score": 9, "type": "STRONG", "headline": clean_text(title)}
+
+    return {"grade": "C", "score": 5, "type": "WEAK", "headline": clean_text(title)}
+
+
+def rank_news_candidates(candidates: List[NewsCandidate], dilution_flags=None) -> NewsResult:
+    source_weight = {
+        "SEC 8-K": 10,
+        "SEC Exhibit 99.1": 10,
+        "SEC Exhibit": 10,
+        "PR Newswire": 10,
+        "GlobeNewswire": 10,
+        "Company IR": 9,
+        "Alpaca": 7,
+        "Finnhub": 5,
+        "Yahoo": 3,
+    }
+
+    ranked = []
+    dilution_flags = dilution_flags or []
+
+    for item in candidates:
+        headline = clean_text(item.headline)
+        source = item.source
+
+        result = classify_headline(headline)
+
+        if result["type"] == "JUNK":
+            continue
+
+        if result["type"] == "DILUTION":
+            dilution_flags.append(headline)
+
+        total_score = result["score"] + source_weight.get(source, 1)
+
+        ranked.append({
+            "source": source,
+            "headline": result["headline"],
+            "grade": result["grade"],
+            "type": result["type"],
+            "score": total_score,
+            "url": item.url,
+            "published_at": item.published_at,
+        })
+
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+
+    # Prefer non-dilution catalyst for catalyst headline.
+    non_dilution = [r for r in ranked if r["type"] != "DILUTION"]
+    chosen_pool = non_dilution if non_dilution else ranked
+
+    if chosen_pool:
+        best = chosen_pool[0]
+        return NewsResult(
+            found=True,
+            source=best["source"],
+            headline=best["headline"],
+            grade=best["grade"],
+            type=best["type"],
+            confidence=best["grade"],
+            score=best["score"],
+            ranked=ranked,
+            dilution_flags=list(dict.fromkeys(dilution_flags))[:5],
+        )
+
+    return NewsResult(
+        found=False,
+        source=None,
+        headline="UNKNOWN CATALYST — INVESTIGATE",
+        grade="D",
+        type="UNKNOWN",
+        confidence="D",
+        score=0,
+        ranked=[],
+        dilution_flags=list(dict.fromkeys(dilution_flags))[:5],
+    )
+
+
+# -------------------------
+# Alpaca News
+# -------------------------
+
+def get_alpaca_news_candidates(ticker: str) -> List[NewsCandidate]:
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return []
+
+    url = "https://data.alpaca.markets/v1beta1/news"
+    params = {
+        "symbols": ticker,
+        "limit": 10,
+        "sort": "desc",
+    }
+    headers = {
+        **HEADERS,
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    }
+    r = requests_get(url, params=params, headers=headers, timeout=8)
+    if not r:
+        return []
+
+    out = []
+    try:
+        for n in r.json().get("news", []):
+            title = clean_text(n.get("headline") or n.get("summary") or "")
+            full_text = f"{title} {' '.join(n.get('symbols', []))}"
+            if title and (ticker.upper() in n.get("symbols", []) or strict_ticker_match(ticker, full_text)):
+                out.append(NewsCandidate(
+                    source="Alpaca",
+                    headline=title,
+                    url=n.get("url", ""),
+                    published_at=n.get("created_at", ""),
+                ))
+    except Exception as e:
+        logging.info(f"[ALPACA NEWS ERR] {ticker}: {e}")
+
+    return out
+
+
+# -------------------------
+# Finnhub News
+# -------------------------
+
+def get_finnhub_news_candidates(ticker: str) -> List[NewsCandidate]:
+    if not FINNHUB_KEY:
+        return []
+
+    to_date = now_et().date()
+    from_date = to_date - timedelta(days=4)
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {
+        "symbol": ticker,
+        "from": str(from_date),
+        "to": str(to_date),
+        "token": FINNHUB_KEY,
+    }
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return []
+
+    out = []
+    try:
+        for n in r.json()[:10]:
+            title = clean_text(n.get("headline", ""))
+            if title and not is_junk_headline(title):
+                out.append(NewsCandidate(
+                    source="Finnhub",
+                    headline=title,
+                    url=n.get("url", ""),
+                    published_at=str(n.get("datetime", "")),
+                ))
+    except Exception as e:
+        logging.info(f"[FINNHUB NEWS ERR] {ticker}: {e}")
+    return out
+
+
+# -------------------------
+# Yahoo News
+# -------------------------
+
+def get_yahoo_news_candidates(ticker: str) -> List[NewsCandidate]:
+    url = f"https://query1.finance.yahoo.com/v1/finance/search"
+    params = {
+        "q": ticker,
+        "newsCount": 8,
+        "quotesCount": 0,
+    }
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return []
+
+    out = []
+    try:
+        for n in r.json().get("news", []):
+            title = clean_text(n.get("title", ""))
+            publisher = clean_text(n.get("publisher", ""))
+            link = n.get("link", "")
+            if not title:
+                continue
+            # Strict match helps avoid false ticker words.
+            blob = f"{title} {publisher} {link}"
+            if not strict_ticker_match(ticker, blob) and ticker.upper() not in link.upper():
+                continue
+            out.append(NewsCandidate(
+                source="Yahoo",
+                headline=title,
+                url=link,
+                published_at=str(n.get("providerPublishTime", "")),
+            ))
+    except Exception as e:
+        logging.info(f"[YAHOO NEWS ERR] {ticker}: {e}")
+
+    return out
+
+
+# -------------------------
+# PR Newswire / GlobeNewswire search hooks
+# -------------------------
+
+def get_prnewswire_candidates(ticker: str) -> List[NewsCandidate]:
+    """
+    Lightweight web search style endpoint is unreliable without paid search API.
+    This function uses PR Newswire site search URL HTML best-effort.
+    If it fails, scanner continues.
+    """
+    query = f"{ticker} press release"
+    url = "https://www.prnewswire.com/search/news/"
+    params = {"keyword": query, "pagesize": 10}
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return []
+    text = r.text
+    out = []
+
+    # Best-effort title extraction.
+    titles = re.findall(r'<h3[^>]*>(.*?)</h3>', text, flags=re.I | re.S)
+    for raw in titles[:8]:
+        title = clean_text(re.sub("<.*?>", " ", raw))
+        if title and (strict_ticker_match(ticker, title) or ticker.upper() in title.upper()):
+            out.append(NewsCandidate(source="PR Newswire", headline=title, url=r.url))
+    return out
+
+
+def get_globenewswire_candidates(ticker: str) -> List[NewsCandidate]:
+    """
+    Best-effort GlobeNewswire search.
+    """
+    url = "https://www.globenewswire.com/search/keyword"
+    params = {"keyword": ticker}
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return []
+    text = r.text
+    out = []
+
+    titles = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text, flags=re.I | re.S)
+    for href, raw in titles[:20]:
+        title = clean_text(re.sub("<.*?>", " ", raw))
+        if len(title) < 12:
+            continue
+        if strict_ticker_match(ticker, title) or ticker.upper() in title.upper():
+            link = href if href.startswith("http") else f"https://www.globenewswire.com{href}"
+            out.append(NewsCandidate(source="GlobeNewswire", headline=title, url=link))
+    return out[:8]
+
+
+# -------------------------
+# SEC EDGAR
+# -------------------------
+
+def sec_company_tickers() -> Dict[str, str]:
+    """
+    Returns ticker -> CIK padded.
+    SEC requires User-Agent. This endpoint is public.
+    """
+    url = "https://www.sec.gov/files/company_tickers.json"
+    headers = {
+        **HEADERS,
+        "User-Agent": "leader-scanner-v43 contact@example.com",
+    }
+    r = requests_get(url, timeout=10, headers=headers)
+    if not r:
+        return {}
+    try:
+        data = r.json()
+        out = {}
+        for _, row in data.items():
+            ticker = row.get("ticker", "").upper()
+            cik = str(row.get("cik_str", "")).zfill(10)
+            if ticker and cik:
+                out[ticker] = cik
+        return out
+    except Exception:
+        return {}
+
+
+_SEC_TICKER_CACHE = {"ts": 0.0, "data": {}}
+
+def get_cik_for_ticker(ticker: str) -> Optional[str]:
+    if time.time() - _SEC_TICKER_CACHE["ts"] > 86400 or not _SEC_TICKER_CACHE["data"]:
+        _SEC_TICKER_CACHE["data"] = sec_company_tickers()
+        _SEC_TICKER_CACHE["ts"] = time.time()
+    return _SEC_TICKER_CACHE["data"].get(ticker.upper())
+
+
+def sec_recent_filings(ticker: str) -> Tuple[List[NewsCandidate], List[str]]:
+    """
+    Finds recent 8-K and dilution forms.
+    Attempts to create SEC headline from filing form/items/exhibit.
+    """
+    cik = get_cik_for_ticker(ticker)
+    if not cik:
+        return [], []
+
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    headers = {
+        **HEADERS,
+        "User-Agent": "leader-scanner-v43 contact@example.com",
+    }
+    r = requests_get(url, timeout=8, headers=headers)
+    if not r:
+        return [], []
+
+    candidates: List[NewsCandidate] = []
+    dilution_flags: List[str] = []
+
+    try:
+        j = r.json()
+        recent = j.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+        primary_docs = recent.get("primaryDocument", [])
+        items = recent.get("items", [])
+
+        for idx, form in enumerate(forms[:25]):
+            form = str(form).upper()
+            filing_date = dates[idx] if idx < len(dates) else ""
+            accession = accessions[idx] if idx < len(accessions) else ""
+            primary_doc = primary_docs[idx] if idx < len(primary_docs) else ""
+            item_text = items[idx] if idx < len(items) else ""
+
+            if form in ("S-1", "S-3", "F-1", "F-3", "424B5", "424B3"):
+                dilution_flags.append(f"{form} filed {filing_date}")
+
+            if form in ("8-K", "6-K"):
+                headline = f"{ticker} {form} filed {filing_date}"
+                if item_text:
+                    headline = f"{ticker} {form}: {item_text}"
+
+                if any(x in item_text.lower() for x in SEC_BULLISH_ITEMS) or form in ("8-K", "6-K"):
+                    candidates.append(NewsCandidate(
+                        source="SEC 8-K",
+                        headline=headline,
+                        url=sec_filing_url(cik, accession, primary_doc),
+                        published_at=filing_date,
+                    ))
+
+                exhibit_title = sec_extract_exhibit_headline(cik, accession)
+                if exhibit_title:
+                    candidates.append(NewsCandidate(
+                        source="SEC Exhibit 99.1",
+                        headline=exhibit_title,
+                        url=sec_filing_index_url(cik, accession),
+                        published_at=filing_date,
+                    ))
+
+            # Extra dilution language scan from form names
+            if form in ("8-K", "6-K") and accession:
+                maybe = sec_scan_filing_for_dilution(cik, accession, primary_doc)
+                dilution_flags.extend(maybe)
+
+    except Exception as e:
+        logging.info(f"[SEC ERR] {ticker}: {e}")
+
+    return candidates, list(dict.fromkeys(dilution_flags))[:8]
+
+
+def sec_filing_url(cik: str, accession: str, primary_doc: str) -> str:
+    if not cik or not accession or not primary_doc:
+        return ""
+    cik_int = str(int(cik))
+    acc_clean = accession.replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_doc}"
+
+
+def sec_filing_index_url(cik: str, accession: str) -> str:
+    if not cik or not accession:
+        return ""
+    cik_int = str(int(cik))
+    acc_clean = accession.replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/"
+
+
+def sec_extract_exhibit_headline(cik: str, accession: str) -> Optional[str]:
+    """
+    Best-effort:
+    - Open filing index
+    - Find ex99/ex-99/exhibit 99 doc
+    - Pull <title> or first strong headline-looking line
+    """
+    if not cik or not accession:
+        return None
+
+    index_url = sec_filing_index_url(cik, accession)
+    headers = {
+        **HEADERS,
+        "User-Agent": "leader-scanner-v43 contact@example.com",
+    }
+    r = requests_get(index_url, timeout=8, headers=headers)
+    if not r:
+        return None
+
+    try:
+        html_text = r.text
+        hrefs = re.findall(r'href="([^"]+)"', html_text, flags=re.I)
+        ex_docs = [h for h in hrefs if re.search(r'(ex|exhibit).*99|ex99|ex-99', h, flags=re.I)]
+        if not ex_docs:
+            return None
+
+        doc = ex_docs[0]
+        doc_url = doc if doc.startswith("http") else index_url.rstrip("/") + "/" + doc.split("/")[-1]
+        rr = requests_get(doc_url, timeout=8, headers=headers)
+        if not rr:
+            return None
+
+        txt = rr.text
+
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", txt, flags=re.I | re.S)
+        if title_m:
+            title = clean_text(re.sub("<.*?>", " ", title_m.group(1)))
+            if len(title) > 10 and not is_junk_headline(title):
+                return title[:180]
+
+        # Strip tags and find a headline-like line.
+        plain = clean_text(re.sub("<.*?>", "\n", txt))
+        lines = [clean_text(x) for x in plain.split("\n") if clean_text(x)]
+        for line in lines[:80]:
+            if 20 <= len(line) <= 180:
+                low = line.lower()
+                if any(w in low for w in STRONG_CATALYST_WORDS):
+                    return line[:180]
+    except Exception as e:
+        logging.info(f"[SEC EXHIBIT ERR] {e}")
+
+    return None
+
+
+def sec_scan_filing_for_dilution(cik: str, accession: str, primary_doc: str) -> List[str]:
+    url = sec_filing_url(cik, accession, primary_doc)
+    if not url:
+        return []
+    headers = {
+        **HEADERS,
+        "User-Agent": "leader-scanner-v43 contact@example.com",
+    }
+    r = requests_get(url, timeout=8, headers=headers)
+    if not r:
+        return []
+
+    text = clean_text(re.sub("<.*?>", " ", r.text)).lower()
+    flags = []
+    for w in DILUTION_WORDS:
+        if w in text:
+            flags.append(w)
+    if flags:
+        return [f"8-K/filing language: {', '.join(sorted(set(flags))[:6])}"]
+    return []
+
+
+def find_ranked_news(ticker: str) -> NewsResult:
+    candidates: List[NewsCandidate] = []
+    dilution_flags: List[str] = []
+
+    # Highest trust first
+    sec_cands, sec_dilution = sec_recent_filings(ticker)
+    candidates.extend(sec_cands)
+    dilution_flags.extend(sec_dilution)
+
+    # PR sources
+    candidates.extend(get_prnewswire_candidates(ticker))
+    candidates.extend(get_globenewswire_candidates(ticker))
+
+    # API/news fallbacks
+    candidates.extend(get_alpaca_news_candidates(ticker))
+    candidates.extend(get_finnhub_news_candidates(ticker))
+    candidates.extend(get_yahoo_news_candidates(ticker))
+
+    result = rank_news_candidates(candidates, dilution_flags=dilution_flags)
+
+    logging.info(f"[NEWS] {ticker}: {result.type} {result.confidence} {result.headline[:90]}")
+    return result
+
+
+# ============================================================
+# FLOAT / PROFILE
+# ============================================================
+
+def yahoo_float_estimate(ticker: str) -> Optional[float]:
+    """
+    Yahoo quoteSummary sometimes provides floatShares.
+    Returns float in millions.
+    """
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    params = {"modules": "defaultKeyStatistics"}
+    r = requests_get(url, params=params, timeout=8)
+    if not r:
+        return None
+    try:
+        result = r.json().get("quoteSummary", {}).get("result", [None])[0]
+        stats = result.get("defaultKeyStatistics", {})
+        fs = stats.get("floatShares", {})
+        raw = fs.get("raw")
+        if raw:
+            return raw / 1_000_000.0
+    except Exception:
+        pass
+    return None
+
+
+# ============================================================
+# ALERT LOGIC
+# ============================================================
+
+def update_ticker_memory(ticker: str, price: float):
+    mem = TICKER_MEMORY.setdefault(ticker, TickerMemory())
+    ts = time.time()
+    mem.rolling_prices.append((ts, price))
+    cutoff = ts - 60 * 20
+    mem.rolling_prices = [(t, p) for t, p in mem.rolling_prices if t >= cutoff]
+
+
+def fast_spike_detected(ticker: str, price: float) -> Tuple[bool, float]:
+    mem = TICKER_MEMORY.get(ticker)
+    if not mem or len(mem.rolling_prices) < 2:
+        return False, 0.0
+
+    cutoff = time.time() - FAST_SPIKE_LOOKBACK_MIN * 60
+    recent = [(t, p) for t, p in mem.rolling_prices if t >= cutoff]
+    if len(recent) < 2:
+        return False, 0.0
+
+    low = min(p for _, p in recent if p > 0)
+    spike = pct_change(low, price)
+    return spike >= FAST_SPIKE_PCT, spike
+
+
+def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: float) -> Tuple[bool, str]:
+    if c.gain_pct < MIN_ALERT_GAIN:
+        return False, f"gain under {MIN_ALERT_GAIN:.0f}%"
+
+    if sr.stale:
+        return False, "stale candle"
+
+    if not sr.above_vwap:
+        return False, "below VWAP"
+
+    if sr.off_hod_pct > 15:
+        return False, f"{sr.off_hod_pct:.1f}% off HOD"
+
+    if c.volume < MIN_DAY_VOLUME:
+        return False, "volume too low"
+
+    leader_override = c.rank <= 5 or c.volume >= LEADER_DAY_VOLUME or c.gain_pct >= 50
+    fast_spike, spike_pct = fast_spike_detected(c.ticker, price)
+
+    structure_ok = (
+        sr.new_high_push
+        or sr.last3_pct >= 2.0
+        or sr.vol_ratio >= 1.8
+        or sr.higher_lows
+    )
+
+    if not (leader_override or fast_spike or structure_ok):
+        return False, "no meaningful push"
+
+    state = ALERT_STATE.setdefault(c.ticker, AlertState())
+    minutes_since = (time.time() - state.last_alert_ts) / 60 if state.last_alert_ts else 999
+
+    meaningful_change = False
+
+    if not state.last_alert_ts:
+        meaningful_change = True
+    if price >= state.last_high * 1.05 and state.last_high > 0:
+        meaningful_change = True
+    if c.gain_pct >= state.last_gain + 8:
+        meaningful_change = True
+    if fast_spike:
+        meaningful_change = True
+    if news.found and news.headline != state.last_title:
+        meaningful_change = True
+
+    if minutes_since < ALERT_COOLDOWN_MINUTES and not meaningful_change:
+        return False, f"cooldown {minutes_since:.1f}m no meaningful change"
+
+    if not meaningful_change:
+        return False, "repeat alert suppressed"
+
+    if fast_spike:
+        return True, f"fast +{spike_pct:.1f}% leader spike"
+
+    if sr.new_high_push:
+        return True, "new high push"
+
+    if sr.last3_pct >= 2:
+        return True, "VWAP reclaim push"
+
+    if leader_override:
+        return True, "market leader override"
+
+    return True, "valid leader setup"
+
+
+def alert_title(reason: str) -> str:
+    r = reason.lower()
+    if "fast" in r:
+        return "🔥 FAST LEADER PUSH"
+    if "new high" in r:
+        return "🔥 NEW HIGH LEADER PUSH"
+    if "vwap" in r:
+        return "🟢 VWAP RECLAIM PUSH"
+    return "🔥 LEADER PUSH"
+
+
+def format_volume(v: int) -> str:
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v/1_000:.0f}K"
+    return str(v)
+
+
+def format_alert(c: Candidate, sr: StructureResult, news: NewsResult, reason: str, candles: CandleBundle, float_m: Optional[float]) -> str:
+    title = alert_title(reason)
+    why = " | ".join(sr.reason[:5])
+    float_txt = f"{float_m:.1f}M" if float_m else "Unknown"
+
+    catalyst = news.headline if news.found else "UNKNOWN CATALYST — INVESTIGATE"
+    source_line = f"{news.source} | Confidence {news.confidence}" if news.found else "Confidence D"
+
+    dilution = "None found"
+    if news.dilution_flags:
+        dilution = "; ".join(news.dilution_flags[:3])
+
+    return (
+        f"{title} — {c.ticker}\n\n"
+        f"${c.price:.2f} | +{c.gain_pct:.1f}%\n"
+        f"Vol: {format_volume(c.volume)} | Float: {float_txt}\n\n"
+        f"CATALYST: {catalyst}\n"
+        f"Source: {source_line}\n\n"
+        f"WHY: {why}\n"
+        f"Trigger: {reason}\n\n"
+        f"⚠️ DILUTION RISK:\n{dilution}\n\n"
+        f"Data: {candles.source} + ranked news engine + SEC check\n"
+        f"{VERSION}"
+    )
+
+
+def send_discord(text: str):
+    if not DISCORD_WEBHOOK_URL:
+        logging.info("[ALERT NO WEBHOOK]\n" + text)
+        return
+    try:
+        r = requests.post(DISCORD_WEBHOOK_URL, json={"content": text[:1900]}, timeout=8)
+        logging.info(f"[DISCORD] status={r.status_code}")
+    except Exception as e:
+        logging.info(f"[DISCORD ERR] {e}")
+
+
+def mark_alerted(c: Candidate, sr: StructureResult, price: float, title_or_headline: str):
+    state = ALERT_STATE.setdefault(c.ticker, AlertState())
+    state.last_alert_ts = time.time()
+    state.last_price = price
+    state.last_gain = c.gain_pct
+    state.last_high = max(state.last_high, sr.hod, price)
+    state.last_title = title_or_headline or ""
+    state.alert_count += 1
+
+
+# ============================================================
+# SCAN CYCLE
+# ============================================================
+
+def scan_one(c: Candidate) -> Optional[str]:
+    ticker = c.ticker
+    update_ticker_memory(ticker, c.price)
+
+    candles = get_candles(ticker)
+    if not candles or not candles.bars:
+        logging.info(f"[SKIP] {ticker}: no candles")
+        return None
+
+    last_price = candles.bars[-1]["close"]
+    if last_price > 0:
+        c.price = last_price
+
+    sr = analyze_structure(ticker, candles)
+
+    if c.gain_pct < MIN_ALERT_GAIN:
+        logging.info(f"[SKIP] {ticker}: +{c.gain_pct:.1f}% under floor")
+        return None
+
+    # Find news only after basic leader passes, to save speed.
+    news = find_ranked_news(ticker)
+
+    should, reason = should_alert(c, sr, news, c.price)
+    logging.info(f"[CHECK] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {should} {reason}")
+
+    if not should:
+        return None
+
+    float_m = yahoo_float_estimate(ticker)
+
+    msg = format_alert(c, sr, news, reason, candles, float_m)
+    mark_alerted(c, sr, c.price, news.headline)
+    return msg
+
+
+def scan_cycle():
+    last_heartbeat["last_cycle"] = now_et().isoformat()
+
+    leaders = get_leaders()
+    sent = 0
+
+    for c in leaders:
+        if sent >= MAX_ALERTS_PER_CYCLE:
+            break
+        try:
+            msg = scan_one(c)
+            if msg:
+                send_discord(msg)
+                sent += 1
+                time.sleep(1)
+        except Exception as e:
+            logging.info(f"[SCAN ONE ERR] {c.ticker}: {e}\n{traceback.format_exc()}")
+
+    logging.info(f"[CYCLE DONE] sent={sent}")
+
+
+def scanner_loop():
+    logging.info(f"[START] {VERSION}")
+    while True:
+        try:
+            last_heartbeat["ts"] = now_et().isoformat()
+            if scanner_active():
+                scan_cycle()
+            else:
+                logging.info(f"[IDLE] session={market_session()}")
+        except Exception as e:
+            logging.info(f"[LOOP ERR] {e}\n{traceback.format_exc()}")
+
+        time.sleep(SCAN_SECONDS)
+
+
+# ============================================================
+# FLASK HEALTH
+# ============================================================
 
 @app.route("/")
 def home():
-    return f"scanner alive — {BOOT_MARKER}", 200
+    return jsonify({
+        "ok": True,
+        "version": VERSION,
+        "session": market_session(),
+        "active": scanner_active(),
+        "heartbeat": last_heartbeat,
+        "alert_state_count": len(ALERT_STATE),
+    })
+
 
 @app.route("/health")
 def health():
-    return {
-        "status": "ok",
-        "version": BOOT_MARKER,
-        "time_et": now_et().isoformat(),
-    }, 200
-
-def start_web_server():
-    port = int(os.getenv("PORT", "10000"))
-    print(f"[WEB] starting server on port {port}")
-    app.run(host="0.0.0.0", port=port)
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def now_et():
-    return datetime.now(ET)
-
-def trading_day_key():
-    return now_et().strftime("%Y-%m-%d")
-
-def safe_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        if isinstance(value, str):
-            value = value.replace(",", "").replace("%", "").replace("$", "").strip()
-        return float(value)
-    except Exception:
-        return default
-
-def safe_int(value, default=0):
-    try:
-        if value is None:
-            return default
-        if isinstance(value, str):
-            value = value.replace(",", "").replace("%", "").replace("$", "").strip()
-        return int(float(value))
-    except Exception:
-        return default
-
-def clean_text(text):
-    if not text:
-        return ""
-    text = html.unescape(str(text))
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-def fmt_money(value):
-    value = safe_float(value)
-    if value >= 1:
-        return f"${value:.2f}"
-    return f"${value:.4f}"
-
-def fmt_big_num(n):
-    n = safe_float(n)
-    if n >= 1_000_000_000:
-        return f"{n / 1_000_000_000:.1f}B"
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return str(int(n))
-
-def cache_get(cache, key, ttl):
-    item = cache.get(key)
-    if not item:
-        return None
-    ts, value = item
-    if time.time() - ts > ttl:
-        cache.pop(key, None)
-        return None
-    return value
-
-def cache_set(cache, key, value):
-    cache[key] = (time.time(), value)
-    return value
-
-def http_get(url, params=None, headers=None, timeout=6):
-    h = {
-        "User-Agent": "Mozilla/5.0 scannerbot/42.2 contact@example.com",
-        "Accept": "text/html,application/json,*/*",
-    }
-    if headers:
-        h.update(headers)
-    return requests.get(url, params=params, headers=h, timeout=timeout)
-
-def http_post(url, payload=None, headers=None, timeout=6):
-    h = {
-        "User-Agent": "Mozilla/5.0 scannerbot/42.2",
-        "Accept": "application/json,text/plain,*/*",
-        "Content-Type": "application/json",
-    }
-    if headers:
-        h.update(headers)
-    return requests.post(url, json=payload or {}, headers=h, timeout=timeout)
-
-def is_bad_ticker(ticker):
-    t = str(ticker or "").upper().strip()
-    if not t:
-        return True
-    if "-" in t or "/" in t:
-        return True
-    if len(t) > 4 and re.search(r"(W|WS|WT|WQ|RT|R|U)$", t):
-        return True
-    if any(word in t for word in ["WARRANT", "RIGHT", "UNIT", "PREFERRED"]):
-        return True
-    return False
-
-def market_is_active():
-    now = now_et()
-    print(f"[TIME] Market clock ET: {now.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
-    if now.weekday() >= 5:
-        print("[MARKET] Weekend — sleeping")
-        return False
-    if SCAN_START <= now.time() <= SCAN_END:
-        return True
-    print(f"[MARKET] Closed — {now.strftime('%I:%M %p ET')}")
-    return False
-
-def get_session_label():
-    t = now_et().time()
-    if dtime(9, 20) <= t < dtime(9, 30):
-        return "PRE-OPEN WARMUP"
-    if dtime(9, 30) <= t < dtime(11, 0):
-        return "OPEN"
-    if dtime(11, 0) <= t < dtime(14, 30):
-        return "MIDDAY"
-    if dtime(14, 30) <= t <= dtime(16, 10):
-        return "POWER HOUR"
-    return "CLOSED"
-
-def scan_sleep_seconds():
-    if not market_is_active():
-        return SCAN_SLEEP_WEEKEND if now_et().weekday() >= 5 else SCAN_SLEEP_CLOSED
-    return SCAN_SLEEP_OPEN if get_session_label() == "OPEN" else SCAN_SLEEP_NORMAL
-
-# ============================================================
-# LEADER DISCOVERY
-# ============================================================
-
-def parse_big_number_text(value):
-    if value is None:
-        return 0
-    s = str(value).replace(",", "").replace("$", "").strip().upper()
-    mult = 1
-    if s.endswith("T"):
-        mult = 1_000_000_000_000
-        s = s[:-1]
-    elif s.endswith("B"):
-        mult = 1_000_000_000
-        s = s[:-1]
-    elif s.endswith("M"):
-        mult = 1_000_000
-        s = s[:-1]
-    elif s.endswith("K"):
-        mult = 1_000
-        s = s[:-1]
-    return int(safe_float(s) * mult)
-
-def normalize_leader(ticker, price=0, gain=0, volume=0, market_cap=0, source="unknown"):
-    return {
-        "ticker": str(ticker or "").upper().strip(),
-        "price": safe_float(price),
-        "gain": safe_float(gain),
-        "volume": safe_int(volume),
-        "market_cap": safe_int(market_cap),
-        "sources": [source],
-        "source": source,
-    }
-
-def source_pass(item):
-    ticker = item.get("ticker", "")
-    if is_bad_ticker(ticker):
-        return False
-
-    gain = safe_float(item.get("gain"))
-    price = safe_float(item.get("price"))
-    volume = safe_int(item.get("volume"))
-
-    if gain < DISCOVERY_MIN_GAIN:
-        return False
-    if price and (price < MIN_PRICE or price > MAX_PRICE):
-        return False
-    if volume and volume < 50_000:
-        return False
-    return True
-
-def get_stockanalysis_leaders():
-    cached = cache_get(SOURCE_CACHE, "stockanalysis", SOURCE_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    url = "https://stockanalysis.com/markets/gainers/"
-    results = []
-
-    try:
-        r = http_get(url, timeout=5)
-        soup = BeautifulSoup(r.text, "html.parser")
-        rows = soup.select("table tbody tr")
-
-        for row in rows[:80]:
-            cells = [clean_text(c.get_text(" ")) for c in row.find_all("td")]
-            if len(cells) < 5:
-                continue
-
-            ticker = cells[1]
-            gain = safe_float(cells[3].replace("+", "").replace("%", "")) if len(cells) > 3 else 0
-            price = safe_float(cells[4].replace("$", "").replace(",", "")) if len(cells) > 4 else 0
-            volume = parse_big_number_text(cells[5] if len(cells) > 5 else 0)
-            market_cap = parse_big_number_text(cells[6] if len(cells) > 6 else 0)
-
-            item = normalize_leader(ticker, price, gain, volume, market_cap, "StockAnalysis")
-            if source_pass(item):
-                results.append(item)
-
-        print(f"[GAINERS] StockAnalysis returned {len(results)} leaders")
-
-    except Exception as e:
-        print(f"[GAINERS ERROR] StockAnalysis: {e}")
-
-    return cache_set(SOURCE_CACHE, "stockanalysis", results)
-
-def get_tradingview_leaders():
-    cached = cache_get(SOURCE_CACHE, "tradingview", SOURCE_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    url = "https://scanner.tradingview.com/america/scan"
-    payload = {
-        "filter": [
-            {"left": "type", "operation": "equal", "right": "stock"},
-            {"left": "subtype", "operation": "in_range", "right": ["common", "foreign-issuer"]},
-            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
-            {"left": "change", "operation": "greater", "right": DISCOVERY_MIN_GAIN},
-            {"left": "close", "operation": "greater", "right": MIN_PRICE},
-            {"left": "close", "operation": "less", "right": MAX_PRICE},
-            {"left": "volume", "operation": "greater", "right": 50_000},
-        ],
-        "options": {"lang": "en"},
-        "markets": ["america"],
-        "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": ["name", "close", "change", "volume", "market_cap_basic"],
-        "sort": {"sortBy": "change", "sortOrder": "desc"},
-        "range": [0, 250],
-    }
-
-    results = []
-
-    try:
-        r = http_post(url, payload=payload, timeout=5)
-        data = r.json()
-
-        for row in data.get("data", []):
-            d = row.get("d") or []
-            if len(d) < 4:
-                continue
-
-            item = normalize_leader(
-                ticker=d[0],
-                price=d[1] if len(d) > 1 else 0,
-                gain=d[2] if len(d) > 2 else 0,
-                volume=d[3] if len(d) > 3 else 0,
-                market_cap=d[4] if len(d) > 4 else 0,
-                source="TradingView",
-            )
-
-            if source_pass(item):
-                results.append(item)
-
-        print(f"[GAINERS] TradingView returned {len(results)} leaders")
-
-    except Exception as e:
-        print(f"[GAINERS ERROR] TradingView: {e}")
-
-    return cache_set(SOURCE_CACHE, "tradingview", results)
-
-def merge_leaders(items):
-    merged = {}
-
-    for item in items:
-        ticker = item.get("ticker", "").upper().strip()
-        if is_bad_ticker(ticker):
-            continue
-
-        existing = merged.get(ticker)
-        if not existing:
-            merged[ticker] = dict(item)
-            continue
-
-        existing["gain"] = max(safe_float(existing.get("gain")), safe_float(item.get("gain")))
-        existing["price"] = safe_float(item.get("price")) or safe_float(existing.get("price"))
-        existing["volume"] = max(safe_int(existing.get("volume")), safe_int(item.get("volume")))
-        existing["market_cap"] = safe_int(existing.get("market_cap")) or safe_int(item.get("market_cap"))
-
-        for src in item.get("sources", [item.get("source", "unknown")]):
-            if src not in existing["sources"]:
-                existing["sources"].append(src)
-
-        existing["source"] = "+".join(existing["sources"])
-
-    leaders = list(merged.values())
-    leaders.sort(
-        key=lambda x: (
-            safe_float(x.get("gain")) >= 100,
-            safe_float(x.get("gain")) >= 50,
-            safe_int(x.get("volume")),
-            safe_float(x.get("gain")),
-        ),
-        reverse=True,
-    )
-    return leaders
-
-def get_true_leaders():
-    leaders = []
-    leaders.extend(get_stockanalysis_leaders())
-    leaders.extend(get_tradingview_leaders())
-
-    merged = merge_leaders(leaders)
-
-    true = []
-    skipped = 0
-
-    for item in merged:
-        gain = safe_float(item.get("gain"))
-        vol = safe_int(item.get("volume"))
-
-        if gain >= TRUE_LEADER_MIN_GAIN and vol >= TRUE_LEADER_MIN_VOLUME:
-            true.append(item)
-        else:
-            skipped += 1
-
-    true = true[:MAX_TRACKED_LEADERS]
-
-    print(f"[v42.7 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
-
-    if true:
-        print("[v42.7 TRACKING] " + " | ".join(
-            f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
-            for x in true[:12]
-        ))
-
-    return true
-
-# ============================================================
-# QUOTES / FLOAT / CANDLES
-# ============================================================
-
-def get_finnhub_quote(ticker):
-    cached = cache_get(QUOTE_CACHE, ticker, QUOTE_CACHE_TTL)
-    if cached:
-        return cached
-
-    if not FINNHUB_API_KEY:
-        return {"price": 0, "gain": 0, "source": "none", "confirmed": False, "reason": "missing FINNHUB_API_KEY"}
-
-    try:
-        url = "https://finnhub.io/api/v1/quote"
-        r = http_get(url, params={"symbol": ticker, "token": FINNHUB_API_KEY}, timeout=2.2)
-        data = r.json()
-
-        price = safe_float(data.get("c"))
-        prev_close = safe_float(data.get("pc"))
-        gain = ((price - prev_close) / prev_close) * 100 if price > 0 and prev_close > 0 else 0
-
-        q = {
-            "price": price,
-            "gain": gain,
-            "source": "Finnhub",
-            "confirmed": price > 0 and -95 < gain < 900,
-            "reason": "",
-        }
-
-        if q["confirmed"]:
-            return cache_set(QUOTE_CACHE, ticker, q)
-
-        return q
-
-    except Exception as e:
-        return {"price": 0, "gain": 0, "source": "Finnhub", "confirmed": False, "reason": str(e)}
-
-def make_float_data(float_shares=0, shares_out=0, source="unknown"):
-    float_shares = safe_int(float_shares)
-    shares_out = safe_int(shares_out)
-
-    return {
-        "float": float_shares,
-        "shares_out": shares_out,
-        "low_float": bool(float_shares and float_shares <= LOW_FLOAT_SHARES),
-        "micro_float": bool(float_shares and float_shares <= MICRO_FLOAT_SHARES),
-        "source": source,
-    }
-
-def get_yahoo_float(ticker):
-    """
-    Float fallback ladder:
-      1) Yahoo quoteSummary floatShares
-      2) Yahoo quoteSummary sharesOutstanding
-      3) Yahoo quote endpoint sharesOutstanding
-      4) SEC recent shares outstanding estimate
-
-    If true float is unavailable but shares outstanding is tiny, show:
-      Float: Unknown | Shares Out: x.xM
-    """
-    key = f"float:{ticker}"
-    cached = cache_get(PROFILE_CACHE, key, PROFILE_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    try:
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {"modules": "defaultKeyStatistics,price"}
-
-        r = http_get(url, params=params, timeout=3)
-        data = r.json()
-
-        result = (data.get("quoteSummary", {}).get("result") or [{}])[0]
-        stats = result.get("defaultKeyStatistics", {}) or {}
-        price_mod = result.get("price", {}) or {}
-
-        float_shares = safe_int((stats.get("floatShares") or {}).get("raw", 0))
-        shares_out = safe_int((stats.get("sharesOutstanding") or {}).get("raw", 0))
-        if not shares_out:
-            shares_out = safe_int((price_mod.get("sharesOutstanding") or {}).get("raw", 0))
-
-        if float_shares or shares_out:
-            out = make_float_data(float_shares, shares_out, "Yahoo quoteSummary")
-            tag = "MICRO FLOAT" if out["micro_float"] else "LOW FLOAT" if out["low_float"] else "normal/unknown float"
-            print(
-                f"[FLOAT] {ticker}: float={fmt_big_num(float_shares) if float_shares else 'Unknown'} "
-                f"shares_out={fmt_big_num(shares_out) if shares_out else 'Unknown'} ({tag})"
-            )
-            return cache_set(PROFILE_CACHE, key, out)
-
-    except Exception as e:
-        print(f"[FLOAT ERROR] {ticker}: Yahoo quoteSummary {e}")
-
-    # Yahoo quote fallback sometimes has shares outstanding even when quoteSummary misses.
-    try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        r = http_get(url, params={"symbols": ticker}, timeout=3)
-        data = r.json()
-        row = ((data.get("quoteResponse") or {}).get("result") or [{}])[0]
-
-        shares_out = safe_int(row.get("sharesOutstanding", 0))
-        float_shares = safe_int(row.get("floatShares", 0))
-
-        if float_shares or shares_out:
-            out = make_float_data(float_shares, shares_out, "Yahoo quote")
-            print(
-                f"[FLOAT] {ticker}: float={fmt_big_num(float_shares) if float_shares else 'Unknown'} "
-                f"shares_out={fmt_big_num(shares_out) if shares_out else 'Unknown'} via Yahoo quote"
-            )
-            return cache_set(PROFILE_CACHE, key, out)
-
-    except Exception as e:
-        print(f"[FLOAT ERROR] {ticker}: Yahoo quote {e}")
-
-    # SEC fallback: does not always equal float, but helps identify tiny share structures.
-    try:
-        sec_data = get_sec_shares_outstanding(ticker)
-        if sec_data.get("shares_out"):
-            out = make_float_data(0, sec_data["shares_out"], "SEC shares outstanding")
-            print(f"[FLOAT] {ticker}: float=Unknown shares_out={fmt_big_num(sec_data['shares_out'])} via SEC")
-            return cache_set(PROFILE_CACHE, key, out)
-
-    except Exception as e:
-        print(f"[FLOAT ERROR] {ticker}: SEC fallback {e}")
-
-    print(f"[FLOAT] {ticker}: unknown")
-    return cache_set(PROFILE_CACHE, key, make_float_data(0, 0, "unknown"))
-
-def get_sec_shares_outstanding(ticker):
-    cached = cache_get(DILUTION_CACHE, f"__sec_shares__:{ticker}", DILUTION_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    out = {"shares_out": 0, "date": "", "source": "SEC"}
-    mapping = get_sec_company_tickers()
-    cik = mapping.get(ticker.upper())
-
-    if not cik:
-        return cache_set(DILUTION_CACHE, f"__sec_shares__:{ticker}", out)
-
-    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    headers = {"User-Agent": "scannerbot contact@example.com"}
-    r = http_get(url, headers=headers, timeout=3)
-    data = r.json()
-
-    facts = data.get("facts", {})
-    # submissions endpoint often does not include facts; this is lightweight only.
-    recent = data.get("filings", {}).get("recent", {})
-    desc = " ".join(str(x) for x in recent.get("primaryDocDescription", [])[:25])
-    forms = " ".join(str(x) for x in recent.get("form", [])[:25])
-
-    # Keep conservative: do not scrape filing docs here. Return empty unless later expanded.
-    return cache_set(DILUTION_CACHE, f"__sec_shares__:{ticker}", out)
-
-def alpaca_headers():
-    return {
-        "APCA-API-KEY-ID": ALPACA_API_KEY or "",
-        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY or "",
-    }
-
-def normalize_candle(raw):
-    if not isinstance(raw, dict):
-        return None
-
-    o = raw.get("o", raw.get("open"))
-    h = raw.get("h", raw.get("high"))
-    l = raw.get("l", raw.get("low"))
-    c = raw.get("c", raw.get("close"))
-    v = raw.get("v", raw.get("volume", 0))
-    t = raw.get("t", raw.get("timestamp", ""))
-
-    if None in [o, h, l, c]:
-        return None
-
-    return {
-        "t": t,
-        "open": safe_float(o),
-        "high": safe_float(h),
-        "low": safe_float(l),
-        "close": safe_float(c),
-        "volume": safe_int(v),
-    }
-
-def get_alpaca_candles(ticker, limit=CANDLE_LIMIT):
-    key = f"alpaca:{ticker}:{limit}"
-    cached = cache_get(CANDLE_CACHE, key, CANDLE_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
-        print(f"[CANDLES] {ticker}: missing Alpaca keys")
-        return []
-
-    try:
-        end = datetime.now(ET)
-        start = end - timedelta(hours=8)
-        url = f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/bars"
-
-        params = {
-            "timeframe": "1Min",
-            "start": start.astimezone(ZoneInfo("UTC")).isoformat(),
-            "end": end.astimezone(ZoneInfo("UTC")).isoformat(),
-            "limit": limit,
-            "adjustment": "raw",
-            "feed": "iex",
-            "sort": "asc",
-        }
-
-        r = http_get(url, params=params, headers=alpaca_headers(), timeout=3)
-        data = r.json()
-
-        bars = [normalize_candle(x) for x in data.get("bars", [])]
-        bars = [x for x in bars if x]
-
-        if bars:
-            bars = bars[:-1] if len(bars) > 1 else bars
-
-        print(f"[CANDLES] {ticker}: Alpaca {len(bars)} finalized bars")
-        return cache_set(CANDLE_CACHE, key, bars)
-
-    except Exception as e:
-        print(f"[CANDLES ERROR] {ticker}: Alpaca {e}")
-        return []
-
-
-def get_yahoo_candles(ticker, limit=CANDLE_LIMIT):
-    """
-    Free 1-minute fallback for hot names when Alpaca IEX bars lag.
-    Yahoo chart is not perfect, but it is often fresher than IEX on active runners.
-    """
-    key = f"yahoo_chart:{ticker}:{limit}"
-    cached = cache_get(CANDLE_CACHE, key, CANDLE_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        params = {
-            "range": "1d",
-            "interval": "1m",
-            "includePrePost": "true",
-        }
-
-        r = http_get(url, params=params, timeout=3)
-        data = r.json()
-
-        result = ((data.get("chart") or {}).get("result") or [{}])[0]
-        timestamps = result.get("timestamp") or []
-        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-
-        opens = quote.get("open") or []
-        highs = quote.get("high") or []
-        lows = quote.get("low") or []
-        closes = quote.get("close") or []
-        volumes = quote.get("volume") or []
-
-        bars = []
-        for i, ts in enumerate(timestamps):
-            if i >= len(closes):
-                continue
-
-            raw = {
-                "t": datetime.fromtimestamp(ts, tz=ZoneInfo("UTC")).isoformat(),
-                "open": opens[i] if i < len(opens) else None,
-                "high": highs[i] if i < len(highs) else None,
-                "low": lows[i] if i < len(lows) else None,
-                "close": closes[i] if i < len(closes) else None,
-                "volume": volumes[i] if i < len(volumes) else 0,
-            }
-
-            c = normalize_candle(raw)
-            if c:
-                bars.append(c)
-
-        if bars:
-            bars = bars[-limit:]
-            bars = bars[:-1] if len(bars) > 1 else bars
-
-        print(f"[CANDLES] {ticker}: Yahoo {len(bars)} finalized bars")
-        return cache_set(CANDLE_CACHE, key, bars)
-
-    except Exception as e:
-        print(f"[CANDLES ERROR] {ticker}: Yahoo {e}")
-        return []
-
-
-def get_best_candles(ticker):
-    """
-    Primary: Alpaca IEX.
-    Fallback: Yahoo 1m chart if Alpaca bars are stale or missing.
-    """
-    alpaca = get_alpaca_candles(ticker)
-    alpaca_metrics = moving_now_metrics(alpaca) if alpaca else {"ok": False, "last_bar_age_seconds": 999999}
-
-    alpaca_age = safe_float(alpaca_metrics.get("last_bar_age_seconds", 999999))
-
-    if alpaca_metrics.get("ok") and alpaca_age < ALPACA_FALLBACK_SECONDS:
-        return alpaca, "Alpaca candles"
-
-    print(f"[CANDLES FALLBACK] {ticker}: Alpaca stale/missing age={int(alpaca_age)}s — trying Yahoo 1m")
-
-    yahoo = get_yahoo_candles(ticker)
-    yahoo_metrics = moving_now_metrics(yahoo) if yahoo else {"ok": False, "last_bar_age_seconds": 999999}
-
-    if yahoo_metrics.get("ok"):
-        yahoo_age = safe_float(yahoo_metrics.get("last_bar_age_seconds", 999999))
-        print(f"[CANDLES FALLBACK] {ticker}: Yahoo age={int(yahoo_age)}s")
-        if yahoo_age < STALE_CANDLE_BLOCK_SECONDS:
-            return yahoo, "Yahoo 1m candles"
-        print(f"[CANDLES FALLBACK] {ticker}: Yahoo also stale — falling back to Alpaca")
-
-    return alpaca, "Alpaca candles"
-
-# ============================================================
-# STRUCTURE / TRIGGERS
-# ============================================================
-
-def compute_vwap(candles):
-    pv = 0.0
-    vol = 0
-
-    for c in candles:
-        typical = (c["high"] + c["low"] + c["close"]) / 3
-        v = safe_int(c["volume"])
-        pv += typical * v
-        vol += v
-
-    return pv / vol if vol > 0 else 0
-
-def percent_change(a, b):
-    a = safe_float(a)
-    b = safe_float(b)
-    if b <= 0:
-        return 0.0
-    return ((a - b) / b) * 100
-
-def estimate_rvol(candles):
-    if len(candles) < 12:
-        return 1.0
-
-    recent = sum(c["volume"] for c in candles[-3:]) / 3
-    baseline_slice = candles[-30:-5] if len(candles) >= 35 else candles[:-5]
-
-    if not baseline_slice:
-        return 1.0
-
-    baseline = sum(c["volume"] for c in baseline_slice) / max(1, len(baseline_slice))
-    return recent / baseline if baseline > 0 else 1.0
-
-def moving_now_metrics(candles):
-    if len(candles) < MIN_CANDLES:
-        return {"ok": False, "reason": f"insufficient candles {len(candles)}/{MIN_CANDLES}"}
-
-    last = candles[-1]
-    price = last["close"]
-
-    # Avoid repeated alerts from stale finalized bars.
-    # Alpaca IEX can lag or stop updating on some hot names.
-    last_bar_age_seconds = 0
-    try:
-        raw_t = str(last.get("t", ""))
-        if raw_t:
-            bar_dt = datetime.fromisoformat(raw_t.replace("Z", "+00:00")).astimezone(ET)
-            last_bar_age_seconds = (now_et() - bar_dt).total_seconds()
-    except Exception:
-        last_bar_age_seconds = 0
-    high = max(c["high"] for c in candles)
-    low5 = min(c["low"] for c in candles[-5:])
-    high5 = max(c["high"] for c in candles[-5:])
-    vwap = compute_vwap(candles)
-
-    last3_close = candles[-3]["close"] if len(candles) >= 3 else candles[0]["close"]
-    last3_change = percent_change(price, last3_close)
-
-    recent_vol = sum(c["volume"] for c in candles[-3:]) / max(1, min(3, len(candles)))
-    prior_slice = candles[-8:-3] if len(candles) >= 8 else candles[:-3]
-    prior_vol = sum(c["volume"] for c in prior_slice) / max(1, len(prior_slice)) if prior_slice else 0
-    vol_ratio = recent_vol / prior_vol if prior_vol > 0 else 1.0
-
-    off_hod = percent_change(high, price)
-    from_low5 = percent_change(price, low5)
-    rvol = estimate_rvol(candles)
-
-    near_hod = off_hod <= 3.0
-    fresh_hod = price >= high * 0.995 or high5 >= high * 0.995
-
-    above_vwap = vwap > 0 and price >= vwap
-    reclaim_vwap = above_vwap and len(candles) >= 6 and candles[-4]["close"] < vwap
-
-    second_leg = (
-        above_vwap
-        and off_hod <= SECOND_LEG_MAX_PULLBACK
-        and last3_change >= 0
-        and vol_ratio >= SECOND_LEG_MIN_VOL_RATIO
-    )
-
-    fast_spike = from_low5 >= FAST_SPIKE_PCT and vol_ratio >= FAST_SPIKE_MIN_VOL_RATIO and above_vwap
-    hod_breakout = fresh_hod and vol_ratio >= HOD_BREAKOUT_MIN_VOL_RATIO and above_vwap
-    vwap_reclaim = reclaim_vwap and last3_change >= VWAP_RECLAIM_MIN_LAST3
-
-    return {
+    return jsonify({
         "ok": True,
-        "price": price,
-        "last_bar_age_seconds": last_bar_age_seconds,
-        "high": high,
-        "low5": low5,
-        "vwap": vwap,
-        "off_hod": off_hod,
-        "from_low5": from_low5,
-        "last3_change": last3_change,
-        "vol_ratio": vol_ratio,
-        "rvol": rvol,
-        "above_vwap": above_vwap,
-        "fresh_hod": fresh_hod,
-        "near_hod": near_hod,
-        "fast_spike": fast_spike,
-        "hod_breakout": hod_breakout,
-        "vwap_reclaim": vwap_reclaim,
-        "second_leg": second_leg,
-    }
+        "version": VERSION,
+        "time": now_et().isoformat(),
+    })
+
+
+@app.route("/debug/state")
+def debug_state():
+    return jsonify({
+        "version": VERSION,
+        "alerts": {k: vars(v) for k, v in ALERT_STATE.items()},
+        "memory": {k: len(v.rolling_prices) for k, v in TICKER_MEMORY.items()},
+    })
 
-def classify_trigger(metrics):
-    if not metrics.get("ok"):
-        return None, metrics.get("reason", "bad metrics")
-
-    off_hod = safe_float(metrics.get("off_hod"))
-
-    if off_hod >= DEAD_OFF_HOD:
-        return None, f"dead leader — {off_hod:.1f}% off HOD"
-
-    if metrics.get("fast_spike") and off_hod <= MAX_OFF_HOD_SPIKE:
-        return "🚀 FAST LEADER SPIKE", (
-            f"+{safe_float(metrics.get('from_low5')):.1f}% from 5m low | "
-            f"vol {safe_float(metrics.get('vol_ratio')):.1f}x | "
-            f"RVOL {safe_float(metrics.get('rvol')):.1f}x | "
-            f"last3 {safe_float(metrics.get('last3_change')):+.1f}%"
-        )
-
-    if metrics.get("hod_breakout"):
-        return "🔥 FRESH HOD BREAKOUT", (
-            f"fresh HOD | vol {safe_float(metrics.get('vol_ratio')):.1f}x | "
-            f"RVOL {safe_float(metrics.get('rvol')):.1f}x | "
-            f"last3 {safe_float(metrics.get('last3_change')):+.1f}%"
-        )
-
-    if metrics.get("vwap_reclaim") and off_hod <= MAX_OFF_HOD_SETUP:
-        return "🟢 VWAP RECLAIM PUSH", (
-            f"VWAP reclaim | last3 {safe_float(metrics.get('last3_change')):+.1f}% | "
-            f"vol {safe_float(metrics.get('vol_ratio')):.1f}x | RVOL {safe_float(metrics.get('rvol')):.1f}x"
-        )
-
-    if metrics.get("second_leg") and off_hod <= MAX_OFF_HOD_SETUP:
-        return "📈 SECOND-LEG SETUP", (
-            f"above VWAP | {off_hod:.1f}% off HOD | "
-            f"vol {safe_float(metrics.get('vol_ratio')):.1f}x | RVOL {safe_float(metrics.get('rvol')):.1f}x"
-        )
-
-    if not metrics.get("above_vwap"):
-        return None, "not above/reclaiming VWAP"
-
-    return None, f"stale/no trigger — {off_hod:.1f}% off HOD"
-
-# ============================================================
-# NEWS
-# ============================================================
-
-STRONG_NEWS_WORDS = [
-    "merger", "acquisition", "definitive agreement", "contract", "purchase order",
-    "partnership", "collaboration", "license", "distribution", "fda", "clearance",
-    "approval", "clinical", "phase 2", "phase 3", "trial", "positive results",
-    "earnings", "guidance", "raises outlook", "financing", "strategic investment",
-    "bitcoin", "crypto", "ai", "artificial intelligence", "defense", "energy",
-]
-
-JUNK_NEWS_PHRASES = [
-    "stocks moving", "premarket movers", "market movers", "why shares are trading",
-    "gap-ups and gap-downs", "most active", "top gainers", "biggest pre-market",
-    "on the move", "today's pre-market session", "today's regular session",
-]
-
-def classify_news(headline):
-    h = clean_text(headline)
-    low = h.lower()
-
-    if not h:
-        return "UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0
-
-    if any(x in low for x in JUNK_NEWS_PHRASES):
-        return h, "JUNK", 1
-
-    if any(x in low for x in STRONG_NEWS_WORDS):
-        return h, "STRONG", 9
-
-    return h, "UNCLEAR", 4
-
-def display_catalyst(news):
-    headline, quality, score = news or ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
-
-    if quality in ["JUNK", "UNKNOWN"]:
-        return "UNKNOWN CATALYST — INVESTIGATE"
-
-    return headline or "UNKNOWN CATALYST — INVESTIGATE"
-
-def ticker_word_match(ticker, text):
-    return re.search(rf"(?<![A-Z]){re.escape(ticker.upper())}(?![A-Z])", str(text).upper()) is not None
-
-def get_finnhub_news(ticker):
-    if not FINNHUB_API_KEY:
-        return ""
-
-    try:
-        end = now_et().date()
-        start = end - timedelta(days=3)
-        url = "https://finnhub.io/api/v1/company-news"
-
-        params = {
-            "symbol": ticker,
-            "from": start.isoformat(),
-            "to": end.isoformat(),
-            "token": FINNHUB_API_KEY,
-        }
-
-        r = http_get(url, params=params, timeout=NEWS_TIMEOUT)
-        rows = r.json() or []
-
-        for row in rows[:8]:
-            headline = clean_text(row.get("headline", ""))
-            if headline and ticker_word_match(ticker, headline):
-                return headline
-
-        for row in rows[:8]:
-            headline = clean_text(row.get("headline", ""))
-            if headline:
-                return headline
-
-    except Exception as e:
-        print(f"[NEWS FAST ERROR] Finnhub {ticker}: {e}")
-
-    return ""
-
-def scrape_globe_news(ticker):
-    try:
-        url = f"https://www.globenewswire.com/search/keyword/{ticker}"
-        r = http_get(url, timeout=NEWS_TIMEOUT)
-        soup = BeautifulSoup(r.text, "html.parser")
-        text = clean_text(soup.get_text(" "))
-        m = re.search(r"([A-Z][^\.]{30,180})", text)
-
-        if m and ticker_word_match(ticker, m.group(1)):
-            return m.group(1)
-
-    except Exception:
-        pass
-
-    return ""
-
-def scrape_prnewswire(ticker):
-    try:
-        url = f"https://www.prnewswire.com/search/news/?keyword={ticker}"
-        r = http_get(url, timeout=NEWS_TIMEOUT)
-        soup = BeautifulSoup(r.text, "html.parser")
-        text = clean_text(soup.get_text(" "))
-        m = re.search(r"([A-Z][^\.]{30,180})", text)
-
-        if m and ticker_word_match(ticker, m.group(1)):
-            return m.group(1)
-
-    except Exception:
-        pass
-
-    return ""
-
-def get_best_news(ticker):
-    cached = cache_get(NEWS_CACHE, ticker, NEWS_CACHE_TTL)
-    if cached:
-        return cached
-
-    candidates = []
-
-    with ThreadPoolExecutor(max_workers=NEWS_WORKERS) as pool:
-        futures = [
-            pool.submit(get_finnhub_news, ticker),
-            pool.submit(scrape_globe_news, ticker),
-            pool.submit(scrape_prnewswire, ticker),
-        ]
-
-        try:
-            for fut in as_completed(futures, timeout=NEWS_TIMEOUT + 1.0):
-                try:
-                    headline = clean_text(fut.result(timeout=0))
-                    if headline:
-                        candidates.append(headline)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    best = ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
-
-    for h in candidates:
-        classified = classify_news(h)
-        if classified[2] > best[2]:
-            best = classified
-
-    NEWS_CACHE[ticker] = (time.time(), best)
-    print(f"[NEWS] {ticker}: {best[0]} ({best[1]} {best[2]}/10)")
-    return best
-
-def prefetch_news_for_leaders(leaders):
-    tickers = [x["ticker"] for x in leaders[:NEWS_PREFETCH_TOP_N]]
-    todo = []
-
-    for t in tickers:
-        if cache_get(NEWS_CACHE, t, NEWS_CACHE_TTL):
-            continue
-        if t in NEWS_PREFETCH_RUNNING:
-            continue
-
-        NEWS_PREFETCH_RUNNING.add(t)
-        todo.append(t)
-
-    if not todo:
-        return
-
-    def worker():
-        try:
-            with ThreadPoolExecutor(max_workers=NEWS_WORKERS) as pool:
-                list(pool.map(get_best_news, todo))
-        finally:
-            for t in todo:
-                NEWS_PREFETCH_RUNNING.discard(t)
-
-    Thread(target=worker, daemon=True).start()
-    print("[NEWS PREFETCH] started for " + ", ".join(todo))
-
-# ============================================================
-# SCORE / DILUTION
-# ============================================================
-
-def leader_score(gain, trigger, metrics, news, float_data=None):
-    """
-    v42.2 simplified 10-point leader score.
-
-    Day gain:       0-3
-    Live expansion: 0-3
-    Structure:      0-2
-    Volume/RVOL:    0-1
-    Catalyst:       0-1
-    Float:          0-1
-
-    Dilution is awareness only and never changes score.
-    """
-    score = 0.0
-    g = safe_float(gain)
-
-    if g >= 200:
-        score += 3
-    elif g >= 100:
-        score += 2
-    elif g >= 50:
-        score += 1
-
-    if "FAST LEADER SPIKE" in trigger:
-        score += 2
-        if metrics.get("fresh_hod"):
-            score += 1
-    elif "HOD BREAKOUT" in trigger:
-        score += 2
-    elif metrics.get("fresh_hod"):
-        score += 1
-
-    if metrics.get("above_vwap"):
-        score += 1
-
-    if "SECOND-LEG" in trigger or "VWAP RECLAIM" in trigger:
-        score += 1
-
-    if safe_float(metrics.get("vol_ratio")) >= 1.5 or safe_float(metrics.get("rvol")) >= RVOL_STRONG:
-        score += 1
-
-    news_quality = (news or ("", "UNKNOWN", 0))[1]
-    if news_quality == "STRONG":
-        score += 1
-
-    float_shares = safe_int((float_data or {}).get("float"))
-    shares_out = safe_int((float_data or {}).get("shares_out"))
-
-    if float_shares and float_shares <= LOW_FLOAT_SHARES:
-        score += 1
-    elif not float_shares and shares_out and shares_out <= LOW_FLOAT_SHARES:
-        score += 0.5
-
-    return min(10, round(score, 1))
-
-def score_floor_for_trigger(trigger):
-    if "FAST LEADER SPIKE" in trigger:
-        return FAST_SPIKE_SCORE_FLOOR
-    if "HOD BREAKOUT" in trigger:
-        return HOD_BREAKOUT_SCORE_FLOOR
-    return SETUP_SCORE_FLOOR
-
-DILUTION_KEYWORDS = [
-    "atm", "at-the-market", "sales agreement", "equity distribution",
-    "shelf", "s-1", "s-3", "f-1", "f-3", "424b5", "424b3",
-    "registered direct", "public offering", "private placement",
-    "warrant", "convertible", "resale", "equity line", "purchase agreement",
-]
-
-def normalize_dilution_text(text):
-    t = clean_text(text)
-    low = t.lower()
-
-    if not t:
-        return ""
-
-    if any(x in low for x in ["priced offering", "announces pricing", "filed today"]):
-        return "⚠️ OFFERING FILED/PRICED TODAY"
-
-    if "at-the-market" in low or re.search(r"\batm\b", low) or "sales agreement" in low:
-        return "ATM / share sales ability on file"
-
-    if "warrant" in low:
-        return "Warrants on file"
-
-    if any(x in low for x in ["s-1", "s-3", "f-1", "f-3", "424b5", "424b3", "shelf", "resale"]):
-        return "Shelf/resale registration on file"
-
-    if any(x in low for x in ["registered direct", "public offering", "private placement", "convertible", "equity line"]):
-        return "Financing/offering ability on file"
-
-    return ""
-
-def get_sec_company_tickers():
-    cached = cache_get(DILUTION_CACHE, "__sec_tickers__", 86400)
-    if cached:
-        return cached
-
-    try:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        headers = {"User-Agent": "scannerbot contact@example.com"}
-        r = http_get(url, headers=headers, timeout=4)
-        data = r.json()
-
-        mapping = {}
-
-        for _, row in data.items():
-            ticker = str(row.get("ticker", "")).upper()
-            cik = str(row.get("cik_str", "")).zfill(10)
-
-            if ticker and cik:
-                mapping[ticker] = cik
-
-        return cache_set(DILUTION_CACHE, "__sec_tickers__", mapping)
-
-    except Exception as e:
-        print(f"[SEC MAP ERROR] {e}")
-        return {}
-
-def get_dilution_awareness(ticker):
-    if not ENABLE_DILUTION_AWARENESS:
-        return ""
-
-    cached = cache_get(DILUTION_CACHE, ticker, DILUTION_CACHE_TTL)
-    if cached is not None:
-        return cached
-
-    try:
-        mapping = get_sec_company_tickers()
-        cik = mapping.get(ticker.upper())
-
-        if not cik:
-            return cache_set(DILUTION_CACHE, ticker, "")
-
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        headers = {"User-Agent": "scannerbot contact@example.com"}
-        r = http_get(url, headers=headers, timeout=3)
-        data = r.json()
-
-        recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])[:20]
-        dates = recent.get("filingDate", [])[:20]
-        desc = recent.get("primaryDocDescription", [])[:20]
-
-        findings = []
-        today = now_et().date().isoformat()
-
-        for form, date, d in zip(forms, dates, desc):
-            blob = f"{form} {date} {d}"
-            low = blob.lower()
-
-            if str(date) == today and form in ["S-1", "S-3", "F-1", "F-3", "424B5", "424B3", "8-K", "6-K"]:
-                findings.append("⚠️ OFFERING/FILING TODAY")
-
-            if any(k in low for k in DILUTION_KEYWORDS) or form in ["S-1", "S-3", "F-1", "F-3", "424B5", "424B3"]:
-                clean = normalize_dilution_text(blob) or f"{form} on file"
-                findings.append(clean)
-
-        out = []
-        seen = set()
-
-        for f in findings:
-            if f and f not in seen:
-                seen.add(f)
-                out.append(f)
-
-        summary = "; ".join(out[:3])
-
-        if summary:
-            print(f"[DILUTION] {ticker}: {summary}")
-
-        return cache_set(DILUTION_CACHE, ticker, summary)
-
-    except Exception as e:
-        print(f"[DILUTION ERROR] {ticker}: {e}")
-        return cache_set(DILUTION_CACHE, ticker, "")
-
-# ============================================================
-# ALERTS
-# ============================================================
-
-def alert_key(ticker):
-    return f"{trading_day_key()}:{ticker}"
-
-def can_alert(ticker, trigger, metrics):
-    """
-    Re-alert rules:
-      - First alert always allowed.
-      - During cooldown: only allow true expansion.
-      - After cooldown: still require meaningful new price/high/metric expansion.
-      - Do NOT resend the same fast-spike setup just because cooldown expired.
-    """
-    key = alert_key(ticker)
-    now_ts = time.time()
-    state = LAST_ALERT.get(key)
-
-    if not state:
-        return True, "first leader alert"
-
-    last_ts = safe_float(state.get("time"))
-    last_price = safe_float(state.get("price"))
-    last_high = safe_float(state.get("high"))
-    last_from_low5 = safe_float(state.get("from_low5"))
-    last_last3 = safe_float(state.get("last3_change"))
-    last_trigger = str(state.get("trigger", ""))
-
-    price = safe_float(metrics.get("price"))
-    high = safe_float(metrics.get("high"))
-    from_low5 = safe_float(metrics.get("from_low5"))
-    last3 = safe_float(metrics.get("last3_change"))
-
-    price_expanded = last_price > 0 and price >= last_price * (1 + MIN_RE_ALERT_PRICE_EXPANSION)
-    high_expanded = last_high > 0 and high >= last_high * (1 + MIN_RE_ALERT_HIGH_EXPANSION)
-    from_low5_improved = from_low5 >= last_from_low5 + MIN_RE_ALERT_FROM_LOW5_CHANGE
-    last3_improved = last3 >= last_last3 + MIN_RE_ALERT_LAST3_CHANGE
-    trigger_upgraded = trigger != last_trigger and ("HOD BREAKOUT" in trigger or "VWAP RECLAIM" in trigger)
-
-    meaningful_change = (
-        price_expanded
-        or high_expanded
-        or from_low5_improved
-        or last3_improved
-        or trigger_upgraded
-    )
-
-    cooldown = SPIKE_RE_ALERT_COOLDOWN_SECONDS if "SPIKE" in trigger else ALERT_COOLDOWN_SECONDS
-
-    if now_ts - last_ts < cooldown:
-        if meaningful_change:
-            return True, "meaningful expansion during cooldown"
-
-        left = int(cooldown - (now_ts - last_ts))
-        return False, f"cooldown {left}s left — no new expansion"
-
-    if meaningful_change:
-        return True, "meaningful expansion since last alert"
-
-    return False, (
-        "same setup blocked — no new price/high/metric expansion "
-        f"(price {fmt_money(price)} vs last {fmt_money(last_price)})"
-    )
-
-def build_alert(result):
-    ticker = result["ticker"]
-    news = result.get("news") or ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
-    catalyst = display_catalyst(news)
-    dilution = result.get("dilution") or ""
-
-    float_data = result.get("float_data") or {}
-    float_shares = safe_int(float_data.get("float"))
-
-    shares_out = safe_int(float_data.get("shares_out"))
-
-    if float_shares:
-        float_txt = fmt_big_num(float_shares)
-        if float_shares <= MICRO_FLOAT_SHARES:
-            float_txt += " 🧨 MICRO FLOAT"
-        elif float_shares <= LOW_FLOAT_SHARES:
-            float_txt += " 🧨 LOW FLOAT"
-    elif shares_out:
-        float_txt = f"Unknown | Shares Out: {fmt_big_num(shares_out)}"
-        if shares_out <= MICRO_FLOAT_SHARES:
-            float_txt += " 🧨 TINY STRUCTURE"
-        elif shares_out <= LOW_FLOAT_SHARES:
-            float_txt += " 🧨 LOW SHARE STRUCTURE"
-    else:
-        float_txt = "Unknown"
-
-    lines = [
-        f"{result['trigger']} — {ticker}",
-        "",
-        f"{fmt_money(result['price'])} | +{result['gain']:.1f}%",
-        f"Vol: {fmt_big_num(result['volume'])} | Float: {float_txt}",
-        f"Leader Score: {result.get('score', 0)}/10",
-        "",
-        f"CATALYST: {catalyst}",
-        "",
-        "WHY:",
-        f"{result['why']}",
-    ]
-
-    if dilution:
-        lines.extend([
-            "",
-            "⚠️ DILUTION RISK:",
-            dilution,
-        ])
-
-    lines.extend([
-        "",
-        f"Data: {result['data_label']}",
-    ])
-
-    return "\n".join(lines).strip()
-
-def send_leader_alert(result):
-    msg = build_alert(result)
-    send_alert(msg)
-
-    key = alert_key(result["ticker"])
-    LAST_ALERT[key] = {
-        "time": time.time(),
-        "price": result["price"],
-        "high": result.get("high", result["price"]),
-        "trigger": result["trigger"],
-        "from_low5": result.get("from_low5", 0),
-        "last3_change": result.get("last3_change", 0),
-        "vol_ratio": result.get("vol_ratio", 0),
-        "rvol": result.get("rvol", 0),
-    }
-
-    print(f"[ALERT SENT] {result['ticker']} {result['trigger']}")
-
-# ============================================================
-# SCAN LOGIC
-# ============================================================
-
-def validate_quote_against_source(ticker, source_gain, quote):
-    price = safe_float(quote.get("price"))
-    live_gain = safe_float(quote.get("gain"))
-
-    if price <= 0:
-        return False, "bad quote price"
-
-    diff = abs(live_gain - source_gain)
-
-    if diff > 80 and live_gain < source_gain:
-        return False, f"quote/source mismatch live {live_gain:.1f}% vs source {source_gain:.1f}%"
-
-    return True, "quote ok"
-
-def evaluate_leader(item):
-    ticker = item["ticker"]
-    source_gain = safe_float(item.get("gain"))
-    source_volume = safe_int(item.get("volume"))
-    source_price = safe_float(item.get("price"))
-
-    quote = get_finnhub_quote(ticker)
-    quote_ok, quote_reason = validate_quote_against_source(ticker, source_gain, quote)
-
-    if not quote_ok:
-        print(f"[v42.7 SKIP] {ticker}: {quote_reason}")
-        return None
-
-    candles, candle_source = get_best_candles(ticker)
-    metrics = moving_now_metrics(candles)
-
-    if not metrics.get("ok"):
-        print(f"[v42.7 LOG ONLY] {ticker}: {metrics.get('reason')}")
-        return None
-
-    candle_price = safe_float(metrics.get("price"))
-    quote_price = safe_float(quote.get("price"))
-
-    price = candle_price or quote_price or source_price
-    live_gain = safe_float(quote.get("gain")) or source_gain
-    volume = source_volume
-
-    candle_age = safe_float(metrics.get("last_bar_age_seconds"))
-
-    if candle_age >= STALE_CANDLE_BLOCK_SECONDS:
-        print(f"[STALE BLOCK] {ticker}: Alpaca candle {int(candle_age)}s old — skipping stale setup")
-        return None
-
-    trigger, why = classify_trigger(metrics)
-
-    if candle_age >= STALE_CANDLE_WARN_SECONDS:
-        why = f"{why} | ⚠️ candle lag {int(candle_age)}s"
-
-    if not trigger:
-        print(f"[v42.7 LOG ONLY] {ticker}: {why}")
-        return None
-
-    allowed, reason = can_alert(ticker, trigger, metrics)
-
-    if not allowed:
-        print(f"[NO ALERT] {ticker}: {reason}")
-        return None
-
-    cached_news = cache_get(NEWS_CACHE, ticker, NEWS_CACHE_TTL)
-    news = cached_news if cached_news else ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
-
-    float_data = get_yahoo_float(ticker)
-    score = leader_score(live_gain, trigger, metrics, news, float_data)
-    floor = score_floor_for_trigger(trigger)
-
-    if score < floor:
-        print(f"[NO ALERT] {ticker}: score {score}/10 below {floor} floor for {trigger}")
-        return None
-
-    dilution = get_dilution_awareness(ticker)
-
-    data_label = f"{candle_source} + Finnhub quote + Yahoo float"
-    if not quote.get("confirmed"):
-        data_label = f"{candle_source} + source gain + Yahoo float"
-
-    result = {
-        "ticker": ticker,
-        "trigger": trigger,
-        "price": price,
-        "gain": live_gain,
-        "volume": volume,
-        "high": safe_float(metrics.get("high")),
-        "why": why,
-        "from_low5": safe_float(metrics.get("from_low5")),
-        "last3_change": safe_float(metrics.get("last3_change")),
-        "vol_ratio": safe_float(metrics.get("vol_ratio")),
-        "rvol": safe_float(metrics.get("rvol")),
-        "off_hod": safe_float(metrics.get("off_hod")),
-        "news": news,
-        "dilution": dilution,
-        "float_data": float_data,
-        "score": score,
-        "data_label": data_label,
-    }
-
-    print(
-        f"[v42.7 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
-        f"price={fmt_money(price)} gain={live_gain:.1f}% "
-        f"float={fmt_big_num(float_data.get('float', 0)) if float_data.get('float') else 'Unknown'}"
-    )
-
-    return result
-
-def run_scan_cycle():
-    if not market_is_active():
-        return 0
-
-    session = get_session_label()
-    print(f"[SCAN] v42.7 clean leader-only scan ({session})")
-
-    leaders = get_true_leaders()
-
-    if not leaders:
-        print("[SCAN] no true leaders found")
-        return 0
-
-    prefetch_news_for_leaders(leaders)
-
-    sent = 0
-
-    for item in leaders:
-        if sent >= MAX_ALERTS_PER_CYCLE:
-            print("[SCAN] max alerts per cycle reached")
-            break
-
-        result = evaluate_leader(item)
-
-        if result:
-            send_leader_alert(result)
-            sent += 1
-
-    if sent:
-        print(f"[SCAN] Cycle complete — {sent} leader alert(s) sent")
-    else:
-        print("[SCAN] Cycle complete — no leader spike/setup alerts")
-
-    return sent
-
-def scanner_loop():
-    print(f"[BOOT] {BOOT_MARKER}")
-
-    while True:
-        try:
-            run_scan_cycle()
-            time.sleep(scan_sleep_seconds())
-
-        except Exception as e:
-            print(f"[SCAN ERROR] {e}")
-            time.sleep(30)
 
 # ============================================================
 # MAIN
 # ============================================================
 
+def main():
+    t = threading.Thread(target=scanner_loop, daemon=True)
+    t.start()
+    app.run(host="0.0.0.0", port=PORT)
+
+
 if __name__ == "__main__":
-    Thread(target=start_web_server, daemon=True).start()
-    scanner_loop()
+    main()
