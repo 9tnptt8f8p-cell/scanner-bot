@@ -17,7 +17,7 @@ from alerts import send_alert
 load_dotenv()
 
 # ============================================================
-# CLEAN LEADER-ONLY SCANNER v42.2
+# CLEAN LEADER-ONLY SCANNER v42.4
 #
 # Built fresh:
 #   - Leader-only scanner
@@ -46,7 +46,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v42.2 — CLEAN LEADER ONLY + FLOAT + DILUTION"
+BOOT_MARKER = "elite scanner v42.4 — NO SAME-PRICE RE-ALERTS + FLOAT FALLBACK"
 
 # ============================================================
 # ENV
@@ -92,6 +92,12 @@ SPIKE_RE_ALERT_COOLDOWN_SECONDS = 240
 MAX_OFF_HOD_SPIKE = 12.0
 MAX_OFF_HOD_SETUP = 18.0
 DEAD_OFF_HOD = 30.0
+
+# Re-alert must be meaningfully different. Prevents same-price / same-WHY spam.
+MIN_RE_ALERT_PRICE_EXPANSION = 0.06       # +6% over last alert price
+MIN_RE_ALERT_HIGH_EXPANSION = 0.02        # +2% new high expansion
+MIN_RE_ALERT_FROM_LOW5_CHANGE = 3.0       # from-low metric must improve by 3 pts
+MIN_RE_ALERT_LAST3_CHANGE = 3.0           # last3 metric must improve by 3 pts
 
 # Trigger thresholds
 FAST_SPIKE_PCT = 10.0
@@ -490,10 +496,10 @@ def get_true_leaders():
 
     true = true[:MAX_TRACKED_LEADERS]
 
-    print(f"[v42.2 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
+    print(f"[v42.4 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
 
     if true:
-        print("[v42.2 TRACKING] " + " | ".join(
+        print("[v42.4 TRACKING] " + " | ".join(
             f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
             for x in true[:12]
         ))
@@ -766,6 +772,17 @@ def moving_now_metrics(candles):
 
     last = candles[-1]
     price = last["close"]
+
+    # Avoid repeated alerts from stale finalized bars.
+    # Alpaca IEX can lag or stop updating on some hot names.
+    last_bar_age_seconds = 0
+    try:
+        raw_t = str(last.get("t", ""))
+        if raw_t:
+            bar_dt = datetime.fromisoformat(raw_t.replace("Z", "+00:00")).astimezone(ET)
+            last_bar_age_seconds = (now_et() - bar_dt).total_seconds()
+    except Exception:
+        last_bar_age_seconds = 0
     high = max(c["high"] for c in candles)
     low5 = min(c["low"] for c in candles[-5:])
     high5 = max(c["high"] for c in candles[-5:])
@@ -803,6 +820,7 @@ def moving_now_metrics(candles):
     return {
         "ok": True,
         "price": price,
+        "last_bar_age_seconds": last_bar_age_seconds,
         "high": high,
         "low5": low5,
         "vwap": vwap,
@@ -1223,6 +1241,13 @@ def alert_key(ticker):
     return f"{trading_day_key()}:{ticker}"
 
 def can_alert(ticker, trigger, metrics):
+    """
+    Re-alert rules:
+      - First alert always allowed.
+      - During cooldown: only allow true expansion.
+      - After cooldown: still require meaningful new price/high/metric expansion.
+      - Do NOT resend the same fast-spike setup just because cooldown expired.
+    """
     key = alert_key(ticker)
     now_ts = time.time()
     state = LAST_ALERT.get(key)
@@ -1233,28 +1258,45 @@ def can_alert(ticker, trigger, metrics):
     last_ts = safe_float(state.get("time"))
     last_price = safe_float(state.get("price"))
     last_high = safe_float(state.get("high"))
+    last_from_low5 = safe_float(state.get("from_low5"))
+    last_last3 = safe_float(state.get("last3_change"))
+    last_trigger = str(state.get("trigger", ""))
+
     price = safe_float(metrics.get("price"))
     high = safe_float(metrics.get("high"))
+    from_low5 = safe_float(metrics.get("from_low5"))
+    last3 = safe_float(metrics.get("last3_change"))
+
+    price_expanded = last_price > 0 and price >= last_price * (1 + MIN_RE_ALERT_PRICE_EXPANSION)
+    high_expanded = last_high > 0 and high >= last_high * (1 + MIN_RE_ALERT_HIGH_EXPANSION)
+    from_low5_improved = from_low5 >= last_from_low5 + MIN_RE_ALERT_FROM_LOW5_CHANGE
+    last3_improved = last3 >= last_last3 + MIN_RE_ALERT_LAST3_CHANGE
+    trigger_upgraded = trigger != last_trigger and ("HOD BREAKOUT" in trigger or "VWAP RECLAIM" in trigger)
+
+    meaningful_change = (
+        price_expanded
+        or high_expanded
+        or from_low5_improved
+        or last3_improved
+        or trigger_upgraded
+    )
 
     cooldown = SPIKE_RE_ALERT_COOLDOWN_SECONDS if "SPIKE" in trigger else ALERT_COOLDOWN_SECONDS
 
     if now_ts - last_ts < cooldown:
-        if "SPIKE" in trigger and last_price > 0 and price >= last_price * 1.08:
-            return True, "fast spike expanded over last alert"
+        if meaningful_change:
+            return True, "meaningful expansion during cooldown"
 
         left = int(cooldown - (now_ts - last_ts))
-        return False, f"cooldown {left}s left"
+        return False, f"cooldown {left}s left — no new expansion"
 
-    if last_price > 0 and price >= last_price * 1.06:
-        return True, "price expanded over last alert"
+    if meaningful_change:
+        return True, "meaningful expansion since last alert"
 
-    if last_high > 0 and high >= last_high * 1.02:
-        return True, "new high expansion"
-
-    if "SPIKE" in trigger:
-        return True, "fresh fast spike"
-
-    return False, "no meaningful expansion since last alert"
+    return False, (
+        "same setup blocked — no new price/high/metric expansion "
+        f"(price {fmt_money(price)} vs last {fmt_money(last_price)})"
+    )
 
 def build_alert(result):
     ticker = result["ticker"]
@@ -1319,6 +1361,10 @@ def send_leader_alert(result):
         "price": result["price"],
         "high": result.get("high", result["price"]),
         "trigger": result["trigger"],
+        "from_low5": result.get("from_low5", 0),
+        "last3_change": result.get("last3_change", 0),
+        "vol_ratio": result.get("vol_ratio", 0),
+        "rvol": result.get("rvol", 0),
     }
 
     print(f"[ALERT SENT] {result['ticker']} {result['trigger']}")
@@ -1351,14 +1397,14 @@ def evaluate_leader(item):
     quote_ok, quote_reason = validate_quote_against_source(ticker, source_gain, quote)
 
     if not quote_ok:
-        print(f"[v42.2 SKIP] {ticker}: {quote_reason}")
+        print(f"[v42.4 SKIP] {ticker}: {quote_reason}")
         return None
 
     candles = get_alpaca_candles(ticker)
     metrics = moving_now_metrics(candles)
 
     if not metrics.get("ok"):
-        print(f"[v42.2 LOG ONLY] {ticker}: {metrics.get('reason')}")
+        print(f"[v42.4 LOG ONLY] {ticker}: {metrics.get('reason')}")
         return None
 
     candle_price = safe_float(metrics.get("price"))
@@ -1370,8 +1416,11 @@ def evaluate_leader(item):
 
     trigger, why = classify_trigger(metrics)
 
+    if safe_float(metrics.get("last_bar_age_seconds")) >= 90:
+        why = f"{why} | ⚠️ candle stale {int(metrics.get('last_bar_age_seconds'))}s"
+
     if not trigger:
-        print(f"[v42.2 LOG ONLY] {ticker}: {why}")
+        print(f"[v42.4 LOG ONLY] {ticker}: {why}")
         return None
 
     allowed, reason = can_alert(ticker, trigger, metrics)
@@ -1405,6 +1454,11 @@ def evaluate_leader(item):
         "volume": volume,
         "high": safe_float(metrics.get("high")),
         "why": why,
+        "from_low5": safe_float(metrics.get("from_low5")),
+        "last3_change": safe_float(metrics.get("last3_change")),
+        "vol_ratio": safe_float(metrics.get("vol_ratio")),
+        "rvol": safe_float(metrics.get("rvol")),
+        "off_hod": safe_float(metrics.get("off_hod")),
         "news": news,
         "dilution": dilution,
         "float_data": float_data,
@@ -1413,7 +1467,7 @@ def evaluate_leader(item):
     }
 
     print(
-        f"[v42.2 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
+        f"[v42.4 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
         f"price={fmt_money(price)} gain={live_gain:.1f}% "
         f"float={fmt_big_num(float_data.get('float', 0)) if float_data.get('float') else 'Unknown'}"
     )
@@ -1425,7 +1479,7 @@ def run_scan_cycle():
         return 0
 
     session = get_session_label()
-    print(f"[SCAN] v42.2 clean leader-only scan ({session})")
+    print(f"[SCAN] v42.4 clean leader-only scan ({session})")
 
     leaders = get_true_leaders()
 
