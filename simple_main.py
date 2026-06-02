@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v43.8-full-file-fix-telegram-quotes-news"
+VERSION = "v44-leader-first-fast-spike-data-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -88,7 +88,8 @@ def env_first(*names: str) -> str:
 
 
 TELEGRAM_BOT_TOKEN = env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "BOT_TOKEN")
-TELEGRAM_CHAT_ID = env_first("TELEGRAM_CHAT_ID", "TELEGRAM_CHANNEL_ID", "CHAT_ID")
+TELEGRAM_CHAT_ID_RAW = env_first("TELEGRAM_CHAT_ID", "TELEGRAM_CHANNEL_ID", "CHAT_ID")
+TELEGRAM_CHAT_IDS = [x.strip() for x in TELEGRAM_CHAT_ID_RAW.split(",") if x.strip()]
 FINNHUB_API_KEY = env_first("FINNHUB_API_KEY", "FINNHUB_TOKEN")
 ALPACA_API_KEY = env_first("ALPACA_API_KEY", "APCA_API_KEY_ID", "APCA_API_KEY")
 ALPACA_SECRET_KEY = env_first("ALPACA_SECRET_KEY", "APCA_API_SECRET_KEY", "APCA_SECRET_KEY")
@@ -218,6 +219,10 @@ LAST_GOOD_LEADERS_TS: float = 0.0
 ALERT_STATES: Dict[str, AlertState] = {}
 RUNNING = True
 LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
+QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
+NEWS_CACHE: Dict[str, Tuple[float, NewsResult]] = {}
+QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "30"))
+NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "180"))
 
 
 # =============================================================================
@@ -600,11 +605,20 @@ def get_yahoo_quote(ticker: str) -> Optional[Quote]:
 
 def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
     """
-    Quote priority:
+    Fast quote chain with caching:
     1) Finnhub live quote while available.
-    2) Leader snapshot from Nasdaq/Yahoo gainers, so scanner keeps working during Finnhub 429s.
-    3) Yahoo quote only if it is not blocked. Yahoo quote often returns 401 on Render.
+    2) Leader snapshot from Nasdaq/Yahoo gainers.
+
+    Yahoo v7 quote is intentionally not used here because Render often receives
+    Yahoo 401 Unauthorized, which wastes time and creates noisy blocks.
     """
+    ticker = normalize_ticker(ticker)
+    cached = QUOTE_CACHE.get(ticker)
+    if cached:
+        ts, q = cached
+        if time.time() - ts <= QUOTE_CACHE_TTL_SECONDS and q and q.price > 0:
+            return q
+
     q = get_finnhub_quote(ticker)
     if q and q.price > 0:
         if leader:
@@ -612,21 +626,19 @@ def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
                 q.change_pct = leader.change_pct
             if not q.day_volume and leader.volume:
                 q.day_volume = leader.volume
+        QUOTE_CACHE[ticker] = (time.time(), q)
         return q
 
     if leader and leader.price > 0:
-        return Quote(
+        q = Quote(
             ticker=ticker,
             price=leader.price,
             change_pct=leader.change_pct,
             day_volume=leader.volume,
             source=f"leader:{leader.source}",
         )
-
-    if source_allowed("yahoo_quote"):
-        q = get_yahoo_quote(ticker)
-        if q and q.price > 0:
-            return q
+        QUOTE_CACHE[ticker] = (time.time(), q)
+        return q
 
     return None
 
@@ -886,7 +898,15 @@ def get_yahoo_news(ticker: str) -> Optional[NewsResult]:
 def best_news(ticker: str) -> NewsResult:
     """
     Return the best real catalyst headline. Junk aggregator headlines are never used as the displayed headline.
+    Cached to avoid hammering Finnhub/Yahoo news every scan.
     """
+    ticker = normalize_ticker(ticker)
+    cached = NEWS_CACHE.get(ticker)
+    if cached:
+        ts, nr = cached
+        if time.time() - ts <= NEWS_CACHE_TTL_SECONDS:
+            return nr
+
     fallback_dilution = False
     fallback_dilution_note = ""
     for fn in (get_finnhub_news, get_yahoo_news):
@@ -900,16 +920,24 @@ def best_news(ticker: str) -> NewsResult:
             if nr.grade == "JUNK":
                 continue
             if nr.grade in {"STRONG", "WEAK"}:
+                NEWS_CACHE[ticker] = (time.time(), nr)
                 return nr
         except Exception as exc:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
-    return NewsResult(
+    nr = NewsResult(
         grade="NONE",
         headline="UNKNOWN CATALYST — INVESTIGATE",
         source="none",
         dilution_flag=fallback_dilution,
         dilution_note=fallback_dilution_note,
     )
+    NEWS_CACHE[ticker] = (time.time(), nr)
+    return nr
+
+
+def should_check_news(ticker: str) -> bool:
+    top = {x.ticker for x in LAST_GOOD_LEADERS[:10]}
+    return normalize_ticker(ticker) in top
 
 
 # =============================================================================
@@ -992,8 +1020,15 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     candles = best_candles(ticker)
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
-    news = best_news(ticker)
+    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="UNKNOWN CATALYST — INVESTIGATE", source="skipped")
     quality = quality_score(leader, quote, structure, news)
+
+    # Market-leader override: huge gainers should not be buried just because news is unknown.
+    gain = max(quote.change_pct, leader.change_pct)
+    if gain >= 150:
+        quality = max(quality, 9)
+    elif gain >= 100:
+        quality = max(quality, 8)
 
     st = update_baseline(ticker, quote.price)
     spike_from_base = pct_change(quote.price, st.baseline_price) if st.baseline_price > 0 else 0.0
@@ -1009,7 +1044,10 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         risks.append("not above VWAP")
 
     alert_type = ""
-    if spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
+    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT:
+        alert_type = "FAST LEADER SPIKE"
+        reasons.append(f"fast +{spike_from_base:.1f}% push")
+    elif spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
         alert_type = "FAST SPIKE"
         reasons.append(f"fast +{spike_from_base:.1f}% push")
     elif gain >= MAJOR_LEADER_GAIN_PCT and day_vol >= MIN_DAY_VOLUME:
@@ -1098,28 +1136,31 @@ def format_alert(d: CandidateDecision) -> str:
 
 def send_telegram(text: str) -> bool:
     ticker = text.split("—")[-1].splitlines()[0].strip() if "—" in text else "unknown"
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         log.warning(
-            "[ALERT DRY RUN] missing Telegram config token=%s chat=%s ticker=%s\n%s",
+            "[ALERT DRY RUN] missing Telegram config token=%s chats=%s ticker=%s\n%s",
             bool(TELEGRAM_BOT_TOKEN),
-            bool(TELEGRAM_CHAT_ID),
+            len(TELEGRAM_CHAT_IDS),
             ticker,
             text,
         )
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
-    try:
-        resp = SESSION.post(url, json=payload, timeout=10)
-        log.info("[TELEGRAM SEND] ticker=%s status=%s", ticker, resp.status_code)
-        if resp.status_code >= 300:
-            log.warning("[TELEGRAM ERROR] status=%s body=%s", resp.status_code, resp.text[:300])
-            return False
-        return True
-    except Exception as exc:
-        log.warning("[TELEGRAM ERROR] ticker=%s error=%s", ticker, exc)
-        return False
+    delivered = 0
+    for chat_id in TELEGRAM_CHAT_IDS:
+        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        try:
+            resp = SESSION.post(url, json=payload, timeout=10)
+            log.info("[TELEGRAM SEND] ticker=%s chat=%s status=%s", ticker, chat_id, resp.status_code)
+            if resp.status_code >= 300:
+                log.warning("[TELEGRAM ERROR] chat=%s status=%s body=%s", chat_id, resp.status_code, resp.text[:300])
+                continue
+            delivered += 1
+        except Exception as exc:
+            log.warning("[TELEGRAM ERROR] ticker=%s chat=%s error=%s", ticker, chat_id, exc)
+
+    return delivered > 0
 
 
 # =============================================================================
@@ -1140,7 +1181,7 @@ def run_scan_cycle() -> Dict[str, Any]:
 
     leaders = get_leaders()
     decisions: List[CandidateDecision] = []
-    for leader in leaders[:50]:
+    for leader in leaders[:20]:
         checked += 1
         try:
             d = decide_candidate(leader)
@@ -1184,11 +1225,11 @@ def scanner_loop() -> None:
     global LAST_CYCLE_SUMMARY
     log.info("[START] %s interval=%ss min_alert_gain=%s", VERSION, SCAN_INTERVAL_SECONDS, MIN_ALERT_GAIN_PCT)
     log.info(
-        "[TELEGRAM CONFIG] token=%s chat=%s token_len=%s chat_len=%s",
+        "[TELEGRAM CONFIG] token=%s chats=%s token_len=%s chat_count=%s",
         bool(TELEGRAM_BOT_TOKEN),
-        bool(TELEGRAM_CHAT_ID),
+        bool(TELEGRAM_CHAT_IDS),
         len(TELEGRAM_BOT_TOKEN),
-        len(TELEGRAM_CHAT_ID),
+        len(TELEGRAM_CHAT_IDS),
     )
     log.info(
         "[DATA CONFIG] finnhub=%s alpaca_key=%s alpaca_secret=%s",
