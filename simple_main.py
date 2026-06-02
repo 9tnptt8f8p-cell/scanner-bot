@@ -56,7 +56,7 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "v43.1-hod-leader-override"
+VERSION = "v43.2-news-junk-speed-fix"
 
 TZ = pytz.timezone("America/New_York")
 
@@ -285,6 +285,20 @@ class NewsResult:
     score: float
     ranked: List[Dict[str, Any]] = field(default_factory=list)
     dilution_flags: List[str] = field(default_factory=list)
+
+
+def unknown_news_result() -> NewsResult:
+    return NewsResult(
+        found=False,
+        source=None,
+        headline="UNKNOWN CATALYST — INVESTIGATE",
+        grade="D",
+        type="UNKNOWN",
+        confidence="D",
+        score=0,
+        ranked=[],
+        dilution_flags=[],
+    )
 
 
 # ============================================================
@@ -621,12 +635,20 @@ def analyze_structure(ticker: str, candles: CandleBundle) -> StructureResult:
 # ============================================================
 
 JUNK_HEADLINE_PHRASES = [
+    # generic mover / aggregator garbage — never show as catalyst
     "stocks moving", "stock moving", "why shares are trading",
-    "gap up", "gap down", "top gainers", "premarket movers",
-    "most active", "biggest movers", "market update",
-    "midday movers", "after-hours movers", "session:",
+    "why is", "why are", "shares are trading", "shares trading",
+    "gap up", "gap down", "gap up and gap down",
+    "gap up and gap down stocks",
+    "top gainers", "premarket movers", "most active",
+    "biggest movers", "market update", "midday movers",
+    "after-hours movers", "session:", "tuesday's session",
+    "monday's session", "wednesday's session",
+    "thursday's session", "friday's session",
     "watch these stocks", "hot penny stocks", "trending stocks",
     "movers to watch", "stock market today",
+    "biggest pre-market stock movers", "biggest stock movers",
+    "what's going on with", "what is going on with",
 ]
 
 STRONG_CATALYST_WORDS = [
@@ -659,8 +681,26 @@ SEC_BULLISH_ITEMS = [
 def is_junk_headline(title: str) -> bool:
     if not title:
         return True
+
     t = clean_text(title).lower()
-    return any(p in t for p in JUNK_HEADLINE_PHRASES)
+
+    # Phrase blacklist catches Benzinga/Yahoo/aggregator "mover" articles.
+    if any(p in t for p in JUNK_HEADLINE_PHRASES):
+        return True
+
+    # Day/session style aggregator headlines:
+    # "Tuesday's session: gap up and gap down stocks"
+    if re.search(r"\b(monday|tuesday|wednesday|thursday|friday)'?s session\b", t):
+        return True
+
+    # Generic listicle/mover style headlines.
+    if re.search(r"\b\d+\s+(stocks|penny stocks)\s+(moving|to watch|trending)\b", t):
+        return True
+
+    if "gap" in t and ("stocks" in t or "session" in t):
+        return True
+
+    return False
 
 
 def classify_headline(title: str) -> Dict[str, Any]:
@@ -1323,6 +1363,7 @@ def format_alert(c: Candidate, sr: StructureResult, news: NewsResult, reason: st
         f"{title} — {c.ticker}\n\n"
         f"${c.price:.2f} | +{c.gain_pct:.1f}%\n"
         f"Vol: {format_volume(c.volume)} | Float: {float_txt}\n\n"
+        # No Leader Score displayed. If it alerts, trigger quality matters more than old score noise.
         f"CATALYST: {catalyst}\n"
         f"Source: {source_line}\n\n"
         f"WHY: {why}\n"
@@ -1377,19 +1418,24 @@ def scan_one(c: Candidate) -> Optional[str]:
         logging.info(f"[SKIP] {ticker}: +{c.gain_pct:.1f}% under floor")
         return None
 
-    # Find news only after basic leader passes, to save speed.
-    news = find_ranked_news(ticker)
-
-    should, reason = should_alert(c, sr, news, c.price)
+    # v43.2 speed fix:
+    # Do NOT run SEC/PR/Alpaca/Yahoo news on every tracked leader.
+    # First decide if the chart/leader trigger is valid using dummy unknown news.
+    dummy_news = unknown_news_result()
+    should, reason = should_alert(c, sr, dummy_news, c.price)
 
     if not should and "WATCH RECLAIM" in reason:
         logging.info(f"[TRACK ONLY] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {reason}")
         return None
 
-    logging.info(f"[CHECK] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {should} {reason}")
-
     if not should:
+        logging.info(f"[CHECK] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: False {reason}")
         return None
+
+    logging.info(f"[TRIGGER] {ticker} +{c.gain_pct:.1f}% ${c.price:.2f}: {reason} — pulling ranked news")
+
+    # Only now pull ranked news/SEC.
+    news = find_ranked_news(ticker)
 
     float_m = yahoo_float_estimate(ticker)
 
@@ -1480,3 +1526,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
