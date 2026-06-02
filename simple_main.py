@@ -2,7 +2,6 @@ import os
 import re
 import time
 import html
-import json
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from threading import Thread
@@ -18,8 +17,18 @@ from alerts import send_alert
 load_dotenv()
 
 # ============================================================
-# CLEAN LEADER-ONLY SCANNER v42.0
-# Built fresh: no stacked v39/v40/v41 overrides.
+# CLEAN LEADER-ONLY SCANNER v42.2
+#
+# Built fresh:
+#   - Leader-only scanner
+#   - Fast leader spike trigger
+#   - Fresh HOD breakout trigger
+#   - VWAP reclaim trigger
+#   - Second-leg setup trigger
+#   - Float detection/display
+#   - Low-float score boost
+#   - Junk news cleanup
+#   - Dilution awareness only, never blocks
 #
 # Mission:
 #   Track only true market leaders and alert only when they are spiking,
@@ -30,13 +39,14 @@ load_dotenv()
 #   2) TradingView scanner
 #   3) Alpaca 1-minute candles
 #   4) Finnhub quote fallback
+#   5) Yahoo quoteSummary float fallback
 #
 # Background news:
 #   Finnhub news + GlobeNewswire scrape + PRNewswire scrape
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v42.1 — CLEAN LEADER ONLY + SCORE/DILUTION"
+BOOT_MARKER = "elite scanner v42.2 — CLEAN LEADER ONLY + FLOAT + DILUTION"
 
 # ============================================================
 # ENV
@@ -70,7 +80,10 @@ DISCOVERY_MIN_GAIN = 25.0
 TRUE_LEADER_MIN_GAIN = 50.0
 TRUE_LEADER_MIN_VOLUME = 1_000_000
 MAX_TRACKED_LEADERS = 15
+
+# Float
 LOW_FLOAT_SHARES = 10_000_000
+MICRO_FLOAT_SHARES = 2_000_000
 
 # Alert controls
 MAX_ALERTS_PER_CYCLE = 2
@@ -128,10 +141,7 @@ PROFILE_CACHE = {}
 DILUTION_CACHE = {}
 
 LAST_ALERT = {}
-LEADER_STATE = {}
 NEWS_PREFETCH_RUNNING = set()
-
-SESSION_ALERT_COUNT = 0
 
 # ============================================================
 # WEB HEALTH
@@ -226,7 +236,7 @@ def cache_set(cache, key, value):
 
 def http_get(url, params=None, headers=None, timeout=6):
     h = {
-        "User-Agent": "Mozilla/5.0 scannerbot/42.0",
+        "User-Agent": "Mozilla/5.0 scannerbot/42.2 contact@example.com",
         "Accept": "text/html,application/json,*/*",
     }
     if headers:
@@ -235,7 +245,7 @@ def http_get(url, params=None, headers=None, timeout=6):
 
 def http_post(url, payload=None, headers=None, timeout=6):
     h = {
-        "User-Agent": "Mozilla/5.0 scannerbot/42.0",
+        "User-Agent": "Mozilla/5.0 scannerbot/42.2",
         "Accept": "application/json,text/plain,*/*",
         "Content-Type": "application/json",
     }
@@ -321,6 +331,7 @@ def source_pass(item):
     ticker = item.get("ticker", "")
     if is_bad_ticker(ticker):
         return False
+
     gain = safe_float(item.get("gain"))
     price = safe_float(item.get("price"))
     volume = safe_int(item.get("volume"))
@@ -340,14 +351,17 @@ def get_stockanalysis_leaders():
 
     url = "https://stockanalysis.com/markets/gainers/"
     results = []
+
     try:
         r = http_get(url, timeout=5)
         soup = BeautifulSoup(r.text, "html.parser")
         rows = soup.select("table tbody tr")
+
         for row in rows[:80]:
             cells = [clean_text(c.get_text(" ")) for c in row.find_all("td")]
             if len(cells) < 5:
                 continue
+
             ticker = cells[1]
             gain = safe_float(cells[3].replace("+", "").replace("%", "")) if len(cells) > 3 else 0
             price = safe_float(cells[4].replace("$", "").replace(",", "")) if len(cells) > 4 else 0
@@ -359,6 +373,7 @@ def get_stockanalysis_leaders():
                 results.append(item)
 
         print(f"[GAINERS] StockAnalysis returned {len(results)} leaders")
+
     except Exception as e:
         print(f"[GAINERS ERROR] StockAnalysis: {e}")
 
@@ -389,13 +404,16 @@ def get_tradingview_leaders():
     }
 
     results = []
+
     try:
         r = http_post(url, payload=payload, timeout=5)
         data = r.json()
+
         for row in data.get("data", []):
             d = row.get("d") or []
             if len(d) < 4:
                 continue
+
             item = normalize_leader(
                 ticker=d[0],
                 price=d[1] if len(d) > 1 else 0,
@@ -404,10 +422,12 @@ def get_tradingview_leaders():
                 market_cap=d[4] if len(d) > 4 else 0,
                 source="TradingView",
             )
+
             if source_pass(item):
                 results.append(item)
 
         print(f"[GAINERS] TradingView returned {len(results)} leaders")
+
     except Exception as e:
         print(f"[GAINERS ERROR] TradingView: {e}")
 
@@ -415,6 +435,7 @@ def get_tradingview_leaders():
 
 def merge_leaders(items):
     merged = {}
+
     for item in items:
         ticker = item.get("ticker", "").upper().strip()
         if is_bad_ticker(ticker):
@@ -433,44 +454,54 @@ def merge_leaders(items):
         for src in item.get("sources", [item.get("source", "unknown")]):
             if src not in existing["sources"]:
                 existing["sources"].append(src)
+
         existing["source"] = "+".join(existing["sources"])
 
     leaders = list(merged.values())
-    leaders.sort(key=lambda x: (
-        safe_float(x.get("gain")) >= 100,
-        safe_float(x.get("gain")) >= 50,
-        safe_int(x.get("volume")),
-        safe_float(x.get("gain")),
-    ), reverse=True)
+    leaders.sort(
+        key=lambda x: (
+            safe_float(x.get("gain")) >= 100,
+            safe_float(x.get("gain")) >= 50,
+            safe_int(x.get("volume")),
+            safe_float(x.get("gain")),
+        ),
+        reverse=True,
+    )
     return leaders
 
 def get_true_leaders():
     leaders = []
     leaders.extend(get_stockanalysis_leaders())
     leaders.extend(get_tradingview_leaders())
+
     merged = merge_leaders(leaders)
 
     true = []
     skipped = 0
+
     for item in merged:
         gain = safe_float(item.get("gain"))
         vol = safe_int(item.get("volume"))
+
         if gain >= TRUE_LEADER_MIN_GAIN and vol >= TRUE_LEADER_MIN_VOLUME:
             true.append(item)
         else:
             skipped += 1
 
     true = true[:MAX_TRACKED_LEADERS]
-    print(f"[v42 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
+
+    print(f"[v42.2 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
+
     if true:
-        print("[v42 TRACKING] " + " | ".join(
+        print("[v42.2 TRACKING] " + " | ".join(
             f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
             for x in true[:12]
         ))
+
     return true
 
 # ============================================================
-# QUOTES / CANDLES
+# QUOTES / FLOAT / CANDLES
 # ============================================================
 
 def get_finnhub_quote(ticker):
@@ -485,9 +516,11 @@ def get_finnhub_quote(ticker):
         url = "https://finnhub.io/api/v1/quote"
         r = http_get(url, params={"symbol": ticker, "token": FINNHUB_API_KEY}, timeout=2.2)
         data = r.json()
+
         price = safe_float(data.get("c"))
         prev_close = safe_float(data.get("pc"))
         gain = ((price - prev_close) / prev_close) * 100 if price > 0 and prev_close > 0 else 0
+
         q = {
             "price": price,
             "gain": gain,
@@ -495,11 +528,61 @@ def get_finnhub_quote(ticker):
             "confirmed": price > 0 and -95 < gain < 900,
             "reason": "",
         }
+
         if q["confirmed"]:
             return cache_set(QUOTE_CACHE, ticker, q)
+
         return q
+
     except Exception as e:
         return {"price": 0, "gain": 0, "source": "Finnhub", "confirmed": False, "reason": str(e)}
+
+def get_yahoo_float(ticker):
+    key = f"float:{ticker}"
+    cached = cache_get(PROFILE_CACHE, key, PROFILE_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    empty = {
+        "float": 0,
+        "shares_out": 0,
+        "low_float": False,
+        "micro_float": False,
+        "source": "Yahoo",
+    }
+
+    try:
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+        params = {"modules": "defaultKeyStatistics"}
+
+        r = http_get(url, params=params, timeout=3)
+        data = r.json()
+
+        result = (data.get("quoteSummary", {}).get("result") or [{}])[0]
+        stats = result.get("defaultKeyStatistics", {})
+
+        float_shares = safe_int((stats.get("floatShares") or {}).get("raw", 0))
+        shares_out = safe_int((stats.get("sharesOutstanding") or {}).get("raw", 0))
+
+        out = {
+            "float": float_shares,
+            "shares_out": shares_out,
+            "low_float": bool(float_shares and float_shares <= LOW_FLOAT_SHARES),
+            "micro_float": bool(float_shares and float_shares <= MICRO_FLOAT_SHARES),
+            "source": "Yahoo",
+        }
+
+        if float_shares:
+            tag = "MICRO FLOAT" if out["micro_float"] else "LOW FLOAT" if out["low_float"] else "normal"
+            print(f"[FLOAT] {ticker}: {fmt_big_num(float_shares)} ({tag})")
+        else:
+            print(f"[FLOAT] {ticker}: unknown")
+
+        return cache_set(PROFILE_CACHE, key, out)
+
+    except Exception as e:
+        print(f"[FLOAT ERROR] {ticker}: {e}")
+        return cache_set(PROFILE_CACHE, key, empty)
 
 def alpaca_headers():
     return {
@@ -510,14 +593,17 @@ def alpaca_headers():
 def normalize_candle(raw):
     if not isinstance(raw, dict):
         return None
+
     o = raw.get("o", raw.get("open"))
     h = raw.get("h", raw.get("high"))
     l = raw.get("l", raw.get("low"))
     c = raw.get("c", raw.get("close"))
     v = raw.get("v", raw.get("volume", 0))
     t = raw.get("t", raw.get("timestamp", ""))
+
     if None in [o, h, l, c]:
         return None
+
     return {
         "t": t,
         "open": safe_float(o),
@@ -541,6 +627,7 @@ def get_alpaca_candles(ticker, limit=CANDLE_LIMIT):
         end = datetime.now(ET)
         start = end - timedelta(hours=8)
         url = f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/bars"
+
         params = {
             "timeframe": "1Min",
             "start": start.astimezone(ZoneInfo("UTC")).isoformat(),
@@ -550,14 +637,19 @@ def get_alpaca_candles(ticker, limit=CANDLE_LIMIT):
             "feed": "iex",
             "sort": "asc",
         }
+
         r = http_get(url, params=params, headers=alpaca_headers(), timeout=3)
         data = r.json()
+
         bars = [normalize_candle(x) for x in data.get("bars", [])]
         bars = [x for x in bars if x]
+
         if bars:
-            bars = bars[:-1] if len(bars) > 1 else bars  # ignore active bar
+            bars = bars[:-1] if len(bars) > 1 else bars
+
         print(f"[CANDLES] {ticker}: Alpaca {len(bars)} finalized bars")
         return cache_set(CANDLE_CACHE, key, bars)
+
     except Exception as e:
         print(f"[CANDLES ERROR] {ticker}: Alpaca {e}")
         return []
@@ -569,11 +661,13 @@ def get_alpaca_candles(ticker, limit=CANDLE_LIMIT):
 def compute_vwap(candles):
     pv = 0.0
     vol = 0
+
     for c in candles:
         typical = (c["high"] + c["low"] + c["close"]) / 3
         v = safe_int(c["volume"])
         pv += typical * v
         vol += v
+
     return pv / vol if vol > 0 else 0
 
 def percent_change(a, b):
@@ -582,6 +676,19 @@ def percent_change(a, b):
     if b <= 0:
         return 0.0
     return ((a - b) / b) * 100
+
+def estimate_rvol(candles):
+    if len(candles) < 12:
+        return 1.0
+
+    recent = sum(c["volume"] for c in candles[-3:]) / 3
+    baseline_slice = candles[-30:-5] if len(candles) >= 35 else candles[:-5]
+
+    if not baseline_slice:
+        return 1.0
+
+    baseline = sum(c["volume"] for c in baseline_slice) / max(1, len(baseline_slice))
+    return recent / baseline if baseline > 0 else 1.0
 
 def moving_now_metrics(candles):
     if len(candles) < MIN_CANDLES:
@@ -612,10 +719,9 @@ def moving_now_metrics(candles):
     above_vwap = vwap > 0 and price >= vwap
     reclaim_vwap = above_vwap and len(candles) >= 6 and candles[-4]["close"] < vwap
 
-    pullback_from_hod = off_hod
     second_leg = (
         above_vwap
-        and pullback_from_hod <= SECOND_LEG_MAX_PULLBACK
+        and off_hod <= SECOND_LEG_MAX_PULLBACK
         and last3_change >= 0
         and vol_ratio >= SECOND_LEG_MIN_VOL_RATIO
     )
@@ -649,6 +755,7 @@ def classify_trigger(metrics):
         return None, metrics.get("reason", "bad metrics")
 
     off_hod = safe_float(metrics.get("off_hod"))
+
     if off_hod >= DEAD_OFF_HOD:
         return None, f"dead leader — {off_hod:.1f}% off HOD"
 
@@ -699,18 +806,31 @@ STRONG_NEWS_WORDS = [
 JUNK_NEWS_PHRASES = [
     "stocks moving", "premarket movers", "market movers", "why shares are trading",
     "gap-ups and gap-downs", "most active", "top gainers", "biggest pre-market",
+    "on the move", "today's pre-market session", "today's regular session",
 ]
 
 def classify_news(headline):
     h = clean_text(headline)
     low = h.lower()
+
     if not h:
         return "UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0
+
     if any(x in low for x in JUNK_NEWS_PHRASES):
         return h, "JUNK", 1
+
     if any(x in low for x in STRONG_NEWS_WORDS):
         return h, "STRONG", 9
+
     return h, "UNCLEAR", 4
+
+def display_catalyst(news):
+    headline, quality, score = news or ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
+
+    if quality in ["JUNK", "UNKNOWN"]:
+        return "UNKNOWN CATALYST — INVESTIGATE"
+
+    return headline or "UNKNOWN CATALYST — INVESTIGATE"
 
 def ticker_word_match(ticker, text):
     return re.search(rf"(?<![A-Z]){re.escape(ticker.upper())}(?![A-Z])", str(text).upper()) is not None
@@ -718,28 +838,35 @@ def ticker_word_match(ticker, text):
 def get_finnhub_news(ticker):
     if not FINNHUB_API_KEY:
         return ""
+
     try:
         end = now_et().date()
         start = end - timedelta(days=3)
         url = "https://finnhub.io/api/v1/company-news"
+
         params = {
             "symbol": ticker,
             "from": start.isoformat(),
             "to": end.isoformat(),
             "token": FINNHUB_API_KEY,
         }
+
         r = http_get(url, params=params, timeout=NEWS_TIMEOUT)
         rows = r.json() or []
+
         for row in rows[:8]:
             headline = clean_text(row.get("headline", ""))
             if headline and ticker_word_match(ticker, headline):
                 return headline
+
         for row in rows[:8]:
             headline = clean_text(row.get("headline", ""))
             if headline:
                 return headline
+
     except Exception as e:
         print(f"[NEWS FAST ERROR] Finnhub {ticker}: {e}")
+
     return ""
 
 def scrape_globe_news(ticker):
@@ -749,10 +876,13 @@ def scrape_globe_news(ticker):
         soup = BeautifulSoup(r.text, "html.parser")
         text = clean_text(soup.get_text(" "))
         m = re.search(r"([A-Z][^\.]{30,180})", text)
+
         if m and ticker_word_match(ticker, m.group(1)):
             return m.group(1)
+
     except Exception:
         pass
+
     return ""
 
 def scrape_prnewswire(ticker):
@@ -762,10 +892,13 @@ def scrape_prnewswire(ticker):
         soup = BeautifulSoup(r.text, "html.parser")
         text = clean_text(soup.get_text(" "))
         m = re.search(r"([A-Z][^\.]{30,180})", text)
+
         if m and ticker_word_match(ticker, m.group(1)):
             return m.group(1)
+
     except Exception:
         pass
+
     return ""
 
 def get_best_news(ticker):
@@ -774,25 +907,32 @@ def get_best_news(ticker):
         return cached
 
     candidates = []
+
     with ThreadPoolExecutor(max_workers=NEWS_WORKERS) as pool:
         futures = [
             pool.submit(get_finnhub_news, ticker),
             pool.submit(scrape_globe_news, ticker),
             pool.submit(scrape_prnewswire, ticker),
         ]
-        for fut in as_completed(futures, timeout=NEWS_TIMEOUT + 1.0):
-            try:
-                headline = clean_text(fut.result(timeout=0))
-                if headline:
-                    candidates.append(headline)
-            except Exception:
-                pass
+
+        try:
+            for fut in as_completed(futures, timeout=NEWS_TIMEOUT + 1.0):
+                try:
+                    headline = clean_text(fut.result(timeout=0))
+                    if headline:
+                        candidates.append(headline)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     best = ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
+
     for h in candidates:
         classified = classify_news(h)
         if classified[2] > best[2]:
             best = classified
+
     NEWS_CACHE[ticker] = (time.time(), best)
     print(f"[NEWS] {ticker}: {best[0]} ({best[1]} {best[2]}/10)")
     return best
@@ -800,11 +940,13 @@ def get_best_news(ticker):
 def prefetch_news_for_leaders(leaders):
     tickers = [x["ticker"] for x in leaders[:NEWS_PREFETCH_TOP_N]]
     todo = []
+
     for t in tickers:
         if cache_get(NEWS_CACHE, t, NEWS_CACHE_TTL):
             continue
         if t in NEWS_PREFETCH_RUNNING:
             continue
+
         NEWS_PREFETCH_RUNNING.add(t)
         todo.append(t)
 
@@ -822,34 +964,20 @@ def prefetch_news_for_leaders(leaders):
     Thread(target=worker, daemon=True).start()
     print("[NEWS PREFETCH] started for " + ", ".join(todo))
 
-
 # ============================================================
-# SCORE / RVOL / DILUTION AWARENESS
+# SCORE / DILUTION
 # ============================================================
 
-def estimate_rvol(candles):
+def leader_score(gain, trigger, metrics, news, float_data=None):
     """
-    Fast intraday RVOL proxy:
-    recent 3-bar avg volume vs earlier same-session average.
-    """
-    if len(candles) < 12:
-        return 1.0
-    recent = sum(c["volume"] for c in candles[-3:]) / 3
-    baseline_slice = candles[-30:-5] if len(candles) >= 35 else candles[:-5]
-    if not baseline_slice:
-        return 1.0
-    baseline = sum(c["volume"] for c in baseline_slice) / max(1, len(baseline_slice))
-    return recent / baseline if baseline > 0 else 1.0
-
-def leader_score(gain, trigger, metrics, news):
-    """
-    v42.1 simplified 10-point leader score.
+    v42.2 simplified 10-point leader score.
 
     Day gain:       0-3
     Live expansion: 0-3
     Structure:      0-2
     Volume/RVOL:    0-1
     Catalyst:       0-1
+    Float:          0-1
 
     Dilution is awareness only and never changes score.
     """
@@ -874,6 +1002,7 @@ def leader_score(gain, trigger, metrics, news):
 
     if metrics.get("above_vwap"):
         score += 1
+
     if "SECOND-LEG" in trigger or "VWAP RECLAIM" in trigger:
         score += 1
 
@@ -882,6 +1011,10 @@ def leader_score(gain, trigger, metrics, news):
 
     news_quality = (news or ("", "UNKNOWN", 0))[1]
     if news_quality == "STRONG":
+        score += 1
+
+    float_shares = safe_int((float_data or {}).get("float"))
+    if float_shares and float_shares <= LOW_FLOAT_SHARES:
         score += 1
 
     return min(10, round(score, 1))
@@ -903,6 +1036,7 @@ DILUTION_KEYWORDS = [
 def normalize_dilution_text(text):
     t = clean_text(text)
     low = t.lower()
+
     if not t:
         return ""
 
@@ -927,27 +1061,29 @@ def get_sec_company_tickers():
     cached = cache_get(DILUTION_CACHE, "__sec_tickers__", 86400)
     if cached:
         return cached
+
     try:
         url = "https://www.sec.gov/files/company_tickers.json"
         headers = {"User-Agent": "scannerbot contact@example.com"}
         r = http_get(url, headers=headers, timeout=4)
         data = r.json()
+
         mapping = {}
+
         for _, row in data.items():
             ticker = str(row.get("ticker", "")).upper()
             cik = str(row.get("cik_str", "")).zfill(10)
+
             if ticker and cik:
                 mapping[ticker] = cik
+
         return cache_set(DILUTION_CACHE, "__sec_tickers__", mapping)
+
     except Exception as e:
         print(f"[SEC MAP ERROR] {e}")
         return {}
 
 def get_dilution_awareness(ticker):
-    """
-    Lightweight SEC awareness scan.
-    Never blocks alerts. Never lowers score.
-    """
     if not ENABLE_DILUTION_AWARENESS:
         return ""
 
@@ -958,6 +1094,7 @@ def get_dilution_awareness(ticker):
     try:
         mapping = get_sec_company_tickers()
         cik = mapping.get(ticker.upper())
+
         if not cik:
             return cache_set(DILUTION_CACHE, ticker, "")
 
@@ -965,6 +1102,7 @@ def get_dilution_awareness(ticker):
         headers = {"User-Agent": "scannerbot contact@example.com"}
         r = http_get(url, headers=headers, timeout=3)
         data = r.json()
+
         recent = data.get("filings", {}).get("recent", {})
         forms = recent.get("form", [])[:20]
         dates = recent.get("filingDate", [])[:20]
@@ -976,21 +1114,27 @@ def get_dilution_awareness(ticker):
         for form, date, d in zip(forms, dates, desc):
             blob = f"{form} {date} {d}"
             low = blob.lower()
+
             if str(date) == today and form in ["S-1", "S-3", "F-1", "F-3", "424B5", "424B3", "8-K", "6-K"]:
                 findings.append("⚠️ OFFERING/FILING TODAY")
+
             if any(k in low for k in DILUTION_KEYWORDS) or form in ["S-1", "S-3", "F-1", "F-3", "424B5", "424B3"]:
                 clean = normalize_dilution_text(blob) or f"{form} on file"
                 findings.append(clean)
 
         out = []
         seen = set()
+
         for f in findings:
             if f and f not in seen:
                 seen.add(f)
                 out.append(f)
+
         summary = "; ".join(out[:3])
+
         if summary:
             print(f"[DILUTION] {ticker}: {summary}")
+
         return cache_set(DILUTION_CACHE, ticker, summary)
 
     except Exception as e:
@@ -1019,17 +1163,20 @@ def can_alert(ticker, trigger, metrics):
     high = safe_float(metrics.get("high"))
 
     cooldown = SPIKE_RE_ALERT_COOLDOWN_SECONDS if "SPIKE" in trigger else ALERT_COOLDOWN_SECONDS
+
     if now_ts - last_ts < cooldown:
-        # Let true fast spike bypass normal cooldown only if price expanded meaningfully.
         if "SPIKE" in trigger and last_price > 0 and price >= last_price * 1.08:
             return True, "fast spike expanded over last alert"
+
         left = int(cooldown - (now_ts - last_ts))
         return False, f"cooldown {left}s left"
 
     if last_price > 0 and price >= last_price * 1.06:
         return True, "price expanded over last alert"
+
     if last_high > 0 and high >= last_high * 1.02:
         return True, "new high expansion"
+
     if "SPIKE" in trigger:
         return True, "fresh fast spike"
 
@@ -1038,17 +1185,29 @@ def can_alert(ticker, trigger, metrics):
 def build_alert(result):
     ticker = result["ticker"]
     news = result.get("news") or ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
-    headline, quality, news_score = news
+    catalyst = display_catalyst(news)
     dilution = result.get("dilution") or ""
+
+    float_data = result.get("float_data") or {}
+    float_shares = safe_int(float_data.get("float"))
+
+    if float_shares:
+        float_txt = fmt_big_num(float_shares)
+        if float_shares <= MICRO_FLOAT_SHARES:
+            float_txt += " 🧨 MICRO FLOAT"
+        elif float_shares <= LOW_FLOAT_SHARES:
+            float_txt += " 🧨 LOW FLOAT"
+    else:
+        float_txt = "Unknown"
 
     lines = [
         f"{result['trigger']} — {ticker}",
         "",
         f"{fmt_money(result['price'])} | +{result['gain']:.1f}%",
-        f"Vol: {fmt_big_num(result['volume'])}",
+        f"Vol: {fmt_big_num(result['volume'])} | Float: {float_txt}",
         f"Leader Score: {result.get('score', 0)}/10",
         "",
-        f"NEWS: {headline}",
+        f"CATALYST: {catalyst}",
         "",
         "WHY:",
         f"{result['why']}",
@@ -1071,6 +1230,7 @@ def build_alert(result):
 def send_leader_alert(result):
     msg = build_alert(result)
     send_alert(msg)
+
     key = alert_key(result["ticker"])
     LAST_ALERT[key] = {
         "time": time.time(),
@@ -1078,6 +1238,7 @@ def send_leader_alert(result):
         "high": result.get("high", result["price"]),
         "trigger": result["trigger"],
     }
+
     print(f"[ALERT SENT] {result['ticker']} {result['trigger']}")
 
 # ============================================================
@@ -1087,11 +1248,12 @@ def send_leader_alert(result):
 def validate_quote_against_source(ticker, source_gain, quote):
     price = safe_float(quote.get("price"))
     live_gain = safe_float(quote.get("gain"))
+
     if price <= 0:
         return False, "bad quote price"
 
-    # If quote is wildly far from source gain, don't trust it unless source gain is stale lower and live is higher.
     diff = abs(live_gain - source_gain)
+
     if diff > 80 and live_gain < source_gain:
         return False, f"quote/source mismatch live {live_gain:.1f}% vs source {source_gain:.1f}%"
 
@@ -1105,30 +1267,33 @@ def evaluate_leader(item):
 
     quote = get_finnhub_quote(ticker)
     quote_ok, quote_reason = validate_quote_against_source(ticker, source_gain, quote)
+
     if not quote_ok:
-        print(f"[v42 SKIP] {ticker}: {quote_reason}")
+        print(f"[v42.2 SKIP] {ticker}: {quote_reason}")
         return None
 
     candles = get_alpaca_candles(ticker)
     metrics = moving_now_metrics(candles)
+
     if not metrics.get("ok"):
-        print(f"[v42 LOG ONLY] {ticker}: {metrics.get('reason')}")
+        print(f"[v42.2 LOG ONLY] {ticker}: {metrics.get('reason')}")
         return None
 
     candle_price = safe_float(metrics.get("price"))
     quote_price = safe_float(quote.get("price"))
 
-    # Use candle close as live trading truth when available.
     price = candle_price or quote_price or source_price
     live_gain = safe_float(quote.get("gain")) or source_gain
     volume = source_volume
 
     trigger, why = classify_trigger(metrics)
+
     if not trigger:
-        print(f"[v42 LOG ONLY] {ticker}: {why}")
+        print(f"[v42.2 LOG ONLY] {ticker}: {why}")
         return None
 
     allowed, reason = can_alert(ticker, trigger, metrics)
+
     if not allowed:
         print(f"[NO ALERT] {ticker}: {reason}")
         return None
@@ -1136,17 +1301,19 @@ def evaluate_leader(item):
     cached_news = cache_get(NEWS_CACHE, ticker, NEWS_CACHE_TTL)
     news = cached_news if cached_news else ("UNKNOWN CATALYST — INVESTIGATE", "UNKNOWN", 0)
 
-    score = leader_score(live_gain, trigger, metrics, news)
+    float_data = get_yahoo_float(ticker)
+    score = leader_score(live_gain, trigger, metrics, news, float_data)
     floor = score_floor_for_trigger(trigger)
+
     if score < floor:
         print(f"[NO ALERT] {ticker}: score {score}/10 below {floor} floor for {trigger}")
         return None
 
     dilution = get_dilution_awareness(ticker)
 
-    data_label = "Alpaca candles + Finnhub quote"
+    data_label = "Alpaca candles + Finnhub quote + Yahoo float"
     if not quote.get("confirmed"):
-        data_label = "Alpaca candles + source gain"
+        data_label = "Alpaca candles + source gain + Yahoo float"
 
     result = {
         "ticker": ticker,
@@ -1158,14 +1325,17 @@ def evaluate_leader(item):
         "why": why,
         "news": news,
         "dilution": dilution,
+        "float_data": float_data,
         "score": score,
         "data_label": data_label,
     }
 
     print(
-        f"[v42.1 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
-        f"price={fmt_money(price)} gain={live_gain:.1f}%"
+        f"[v42.2 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
+        f"price={fmt_money(price)} gain={live_gain:.1f}% "
+        f"float={fmt_big_num(float_data.get('float', 0)) if float_data.get('float') else 'Unknown'}"
     )
+
     return result
 
 def run_scan_cycle():
@@ -1173,9 +1343,10 @@ def run_scan_cycle():
         return 0
 
     session = get_session_label()
-    print(f"[SCAN] v42 clean leader-only scan ({session})")
+    print(f"[SCAN] v42.2 clean leader-only scan ({session})")
 
     leaders = get_true_leaders()
+
     if not leaders:
         print("[SCAN] no true leaders found")
         return 0
@@ -1183,12 +1354,14 @@ def run_scan_cycle():
     prefetch_news_for_leaders(leaders)
 
     sent = 0
+
     for item in leaders:
         if sent >= MAX_ALERTS_PER_CYCLE:
             print("[SCAN] max alerts per cycle reached")
             break
 
         result = evaluate_leader(item)
+
         if result:
             send_leader_alert(result)
             sent += 1
@@ -1197,14 +1370,17 @@ def run_scan_cycle():
         print(f"[SCAN] Cycle complete — {sent} leader alert(s) sent")
     else:
         print("[SCAN] Cycle complete — no leader spike/setup alerts")
+
     return sent
 
 def scanner_loop():
     print(f"[BOOT] {BOOT_MARKER}")
+
     while True:
         try:
             run_scan_cycle()
             time.sleep(scan_sleep_seconds())
+
         except Exception as e:
             print(f"[SCAN ERROR] {e}")
             time.sleep(30)
