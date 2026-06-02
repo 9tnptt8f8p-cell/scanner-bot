@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-simple_main_v43_clean_rebuild.py
-
-Clean leader-first momentum scanner rebuild.
-
-Goal:
-- Stop scanner blindness when Yahoo returns 429.
-- Focus only on live leaders and meaningful pushes.
-- No alerts under 25% gain.
-- No PST/fade/backside/watchlist clutter.
-- Keep dilution/news as awareness, not automatic rejection.
-- Alert only when a leader is moving now, setting up cleanly, or making a fast +10% push.
-
-Deploy notes:
-- Designed for Render web service with Flask health endpoint on PORT.
-- Optional Telegram env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
-- Optional data env vars: FINNHUB_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY.
-- Safe if keys are missing; it will use public sources and log warnings.
-"""
-
 from __future__ import annotations
 
 import json
