@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v45-spike-spam-news-cache-fix"
+VERSION = "v46-spike-memory-spam-quote-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -71,10 +71,10 @@ MIN_RECENT_VOLUME = int(os.getenv("MIN_RECENT_VOLUME", "75000"))
 MAJOR_LEADER_GAIN_PCT = float(os.getenv("MAJOR_LEADER_GAIN_PCT", "50"))
 FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
 FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
-FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "180"))
+FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "300"))
 FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
-MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "6"))
-ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
+MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
+ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
 LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
@@ -226,7 +226,7 @@ LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
 QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
 NEWS_CACHE: Dict[str, Tuple[float, NewsResult]] = {}
 CANDLE_CACHE: Dict[str, Tuple[float, List[Candle]]] = {}
-QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "30"))
+QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "30"))
 
@@ -533,16 +533,19 @@ def dedupe_leaders(leaders: Iterable[Leader]) -> List[Leader]:
 
 
 def get_leaders() -> List[Leader]:
-    """Leader-first source chain. Yahoo is not allowed to blind the scanner anymore."""
+    """Leader-first source chain without hammering Finnhub.
+
+    Primary discovery comes from Nasdaq/Yahoo/Webull. Finnhub_seed is only used
+    when those discovery feeds fail, because refreshing every cached leader with
+    Finnhub quotes creates quote spam and rate-limit risk.
+    """
     global LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS
     all_rows: List[Leader] = []
 
-    # Primary: Nasdaq. Backup: Webull hook. Backup: Yahoo. Last: Finnhub refresh of cached leaders.
     for name, fn in (
         ("nasdaq", get_nasdaq_gainers),
         ("webull", get_webull_gainers_placeholder),
         ("yahoo", get_yahoo_gainers),
-        ("finnhub_seed", get_finnhub_movers_seed),
     ):
         try:
             rows = fn()
@@ -550,6 +553,14 @@ def get_leaders() -> List[Leader]:
                 all_rows.extend(rows)
         except Exception as exc:
             log.warning("[%s LEADERS ERROR] %s", name.upper(), exc)
+
+    if not all_rows:
+        try:
+            rows = get_finnhub_movers_seed()
+            if rows:
+                all_rows.extend(rows)
+        except Exception as exc:
+            log.warning("[FINNHUB_SEED LEADERS ERROR] %s", exc)
 
     leaders = dedupe_leaders(all_rows)
     if leaders:
@@ -565,7 +576,6 @@ def get_leaders() -> List[Leader]:
 
     log.warning("[LEADERS] 0 candidates — all sources failed")
     return []
-
 
 # =============================================================================
 # QUOTES
@@ -940,7 +950,7 @@ def best_news(ticker: str) -> NewsResult:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
     nr = NewsResult(
         grade="NONE",
-        headline="UNKNOWN CATALYST — INVESTIGATE",
+        headline="NO VERIFIED CATALYST",
         source="none",
         dilution_flag=fallback_dilution,
         dilution_note=fallback_dilution_note,
@@ -993,12 +1003,12 @@ def update_baseline(ticker: str, price: float) -> AlertState:
 
 
 def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> bool:
-    """Anti-spam gate.
+    """Strict anti-spam gate.
 
-    First alert is allowed. After that:
-    - FAST LEADER SPIKE must be a true fresh +10% push from the last alert price/high.
-    - Normal leader repeats need the full cooldown plus meaningful new high/price push or quality upgrade.
-    - Simple type changes alone no longer bypass cooldown, which prevents spammy repeated leader alerts.
+    First alert is allowed. After that, no ticker repeats unless it makes a
+    real new move: +10% fast spike, +5% new high/price push after cooldown,
+    or a major quality upgrade after cooldown. Type changes alone do not bypass
+    the gate.
     """
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
@@ -1018,18 +1028,20 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
 
     cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
     meaningful_push = price_push_pct >= MEANINGFUL_NEW_HIGH_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
-    type_upgrade = alert_type != st.last_alert_type and alert_type in {"BREAKOUT OVER HOD", "VWAP HOLD CONTINUATION"}
-    return cooldown_done and (meaningful_push or quality_upgrade or type_upgrade)
-
+    return cooldown_done and (meaningful_push or quality_upgrade)
 
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
     st = ALERT_STATES.setdefault(ticker, AlertState())
-    st.last_alert_ts = time.time()
+    now = time.time()
+    st.last_alert_ts = now
     st.last_alert_price = quote.price
     st.last_alert_high = structure.hod or quote.price
     st.last_alert_type = alert_type
     st.last_quality = quality
-
+    # Reset spike baseline after any delivered alert. The next +10% spike must
+    # be a fresh push from the alert area, not the old first-seen low.
+    st.baseline_price = quote.price
+    st.baseline_ts = now
 
 def decide_candidate(leader: Leader) -> CandidateDecision:
     ticker = leader.ticker
@@ -1051,7 +1063,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     candles = best_candles(ticker)
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
-    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="UNKNOWN CATALYST — INVESTIGATE", source="skipped")
+    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="NO VERIFIED CATALYST", source="skipped")
     quality = quality_score(leader, quote, structure, news)
 
     # Market-leader override: huge gainers should not be buried just because news is unknown.
@@ -1068,7 +1080,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     if day_vol < MIN_DAY_VOLUME and gain < MAJOR_LEADER_GAIN_PCT:
         risks.append("light total volume")
     if news.grade in {"NONE", "JUNK"} and gain >= 35:
-        risks.append("UNKNOWN CATALYST — INVESTIGATE")
+        risks.append("NO VERIFIED CATALYST")
     if news.dilution_flag:
         risks.append(news.dilution_note or "dilution language")
     if not structure.above_vwap and structure.data_ok:
@@ -1158,7 +1170,7 @@ def format_alert(d: CandidateDecision) -> str:
     if d.reasons:
         lines.append("Why: " + " + ".join(d.reasons))
     if n.headline:
-        prefix = n.grade if n.grade != "NONE" else "D"
+        prefix = n.grade if n.grade != "NONE" else "INFO"
         lines.append(f"NEWS: {prefix} — {n.headline[:180]}")
     if d.risks:
         lines.append("Risk: " + " | ".join(d.risks))
@@ -1166,7 +1178,8 @@ def format_alert(d: CandidateDecision) -> str:
 
 
 def send_telegram(text: str) -> bool:
-    ticker = text.split("—")[-1].splitlines()[0].strip() if "—" in text else "unknown"
+    first_line = text.splitlines()[0] if text else ""
+    ticker = first_line.split("—")[-1].strip() if "—" in first_line else "unknown"
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         log.warning(
             "[ALERT DRY RUN] missing Telegram config token=%s chats=%s ticker=%s\n%s",
@@ -1222,7 +1235,12 @@ def run_scan_cycle() -> Dict[str, Any]:
 
     # Sort alertable by quality, gain, then volume.
     alertable = [d for d in decisions if d.should_alert]
-    alertable.sort(key=lambda d: (d.quality, max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0), d.quote.day_volume if d.quote else 0), reverse=True)
+    def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
+        type_rank = 3 if d.alert_type == "FAST LEADER SPIKE" else 2 if d.alert_type in {"BREAKOUT OVER HOD", "LIVE PUSH"} else 1
+        gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
+        vol_rank = d.quote.day_volume if d.quote else 0
+        return (type_rank, d.quality, gain_rank, vol_rank)
+    alertable.sort(key=alert_priority, reverse=True)
 
     attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
     for d in alertable[:MAX_ALERTS_PER_CYCLE]:
