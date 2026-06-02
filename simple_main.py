@@ -56,7 +56,7 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "v43.4-no-pytz-render-fix"
+VERSION = "v43.5-gainers-429-fallback"
 
 TZ = ZoneInfo("America/New_York")
 
@@ -73,7 +73,7 @@ FINNHUB_NEWS_TIMEOUT = float(os.getenv("FINNHUB_NEWS_TIMEOUT", "1.2"))
 
 PORT = int(os.getenv("PORT", "10000"))
 
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "45"))
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "60"))
 
 MIN_ALERT_GAIN = float(os.getenv("MIN_ALERT_GAIN", "25"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.50"))
@@ -329,16 +329,32 @@ def yahoo_quote_summary(symbols: List[str]) -> Dict[str, Any]:
         return {}
 
 
+def parse_pct(s: str) -> float:
+    s = clean_text(s).replace("%", "").replace("+", "").replace(",", "")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    return safe_float(m.group(0)) if m else 0.0
+
+
+def parse_volume(s: str) -> int:
+    s = clean_text(s).replace(",", "").upper()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([KMB]?)", s)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    mult = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(m.group(2), 1)
+    return int(val * mult)
+
+
 def yahoo_gainers() -> List[Candidate]:
     """
-    Uses Yahoo predefined screener endpoint.
+    Yahoo predefined screener. Kept as backup only because Render often gets 429.
     """
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
     params = {
         "scrIds": "day_gainers",
         "count": GAINERS_LIMIT,
     }
-    r = requests_get(url, params=params, timeout=10)
+    r = requests_get(url, params=params, timeout=7)
     candidates = []
     if not r:
         return candidates
@@ -367,7 +383,7 @@ def yahoo_gainers() -> List[Candidate]:
                 name=q.get("shortName", "") or q.get("longName", "")
             ))
     except Exception as e:
-        logging.info(f"[GAINERS ERR] {e}")
+        logging.info(f"[YAHOO GAINERS ERR] {e}")
     return candidates
 
 
@@ -377,7 +393,7 @@ def yahoo_most_actives_backup() -> List[Candidate]:
         "scrIds": "most_actives",
         "count": GAINERS_LIMIT,
     }
-    r = requests_get(url, params=params, timeout=10)
+    r = requests_get(url, params=params, timeout=7)
     candidates = []
     if not r:
         return candidates
@@ -407,23 +423,182 @@ def yahoo_most_actives_backup() -> List[Candidate]:
                 name=q.get("shortName", "") or q.get("longName", "")
             ))
     except Exception as e:
-        logging.info(f"[ACTIVES ERR] {e}")
+        logging.info(f"[YAHOO ACTIVES ERR] {e}")
     return candidates
 
 
+def stockanalysis_gainers() -> List[Candidate]:
+    """
+    v43.5: primary fallback because Yahoo screener 429s on Render.
+    Parses https://stockanalysis.com/markets/gainers/
+    """
+    url = "https://stockanalysis.com/markets/gainers/"
+    headers = {
+        **HEADERS,
+        "Referer": "https://stockanalysis.com/",
+        "Cache-Control": "no-cache",
+    }
+    r = requests_get(url, timeout=8, headers=headers)
+    out: List[Candidate] = []
+    if not r:
+        return out
+
+    try:
+        text = r.text
+
+        # Find table rows. StockAnalysis layout can change, so parse loosely.
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", text, flags=re.I | re.S)
+        rank = 1
+        for row in rows:
+            plain = clean_text(re.sub("<.*?>", " ", row))
+            # Expected rough row: SYMBOL Company Price Change % Volume ...
+            sym_m = re.search(r"\b([A-Z]{1,5})\b", plain)
+            if not sym_m:
+                continue
+            ticker = sym_m.group(1).upper()
+            if not ticker_allowed(ticker):
+                continue
+
+            # Extract price like $1.56
+            price_m = re.search(r"\$?\b(\d+(?:\.\d+)?)\b", plain)
+            price = safe_float(price_m.group(1)) if price_m else 0.0
+
+            # Extract first positive percent
+            pct_m = re.search(r"\+?(\d+(?:\.\d+)?)%", plain)
+            gain = safe_float(pct_m.group(1)) if pct_m else 0.0
+
+            # Volume from last K/M/B token.
+            vols = re.findall(r"\b\d+(?:\.\d+)?[KMB]\b", plain, flags=re.I)
+            volume = parse_volume(vols[-1]) if vols else 0
+
+            if gain < 12 or price < MIN_PRICE or price > MAX_PRICE or volume < MIN_DAY_VOLUME:
+                continue
+
+            out.append(Candidate(
+                ticker=ticker,
+                price=price,
+                gain_pct=gain,
+                volume=volume,
+                source="StockAnalysis",
+                rank=rank,
+            ))
+            rank += 1
+
+        logging.info(f"[GAINERS] StockAnalysis returned {len(out)} leaders")
+    except Exception as e:
+        logging.info(f"[STOCKANALYSIS ERR] {e}")
+
+    return out[:GAINERS_LIMIT]
+
+
+def tradingview_gainers() -> List[Candidate]:
+    """
+    v43.5: TradingView public screener endpoint fallback.
+    """
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "filter": [
+            {"left": "type", "operation": "in_range", "right": ["stock", "dr", "fund"]},
+            {"left": "change", "operation": "greater", "right": 12},
+            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
+            {"left": "volume", "operation": "greater", "right": MIN_DAY_VOLUME},
+        ],
+        "options": {"lang": "en"},
+        "markets": ["america"],
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "close", "change", "volume", "description"],
+        "sort": {"sortBy": "change", "sortOrder": "desc"},
+        "range": [0, GAINERS_LIMIT],
+    }
+    headers = {
+        **HEADERS,
+        "Content-Type": "application/json",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
+    }
+
+    out: List[Candidate] = []
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=8)
+        if r.status_code != 200:
+            logging.info(f"[HTTP] TradingView scan status={r.status_code}")
+            return out
+
+        data = r.json().get("data", [])
+        for i, item in enumerate(data, start=1):
+            d = item.get("d", [])
+            if len(d) < 4:
+                continue
+            ticker = str(d[0]).split(":")[-1].upper()
+            price = safe_float(d[1])
+            gain = safe_float(d[2])
+            volume = safe_int(d[3])
+            name = str(d[4]) if len(d) > 4 else ""
+
+            if not ticker_allowed(ticker):
+                continue
+            if gain < 12 or price < MIN_PRICE or price > MAX_PRICE or volume < MIN_DAY_VOLUME:
+                continue
+
+            out.append(Candidate(
+                ticker=ticker,
+                price=price,
+                gain_pct=gain,
+                volume=volume,
+                source="TradingView",
+                rank=50 + i,
+                name=name,
+            ))
+
+        logging.info(f"[GAINERS] TradingView returned {len(out)} leaders")
+    except Exception as e:
+        logging.info(f"[TRADINGVIEW ERR] {e}")
+
+    return out
+
+
+_LAST_LEADERS_CACHE = {"ts": 0.0, "leaders": []}
+
 def get_leaders() -> List[Candidate]:
-    raw = yahoo_gainers() + yahoo_most_actives_backup()
+    """
+    v43.5 order:
+    1. StockAnalysis
+    2. TradingView
+    3. Yahoo backup only
+    Uses last-good cache if every source fails/rate-limits.
+    """
+    raw: List[Candidate] = []
+
+    # Primary non-Yahoo sources first
+    raw.extend(stockanalysis_gainers())
+    raw.extend(tradingview_gainers())
+
+    # Yahoo only as extra backup, not primary.
+    if len(raw) < 5:
+        raw.extend(yahoo_gainers())
+        raw.extend(yahoo_most_actives_backup())
+
     by_ticker: Dict[str, Candidate] = {}
     for c in raw:
         old = by_ticker.get(c.ticker)
-        if old is None or c.gain_pct > old.gain_pct:
+        if old is None or (c.gain_pct, c.volume) > (old.gain_pct, old.volume):
             by_ticker[c.ticker] = c
 
     leaders = list(by_ticker.values())
     leaders.sort(key=lambda x: (x.gain_pct, x.volume), reverse=True)
-
-    # Keep top names only
     leaders = leaders[:MAX_DEEP_SCAN]
+
+    if leaders:
+        _LAST_LEADERS_CACHE["ts"] = time.time()
+        _LAST_LEADERS_CACHE["leaders"] = leaders
+    else:
+        age = time.time() - _LAST_LEADERS_CACHE["ts"]
+        if _LAST_LEADERS_CACHE["leaders"] and age <= 180:
+            leaders = _LAST_LEADERS_CACHE["leaders"]
+            logging.info(f"[LEADERS CACHE] using last good leaders age={age:.0f}s")
+        else:
+            logging.info("[LEADERS EMPTY] all sources failed/no leaders")
+
     logging.info(f"[LEADERS] {len(leaders)} candidates: " + ", ".join([f"{c.ticker}+{c.gain_pct:.1f}%" for c in leaders[:10]]))
     return leaders
 
