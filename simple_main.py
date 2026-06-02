@@ -17,7 +17,7 @@ from alerts import send_alert
 load_dotenv()
 
 # ============================================================
-# CLEAN LEADER-ONLY SCANNER v42.5
+# CLEAN LEADER-ONLY SCANNER v42.6
 #
 # Built fresh:
 #   - Leader-only scanner
@@ -46,7 +46,7 @@ load_dotenv()
 # ============================================================
 
 ET = ZoneInfo("America/New_York")
-BOOT_MARKER = "elite scanner v42.5 — STALE CANDLE BLOCK + NO SAME-PRICE RE-ALERTS"
+BOOT_MARKER = "elite scanner v42.6 — YAHOO 1M FALLBACK + STALE BLOCK"
 
 # ============================================================
 # ENV
@@ -501,10 +501,10 @@ def get_true_leaders():
 
     true = true[:MAX_TRACKED_LEADERS]
 
-    print(f"[v42.5 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
+    print(f"[v42.6 LEADER ONLY] true_leaders={len(true)} skipped_nonleaders={skipped} -> tracking {len(true)}")
 
     if true:
-        print("[v42.5 TRACKING] " + " | ".join(
+        print("[v42.6 TRACKING] " + " | ".join(
             f"{x['ticker']} +{safe_float(x.get('gain')):.1f}% vol={fmt_big_num(x.get('volume'))}"
             for x in true[:12]
         ))
@@ -734,6 +734,92 @@ def get_alpaca_candles(ticker, limit=CANDLE_LIMIT):
     except Exception as e:
         print(f"[CANDLES ERROR] {ticker}: Alpaca {e}")
         return []
+
+
+def get_yahoo_candles(ticker, limit=CANDLE_LIMIT):
+    """
+    Free 1-minute fallback for hot names when Alpaca IEX bars lag.
+    Yahoo chart is not perfect, but it is often fresher than IEX on active runners.
+    """
+    key = f"yahoo_chart:{ticker}:{limit}"
+    cached = cache_get(CANDLE_CACHE, key, CANDLE_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "range": "1d",
+            "interval": "1m",
+            "includePrePost": "true",
+        }
+
+        r = http_get(url, params=params, timeout=3)
+        data = r.json()
+
+        result = ((data.get("chart") or {}).get("result") or [{}])[0]
+        timestamps = result.get("timestamp") or []
+        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+
+        opens = quote.get("open") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
+        closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
+
+        bars = []
+        for i, ts in enumerate(timestamps):
+            if i >= len(closes):
+                continue
+
+            raw = {
+                "t": datetime.fromtimestamp(ts, tz=ZoneInfo("UTC")).isoformat(),
+                "open": opens[i] if i < len(opens) else None,
+                "high": highs[i] if i < len(highs) else None,
+                "low": lows[i] if i < len(lows) else None,
+                "close": closes[i] if i < len(closes) else None,
+                "volume": volumes[i] if i < len(volumes) else 0,
+            }
+
+            c = normalize_candle(raw)
+            if c:
+                bars.append(c)
+
+        if bars:
+            bars = bars[-limit:]
+            bars = bars[:-1] if len(bars) > 1 else bars
+
+        print(f"[CANDLES] {ticker}: Yahoo {len(bars)} finalized bars")
+        return cache_set(CANDLE_CACHE, key, bars)
+
+    except Exception as e:
+        print(f"[CANDLES ERROR] {ticker}: Yahoo {e}")
+        return []
+
+
+def get_best_candles(ticker):
+    """
+    Primary: Alpaca IEX.
+    Fallback: Yahoo 1m chart if Alpaca bars are stale or missing.
+    """
+    alpaca = get_alpaca_candles(ticker)
+    alpaca_metrics = moving_now_metrics(alpaca) if alpaca else {"ok": False, "last_bar_age_seconds": 999999}
+
+    if alpaca_metrics.get("ok") and safe_float(alpaca_metrics.get("last_bar_age_seconds")) < STALE_CANDLE_BLOCK_SECONDS:
+        return alpaca, "Alpaca candles"
+
+    alpaca_age = safe_float(alpaca_metrics.get("last_bar_age_seconds", 999999))
+    print(f"[CANDLES FALLBACK] {ticker}: Alpaca stale/missing age={int(alpaca_age)}s — trying Yahoo 1m")
+
+    yahoo = get_yahoo_candles(ticker)
+    yahoo_metrics = moving_now_metrics(yahoo) if yahoo else {"ok": False, "last_bar_age_seconds": 999999}
+
+    if yahoo_metrics.get("ok"):
+        yahoo_age = safe_float(yahoo_metrics.get("last_bar_age_seconds", 999999))
+        print(f"[CANDLES FALLBACK] {ticker}: Yahoo age={int(yahoo_age)}s")
+        return yahoo, "Yahoo 1m candles"
+
+    return alpaca, "Alpaca candles"
 
 # ============================================================
 # STRUCTURE / TRIGGERS
@@ -1402,14 +1488,14 @@ def evaluate_leader(item):
     quote_ok, quote_reason = validate_quote_against_source(ticker, source_gain, quote)
 
     if not quote_ok:
-        print(f"[v42.5 SKIP] {ticker}: {quote_reason}")
+        print(f"[v42.6 SKIP] {ticker}: {quote_reason}")
         return None
 
-    candles = get_alpaca_candles(ticker)
+    candles, candle_source = get_best_candles(ticker)
     metrics = moving_now_metrics(candles)
 
     if not metrics.get("ok"):
-        print(f"[v42.5 LOG ONLY] {ticker}: {metrics.get('reason')}")
+        print(f"[v42.6 LOG ONLY] {ticker}: {metrics.get('reason')}")
         return None
 
     candle_price = safe_float(metrics.get("price"))
@@ -1431,7 +1517,7 @@ def evaluate_leader(item):
         why = f"{why} | ⚠️ candle stale {int(candle_age)}s"
 
     if not trigger:
-        print(f"[v42.5 LOG ONLY] {ticker}: {why}")
+        print(f"[v42.6 LOG ONLY] {ticker}: {why}")
         return None
 
     allowed, reason = can_alert(ticker, trigger, metrics)
@@ -1453,9 +1539,9 @@ def evaluate_leader(item):
 
     dilution = get_dilution_awareness(ticker)
 
-    data_label = "Alpaca candles + Finnhub quote + Yahoo float"
+    data_label = f"{candle_source} + Finnhub quote + Yahoo float"
     if not quote.get("confirmed"):
-        data_label = "Alpaca candles + source gain + Yahoo float"
+        data_label = f"{candle_source} + source gain + Yahoo float"
 
     result = {
         "ticker": ticker,
@@ -1478,7 +1564,7 @@ def evaluate_leader(item):
     }
 
     print(
-        f"[v42.5 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
+        f"[v42.6 ALERT OK] {ticker}: {trigger} score={score}/10 {why} "
         f"price={fmt_money(price)} gain={live_gain:.1f}% "
         f"float={fmt_big_num(float_data.get('float', 0)) if float_data.get('float') else 'Unknown'}"
     )
@@ -1490,7 +1576,7 @@ def run_scan_cycle():
         return 0
 
     session = get_session_label()
-    print(f"[SCAN] v42.5 clean leader-only scan ({session})")
+    print(f"[SCAN] v42.6 clean leader-only scan ({session})")
 
     leaders = get_true_leaders()
 
