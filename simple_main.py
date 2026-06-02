@@ -56,7 +56,7 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "v43.2-news-junk-speed-fix"
+VERSION = "v43.3-no-score-fast-news"
 
 TZ = pytz.timezone("America/New_York")
 
@@ -65,6 +65,11 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 ALPACA_KEY = os.getenv("ALPACA_KEY", "").strip()
 ALPACA_SECRET = os.getenv("ALPACA_SECRET", "").strip()
 FINNHUB_KEY = os.getenv("FINNHUB_KEY", "").strip()
+
+# v43.3: Finnhub is often slow during live scans.
+# Keep OFF by default so it cannot freeze/drag alerts.
+USE_FINNHUB_NEWS = os.getenv("USE_FINNHUB_NEWS", "0").strip() == "1"
+FINNHUB_NEWS_TIMEOUT = float(os.getenv("FINNHUB_NEWS_TIMEOUT", "1.2"))
 
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -837,7 +842,9 @@ def get_alpaca_news_candidates(ticker: str) -> List[NewsCandidate]:
 # -------------------------
 
 def get_finnhub_news_candidates(ticker: str) -> List[NewsCandidate]:
-    if not FINNHUB_KEY:
+    # v43.3: disabled by default because Finnhub timeouts were slowing live scans.
+    # Turn on with USE_FINNHUB_NEWS=1 if wanted.
+    if not FINNHUB_KEY or not USE_FINNHUB_NEWS:
         return []
 
     to_date = now_et().date()
@@ -849,13 +856,14 @@ def get_finnhub_news_candidates(ticker: str) -> List[NewsCandidate]:
         "to": str(to_date),
         "token": FINNHUB_KEY,
     }
-    r = requests_get(url, params=params, timeout=8)
+    r = requests_get(url, params=params, timeout=FINNHUB_NEWS_TIMEOUT)
     if not r:
+        logging.info(f"[FINNHUB NEWS SKIP] {ticker}: timeout/no response")
         return []
 
     out = []
     try:
-        for n in r.json()[:10]:
+        for n in r.json()[:6]:
             title = clean_text(n.get("headline", ""))
             if title and not is_junk_headline(title):
                 out.append(NewsCandidate(
@@ -1242,12 +1250,13 @@ def fast_spike_detected(ticker: str, price: float) -> Tuple[bool, float]:
 
 def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: float) -> Tuple[bool, str]:
     """
-    v43.1 alert rules:
+    v43.3 alert rules:
     - No alerts under MIN_ALERT_GAIN.
+    - NO SCORE FLOOR. Score must never block FAST SPIKE or FRESH HOD.
     - Below VWAP leaders are tracked/logged, not pushed to Discord.
-    - Fresh HOD breakout on a +50% true leader bypasses score/weak catalyst.
+    - Fresh HOD breakout on a +50% true leader bypasses weak catalyst/news.
     - PUSH requires VWAP + expansion.
-    - Fast +10% leader spike still alerts.
+    - Fast +10% leader spike always alerts when data is valid.
     """
     if c.gain_pct < MIN_ALERT_GAIN:
         return False, f"gain under {MIN_ALERT_GAIN:.0f}%"
@@ -1259,17 +1268,22 @@ def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: flo
     fresh_hod_breakout = (
         leader_override
         and c.gain_pct >= FRESH_HOD_LEADER_GAIN
-        and sr.new_high_push
-        and sr.off_hod_pct <= FRESH_HOD_NEAR_HIGH_PCT
+        and (sr.new_high_push or sr.off_hod_pct <= FRESH_HOD_NEAR_HIGH_PCT)
     )
 
     fast_spike, spike_pct = fast_spike_detected(c.ticker, price)
 
-    # Important: below VWAP should not alert as a PUSH, but it should be logged as a tracked leader.
-    if not sr.above_vwap:
-        if c.gain_pct >= LEADER_TRACK_BELOW_VWAP_GAIN or leader_override:
-            return False, "LEADER BELOW VWAP — WATCH RECLAIM"
-        return False, "below VWAP"
+    # v43.3: Fast spike is the one exception. If it makes a valid fast +10% leader push,
+    # do not let VWAP block it. This catches explosive leader re-acceleration.
+    if fast_spike and leader_override and sr.off_hod_pct <= 12:
+        raw_reason = f"fast +{spike_pct:.1f}% leader spike"
+    else:
+        # Important: below VWAP should not alert as a PUSH, but it should be logged as a tracked leader.
+        if not sr.above_vwap:
+            if c.gain_pct >= LEADER_TRACK_BELOW_VWAP_GAIN or leader_override:
+                return False, "LEADER BELOW VWAP — WATCH RECLAIM"
+            return False, "below VWAP"
+        raw_reason = None
 
     if sr.off_hod_pct > 15 and not fast_spike:
         return False, f"{sr.off_hod_pct:.1f}% off HOD"
@@ -1284,8 +1298,10 @@ def should_alert(c: Candidate, sr: StructureResult, news: NewsResult, price: flo
         or sr.higher_lows
     )
 
-    # v43.1: HOD leader breakout can bypass weak score/news. This fixes LASE-style block.
-    if fresh_hod_breakout:
+    # v43.3: HOD/FAST leader breakout can bypass weak score/news. No score floor exists here.
+    if raw_reason:
+        pass
+    elif fresh_hod_breakout:
         raw_reason = "fresh HOD breakout leader override"
     elif fast_spike:
         raw_reason = f"fast +{spike_pct:.1f}% leader spike"
@@ -1502,6 +1518,7 @@ def health():
         "ok": True,
         "version": VERSION,
         "time": now_et().isoformat(),
+        "note": "If Render logs do not show this version, old file is still deployed.",
     })
 
 
@@ -1526,4 +1543,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
