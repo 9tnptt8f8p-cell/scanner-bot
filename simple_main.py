@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-simple_main_v47_leader_hunter.py
+simple_main.py
 
-Clean leader-first momentum scanner rebuild.
+v49-clean-alerts-no-premarket-float
 
-Goal:
-- Stop scanner blindness when Yahoo returns 429.
-- Focus only on live leaders and meaningful pushes.
+Clean leader-first momentum scanner for Render.
+
+Core rules:
+- No alerts before 9:30 AM ET.
+- No alerts after 4:10 PM ET.
 - No alerts under 25% gain.
-- No PST/fade/backside/watchlist clutter.
-- Keep dilution/news as awareness, not automatic rejection.
-- Alert only when a leader is fresh, moving now, setting up cleanly, or making a fast +10% push.
-
-Deploy notes:
-- Designed for Render web service with Flask health endpoint on PORT.
-- Optional Telegram env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
-- Optional data env vars: FINNHUB_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY.
-- Safe if keys are missing; it will use public sources and log warnings.
+- Focus live leaders only.
+- Fast +10% spike trigger.
+- Short Telegram alerts only.
+- Float shown in alert.
+- Quality/why/details kept internal, not displayed.
+- News/dilution are awareness only, not automatic rejection.
 """
 
 from __future__ import annotations
@@ -30,12 +29,12 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dtime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     import requests
-except Exception as exc:  # pragma: no cover
+except Exception as exc:
     raise RuntimeError("requests is required") from exc
 
 try:
@@ -45,7 +44,7 @@ except Exception:
 
 try:
     from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
+except Exception:
     ZoneInfo = None
 
 
@@ -53,14 +52,15 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v48-webull-news-fresh-fix"
+VERSION = "v49-clean-alerts-no-premarket-float"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
+
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "25"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "15"))
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "15"))
 
 MIN_ALERT_GAIN_PCT = float(os.getenv("MIN_ALERT_GAIN_PCT", "25"))
@@ -69,23 +69,32 @@ MIN_PRICE = float(os.getenv("MIN_PRICE", "0.30"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "80"))
 MIN_DAY_VOLUME = int(os.getenv("MIN_DAY_VOLUME", "300000"))
 MIN_RECENT_VOLUME = int(os.getenv("MIN_RECENT_VOLUME", "75000"))
+
 MAJOR_LEADER_GAIN_PCT = float(os.getenv("MAJOR_LEADER_GAIN_PCT", "50"))
 FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
 FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
 FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "300"))
 FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
 FAST_SPIKE_QUALITY_BONUS = int(os.getenv("FAST_SPIKE_QUALITY_BONUS", "2"))
-FRESH_LEADER_WINDOW_SECONDS = int(os.getenv("FRESH_LEADER_WINDOW_SECONDS", "900"))
-FRESH_LEADER_MIN_VOLUME = int(os.getenv("FRESH_LEADER_MIN_VOLUME", "500000"))
+
 MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
+
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
 LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 
+QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
+NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
+CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "30"))
+PROFILE_CACHE_TTL_SECONDS = int(os.getenv("PROFILE_CACHE_TTL_SECONDS", "1800"))
+
+ALERT_START_TIME = dtime(9, 30)
+ALERT_END_TIME = dtime(16, 10)
+
+
 def env_first(*names: str) -> str:
-    """Return the first non-empty env var, stripped of spaces and accidental quotes."""
     for name in names:
         value = os.getenv(name, "")
         if value is None:
@@ -99,6 +108,7 @@ def env_first(*names: str) -> str:
 TELEGRAM_BOT_TOKEN = env_first("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "BOT_TOKEN")
 TELEGRAM_CHAT_ID_RAW = env_first("TELEGRAM_CHAT_ID", "TELEGRAM_CHANNEL_ID", "CHAT_ID")
 TELEGRAM_CHAT_IDS = [x.strip() for x in TELEGRAM_CHAT_ID_RAW.split(",") if x.strip()]
+
 FINNHUB_API_KEY = env_first("FINNHUB_API_KEY", "FINNHUB_TOKEN")
 ALPACA_API_KEY = env_first("ALPACA_API_KEY", "APCA_API_KEY_ID", "APCA_API_KEY")
 ALPACA_SECRET_KEY = env_first("ALPACA_SECRET_KEY", "APCA_API_SECRET_KEY", "APCA_SECRET_KEY")
@@ -121,7 +131,7 @@ SESSION.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,te
 
 
 # =============================================================================
-# DATA MODELS
+# MODELS
 # =============================================================================
 
 @dataclass
@@ -161,7 +171,6 @@ class Quote:
     high: float = 0.0
     low: float = 0.0
     source: str = "unknown"
-    age_seconds: Optional[int] = None
 
 
 @dataclass
@@ -174,7 +183,6 @@ class Structure:
     recent_high: Optional[float] = None
     hod: Optional[float] = None
     near_hod: bool = False
-    new_high_push: bool = False
     higher_lows: bool = False
     breakout: bool = False
     data_ok: bool = False
@@ -183,7 +191,7 @@ class Structure:
 
 @dataclass
 class NewsResult:
-    grade: str = "NONE"  # STRONG, WEAK, JUNK, NONE
+    grade: str = "NONE"
     headline: str = ""
     source: str = ""
     url: str = ""
@@ -215,27 +223,27 @@ class CandidateDecision:
     structure: Optional[Structure] = None
     news: Optional[NewsResult] = None
     leader: Optional[Leader] = None
+    spike_pct: float = 0.0
 
 
 # =============================================================================
-# GLOBAL STATE
+# STATE
 # =============================================================================
 
-STATE_LOCK = threading.Lock()
 SOURCE_BLOCKED_UNTIL: Dict[str, float] = {}
 LAST_GOOD_LEADERS: List[Leader] = []
 LAST_GOOD_LEADERS_TS: float = 0.0
 ALERT_STATES: Dict[str, AlertState] = {}
 FIRST_SEEN: Dict[str, Dict[str, float]] = {}
 FIRST_SEEN_INITIALIZED = False
-RUNNING = True
 LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
+
 QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
 NEWS_CACHE: Dict[str, Tuple[float, NewsResult]] = {}
 CANDLE_CACHE: Dict[str, Tuple[float, List[Candle]]] = {}
-QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
-NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
-CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "30"))
+PROFILE_CACHE: Dict[str, Tuple[float, Optional[float]]] = {}
+
+RUNNING = True
 
 
 # =============================================================================
@@ -264,7 +272,7 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         if value is None:
             return default
         if isinstance(value, str):
-            value = value.replace(",", "").replace("%", "").strip()
+            value = value.replace(",", "").replace("%", "").replace("$", "").strip()
             if value in {"", "-", "N/A", "None"}:
                 return default
         x = float(value)
@@ -290,6 +298,9 @@ def safe_int(value: Any, default: int = 0) -> int:
             elif value[-1:].upper() == "M":
                 mult = 1_000_000
                 value = value[:-1]
+            elif value[-1:].upper() == "B":
+                mult = 1_000_000_000
+                value = value[:-1]
             return int(float(value) * mult)
         return int(float(value))
     except Exception:
@@ -300,52 +311,6 @@ def pct_change(new: float, old: float) -> float:
     if old <= 0:
         return 0.0
     return ((new - old) / old) * 100.0
-
-
-def market_minutes_elapsed(dt: Optional[datetime] = None) -> int:
-    dt = dt or now_et()
-    mins = dt.hour * 60 + dt.minute
-    start = 4 * 60 if mins < 9 * 60 + 30 else 9 * 60 + 30
-    return max(1, mins - start + 1)
-
-
-def relative_volume_score(day_volume: int, dt: Optional[datetime] = None) -> Tuple[int, str]:
-    """Time-adjusted volume pressure. Early volume gets more credit than same volume late day."""
-    mins = market_minutes_elapsed(dt)
-    expected_by_time = max(100_000, mins * 7_500)
-    ratio = day_volume / expected_by_time if expected_by_time > 0 else 0.0
-    if ratio >= 5 or day_volume >= 5_000_000:
-        return 2, f"rVol hot {ratio:.1f}x"
-    if ratio >= 2 or day_volume >= 1_000_000:
-        return 1, f"rVol strong {ratio:.1f}x"
-    return 0, f"rVol {ratio:.1f}x"
-
-
-def initialize_first_seen(leaders: Sequence[Leader]) -> None:
-    """Seed first-seen memory on startup so the first scan does not spam every current leader."""
-    global FIRST_SEEN_INITIALIZED
-    if FIRST_SEEN_INITIALIZED or not leaders:
-        return
-    now = time.time()
-    for leader in leaders:
-        ticker = normalize_ticker(leader.ticker)
-        if ticker and ticker not in FIRST_SEEN:
-            FIRST_SEEN[ticker] = {"gain": leader.change_pct, "ts": now, "price": leader.price}
-    FIRST_SEEN_INITIALIZED = True
-    log.info("[FIRST SEEN] initialized with %s leaders", len(FIRST_SEEN))
-
-
-def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
-    ticker = normalize_ticker(leader.ticker)
-    gain = max(quote.change_pct, leader.change_pct)
-    now = time.time()
-    row = FIRST_SEEN.get(ticker)
-    if not row:
-        FIRST_SEEN[ticker] = {"gain": gain, "ts": now, "price": quote.price}
-        # Only names that appear after startup memory is initialized qualify as fresh.
-        return FIRST_SEEN_INITIALIZED, 0.0
-    age = now - float(row.get("ts", now))
-    return age <= FRESH_LEADER_WINDOW_SECONDS, age
 
 
 def clamp(n: float, low: float, high: float) -> float:
@@ -359,26 +324,34 @@ def source_allowed(name: str) -> bool:
 def block_source(name: str, seconds: int, reason: str = "") -> None:
     SOURCE_BLOCKED_UNTIL[name] = time.time() + seconds
     extra = f" — {reason}" if reason else ""
-    log.warning("[%s BLOCKED] cooling down %ss%s", name.upper(), seconds, extra)
+    log.warning("[%s BLOCKED] %ss%s", name.upper(), seconds, extra)
 
 
-def http_get(url: str, *, source: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None,
-             timeout: float = HTTP_TIMEOUT) -> Optional[requests.Response]:
+def http_get(
+    url: str,
+    *,
+    source: str,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = HTTP_TIMEOUT,
+) -> Optional[requests.Response]:
     if not source_allowed(source):
-        log.warning("[%s SKIP] source cooling down", source.upper())
+        log.info("[%s SKIP] source cooling down", source.upper())
         return None
     try:
         resp = SESSION.get(url, params=params, headers=headers, timeout=timeout)
         log.info("[HTTP] %s status=%s", url.split("?")[0], resp.status_code)
         if resp.status_code == 429:
-            block_source(source, YAHOO_COOLDOWN_SECONDS if source in {"yahoo", "yahoo_quote"} else SOURCE_COOLDOWN_SECONDS, "429")
+            cool = YAHOO_COOLDOWN_SECONDS if source.startswith("yahoo") else SOURCE_COOLDOWN_SECONDS
+            block_source(source, cool, "429")
             return None
-        if resp.status_code == 401:
-            block_source(source, YAHOO_COOLDOWN_SECONDS if source.startswith("yahoo") else SOURCE_COOLDOWN_SECONDS, "401")
-            log.warning("[%s HTTP] status=%s body=%s", source.upper(), resp.status_code, resp.text[:200])
+        if resp.status_code in {401, 403}:
+            cool = YAHOO_COOLDOWN_SECONDS if source.startswith("yahoo") else SOURCE_COOLDOWN_SECONDS
+            block_source(source, cool, str(resp.status_code))
+            log.warning("[%s HTTP] body=%s", source.upper(), resp.text[:200])
             return None
         if resp.status_code >= 500:
-            block_source(source, SOURCE_COOLDOWN_SECONDS, f"{resp.status_code}")
+            block_source(source, SOURCE_COOLDOWN_SECONDS, str(resp.status_code))
             return None
         if resp.status_code >= 400:
             log.warning("[%s HTTP] status=%s body=%s", source.upper(), resp.status_code, resp.text[:200])
@@ -399,16 +372,43 @@ def parse_json_response(resp: Optional[requests.Response], source: str) -> Any:
         return None
 
 
+def format_volume(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return str(n)
+
+
+def format_float_shares(shares: Optional[float]) -> str:
+    if shares is None or shares <= 0:
+        return "Unknown"
+    if shares >= 1_000_000:
+        return f"{shares / 1_000_000:.1f}M"
+    return f"{shares:.1f}M"
+
+
+def dedupe_text(items: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        clean = str(item).strip()
+        key = clean.lower()
+        if clean and key not in seen:
+            out.append(clean)
+            seen.add(key)
+    return out
+
+
 # =============================================================================
-# MARKET SESSION
+# MARKET HOURS
 # =============================================================================
 
 def market_session(dt: Optional[datetime] = None) -> str:
     dt = dt or now_et()
     if dt.weekday() >= 5:
         return "WEEKEND"
-    t = dt.time()
-    mins = t.hour * 60 + t.minute
+    mins = dt.hour * 60 + dt.minute
     if mins < 4 * 60:
         return "CLOSED"
     if mins < 9 * 60 + 30:
@@ -426,18 +426,21 @@ def market_session(dt: Optional[datetime] = None) -> str:
     return "CLOSED"
 
 
+def alerts_enabled_now(dt: Optional[datetime] = None) -> bool:
+    dt = dt or now_et()
+    if dt.weekday() >= 5:
+        return False
+    t = dt.time()
+    return ALERT_START_TIME <= t < ALERT_END_TIME
+
+
 def scanning_enabled() -> bool:
-    sess = market_session()
-    return sess in {"PREMARKET", "OPEN", "MIDDAY", "POWER_HOUR", "CLOSING", "AFTERHOURS"}
+    return alerts_enabled_now()
 
 
 # =============================================================================
 # TICKER FILTERS
 # =============================================================================
-
-WARRANT_SUFFIXES = (
-    "W", "WS", "WT", "WQ", "WSA", "WSC", "IW", "R", "U", "RIGHT", "UNIT"
-)
 
 BAD_TICKER_PATTERNS = [
     re.compile(r"^[A-Z]{1,5}W$"),
@@ -457,7 +460,7 @@ def is_probably_warrant_or_unit(ticker: str) -> bool:
             return True
     if "-" in t:
         tail = t.split("-")[-1]
-        if tail in WARRANT_SUFFIXES:
+        if tail in {"W", "WS", "WT", "R", "U", "RIGHT", "UNIT"}:
             return True
     return False
 
@@ -480,7 +483,6 @@ def leader_basic_ok(leader: Leader) -> bool:
 # =============================================================================
 
 def get_nasdaq_gainers() -> List[Leader]:
-    """Public Nasdaq screener fallback. Often usable when Yahoo is 429."""
     url = "https://api.nasdaq.com/api/screener/stocks"
     params = {
         "tableonly": "true",
@@ -497,6 +499,7 @@ def get_nasdaq_gainers() -> List[Leader]:
     resp = http_get(url, source="nasdaq", params=params, headers=headers)
     data = parse_json_response(resp, "nasdaq")
     rows = (((data or {}).get("data") or {}).get("rows") or []) if isinstance(data, dict) else []
+
     leaders: List[Leader] = []
     for row in rows:
         t = normalize_ticker(row.get("symbol"))
@@ -504,15 +507,27 @@ def get_nasdaq_gainers() -> List[Leader]:
         pct = safe_float(row.get("pctchange"))
         vol = safe_int(row.get("volume"))
         name = str(row.get("name") or "")
+        market_cap = safe_float(row.get("marketCap"), 0.0) or None
         if pct >= MIN_SCAN_GAIN_PCT:
-            leaders.append(Leader(ticker=t, price=price, change_pct=pct, volume=vol, source="nasdaq", name=name, raw=row))
+            leaders.append(
+                Leader(
+                    ticker=t,
+                    price=price,
+                    change_pct=pct,
+                    volume=vol,
+                    source="nasdaq",
+                    name=name,
+                    market_cap=market_cap,
+                    raw=row,
+                )
+            )
+
     leaders.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
     log.info("[NASDAQ GAINERS] %s names", len(leaders))
     return leaders[:80]
 
 
 def get_yahoo_gainers() -> List[Leader]:
-    """Yahoo is backup only. 429 triggers source cooldown."""
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
     params = {
         "scrIds": "day_gainers",
@@ -524,11 +539,11 @@ def get_yahoo_gainers() -> List[Leader]:
     }
     resp = http_get(url, source="yahoo", params=params)
     data = parse_json_response(resp, "yahoo")
-    quotes = []
     try:
         quotes = data["finance"]["result"][0]["quotes"]
     except Exception:
         quotes = []
+
     leaders: List[Leader] = []
     for q in quotes:
         t = normalize_ticker(q.get("symbol"))
@@ -536,32 +551,30 @@ def get_yahoo_gainers() -> List[Leader]:
         pct = safe_float(q.get("regularMarketChangePercent"))
         vol = safe_int(q.get("regularMarketVolume"))
         name = str(q.get("shortName") or q.get("longName") or "")
-        leaders.append(Leader(ticker=t, price=price, change_pct=pct, volume=vol, source="yahoo", name=name, raw=q))
+        market_cap = safe_float(q.get("marketCap"), 0.0) or None
+        leaders.append(
+            Leader(
+                ticker=t,
+                price=price,
+                change_pct=pct,
+                volume=vol,
+                source="yahoo",
+                name=name,
+                market_cap=market_cap,
+                raw=q,
+            )
+        )
+
     leaders = [x for x in leaders if x.change_pct >= MIN_SCAN_GAIN_PCT]
     leaders.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
     log.info("[YAHOO GAINERS] %s names", len(leaders))
     return leaders[:80]
 
 
-def get_finnhub_movers_seed() -> List[Leader]:
-    """Finnhub does not provide a perfect free gainers endpoint, so this is a quote refresh for cached/known leaders."""
-    if not FINNHUB_API_KEY:
-        return []
-    seeds = [x.ticker for x in LAST_GOOD_LEADERS[:40]]
-    out: List[Leader] = []
-    for t in seeds:
-        q = get_finnhub_quote(t)
-        if q and q.change_pct >= MIN_SCAN_GAIN_PCT:
-            out.append(Leader(ticker=t, price=q.price, change_pct=q.change_pct, volume=q.day_volume, source="finnhub_seed"))
-    return out
-
-
 def get_webull_gainers_placeholder() -> List[Leader]:
     """
-    Webull gainers hook.
-
-    Keep this function so you have a clean insert point. Webull endpoints change and often require signed/app headers.
-    If you already have working Webull code, paste it here and return List[Leader].
+    Insert a working Webull gainers endpoint here if you find a stable one.
+    Kept blank on purpose so scanner does not slow down or break.
     """
     return []
 
@@ -585,14 +598,29 @@ def dedupe_leaders(leaders: Iterable[Leader]) -> List[Leader]:
     return result
 
 
-def get_leaders() -> List[Leader]:
-    """Leader-first source chain without hammering Finnhub.
+def get_finnhub_movers_seed() -> List[Leader]:
+    if not FINNHUB_API_KEY:
+        return []
+    seeds = [x.ticker for x in LAST_GOOD_LEADERS[:30]]
+    out: List[Leader] = []
+    for t in seeds:
+        q = get_finnhub_quote(t)
+        if q and q.change_pct >= MIN_SCAN_GAIN_PCT:
+            out.append(
+                Leader(
+                    ticker=t,
+                    price=q.price,
+                    change_pct=q.change_pct,
+                    volume=q.day_volume,
+                    source="finnhub_seed",
+                )
+            )
+    return out
 
-    Primary discovery comes from Nasdaq/Yahoo/Webull. Finnhub_seed is only used
-    when those discovery feeds fail, because refreshing every cached leader with
-    Finnhub quotes creates quote spam and rate-limit risk.
-    """
+
+def get_leaders() -> List[Leader]:
     global LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS
+
     all_rows: List[Leader] = []
 
     for name, fn in (
@@ -609,14 +637,16 @@ def get_leaders() -> List[Leader]:
 
     if not all_rows:
         try:
-            rows = get_finnhub_movers_seed()
-            if rows:
-                all_rows.extend(rows)
+            all_rows.extend(get_finnhub_movers_seed())
         except Exception as exc:
-            log.warning("[FINNHUB_SEED LEADERS ERROR] %s", exc)
+            log.warning("[FINNHUB_SEED ERROR] %s", exc)
 
     leaders = dedupe_leaders(all_rows)
+
     if leaders:
+        # Add float/profile only for top names to avoid slowing scanner.
+        for leader in leaders[:MAX_LEADERS_PER_CYCLE]:
+            leader.float_shares = best_float(leader.ticker)
         LAST_GOOD_LEADERS = leaders[:80]
         LAST_GOOD_LEADERS_TS = time.time()
         log.info("[LEADERS] %s candidates: %s", len(leaders), ",".join(x.ticker for x in leaders[:20]))
@@ -624,11 +654,48 @@ def get_leaders() -> List[Leader]:
 
     age = time.time() - LAST_GOOD_LEADERS_TS if LAST_GOOD_LEADERS_TS else 999999
     if LAST_GOOD_LEADERS and age <= LEADER_CACHE_TTL_SECONDS:
-        log.warning("[LEADERS FALLBACK] live feeds failed — using last good leaders age=%ss", int(age))
+        log.warning("[LEADERS FALLBACK] using last good leaders age=%ss", int(age))
         return LAST_GOOD_LEADERS[:50]
 
-    log.warning("[LEADERS] 0 candidates — all sources failed")
+    log.warning("[LEADERS] 0 candidates")
     return []
+
+
+# =============================================================================
+# PROFILE / FLOAT
+# =============================================================================
+
+def get_finnhub_float(ticker: str) -> Optional[float]:
+    if not FINNHUB_API_KEY:
+        return None
+
+    url = "https://finnhub.io/api/v1/stock/profile2"
+    params = {"symbol": ticker, "token": FINNHUB_API_KEY}
+    resp = http_get(url, source="finnhub_profile", params=params, timeout=min(HTTP_TIMEOUT, 2.5))
+    data = parse_json_response(resp, "finnhub_profile")
+    if not isinstance(data, dict):
+        return None
+
+    # Finnhub profile does not always include float. shareOutstanding is in millions.
+    shares_m = safe_float(data.get("shareOutstanding"), 0.0)
+    if shares_m > 0:
+        return shares_m
+
+    return None
+
+
+def best_float(ticker: str) -> Optional[float]:
+    ticker = normalize_ticker(ticker)
+    cached = PROFILE_CACHE.get(ticker)
+    if cached:
+        ts, val = cached
+        if time.time() - ts <= PROFILE_CACHE_TTL_SECONDS:
+            return val
+
+    val = get_finnhub_float(ticker)
+    PROFILE_CACHE[ticker] = (time.time(), val)
+    return val
+
 
 # =============================================================================
 # QUOTES
@@ -637,50 +704,34 @@ def get_leaders() -> List[Leader]:
 def get_finnhub_quote(ticker: str) -> Optional[Quote]:
     if not FINNHUB_API_KEY:
         return None
+
     url = "https://finnhub.io/api/v1/quote"
     params = {"symbol": ticker, "token": FINNHUB_API_KEY}
-    resp = http_get(url, source="finnhub", params=params)
+    resp = http_get(url, source="finnhub", params=params, timeout=min(HTTP_TIMEOUT, 2.5))
     data = parse_json_response(resp, "finnhub")
     if not isinstance(data, dict):
         return None
+
     price = safe_float(data.get("c"))
     prev = safe_float(data.get("pc"))
     high = safe_float(data.get("h"))
     low = safe_float(data.get("l"))
+
     if price <= 0:
         return None
-    return Quote(ticker=ticker, price=price, prev_close=prev, change_pct=pct_change(price, prev), high=high, low=low, source="finnhub")
 
-
-def get_yahoo_quote(ticker: str) -> Optional[Quote]:
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": ticker, "fields": "regularMarketPrice,regularMarketPreviousClose,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow"}
-    resp = http_get(url, source="yahoo_quote", params=params)
-    data = parse_json_response(resp, "yahoo_quote")
-    try:
-        q = data["quoteResponse"]["result"][0]
-    except Exception:
-        return None
-    price = safe_float(q.get("regularMarketPrice"))
-    prev = safe_float(q.get("regularMarketPreviousClose"))
-    pct = safe_float(q.get("regularMarketChangePercent"), pct_change(price, prev))
-    vol = safe_int(q.get("regularMarketVolume"))
-    high = safe_float(q.get("regularMarketDayHigh"))
-    low = safe_float(q.get("regularMarketDayLow"))
-    if price <= 0:
-        return None
-    return Quote(ticker=ticker, price=price, prev_close=prev, change_pct=pct, day_volume=vol, high=high, low=low, source="yahoo_quote")
+    return Quote(
+        ticker=ticker,
+        price=price,
+        prev_close=prev,
+        change_pct=pct_change(price, prev),
+        high=high,
+        low=low,
+        source="finnhub",
+    )
 
 
 def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
-    """
-    Fast quote chain with caching:
-    1) Finnhub live quote while available.
-    2) Leader snapshot from Nasdaq/Yahoo gainers.
-
-    Yahoo v7 quote is intentionally not used here because Render often receives
-    Yahoo 401 Unauthorized, which wastes time and creates noisy blocks.
-    """
     ticker = normalize_ticker(ticker)
     cached = QUOTE_CACHE.get(ticker)
     if cached:
@@ -713,7 +764,7 @@ def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
 
 
 # =============================================================================
-# CANDLES
+# CANDLES / STRUCTURE
 # =============================================================================
 
 def parse_yahoo_chart_timestamps(ts_list: Sequence[int]) -> List[datetime]:
@@ -744,6 +795,7 @@ def get_yahoo_candles(ticker: str, interval: str = "1m", range_: str = "1d") -> 
     lows = quote.get("low") or []
     closes = quote.get("close") or []
     vols = quote.get("volume") or []
+
     candles: List[Candle] = []
     n = min(len(times), len(opens), len(highs), len(lows), len(closes), len(vols))
     for i in range(n):
@@ -755,30 +807,51 @@ def get_yahoo_candles(ticker: str, interval: str = "1m", range_: str = "1d") -> 
         if o <= 0 or h <= 0 or l <= 0 or c <= 0:
             continue
         candles.append(Candle(times[i], o, h, l, c, v))
-    log.info("[CANDLES] %s: Yahoo %s finalized bars", ticker, len(candles))
+
+    log.info("[CANDLES] %s Yahoo %s bars", ticker, len(candles))
     return candles
 
 
 def get_alpaca_candles(ticker: str) -> List[Candle]:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return []
+
     url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
     start = (utc_now() - timedelta(hours=12)).isoformat()
-    params = {"timeframe": "1Min", "start": start, "limit": "200", "adjustment": "raw", "feed": "iex"}
-    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
+    params = {
+        "timeframe": "1Min",
+        "start": start,
+        "limit": "200",
+        "adjustment": "raw",
+        "feed": "iex",
+    }
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
     resp = http_get(url, source="alpaca", params=params, headers=headers)
     data = parse_json_response(resp, "alpaca")
     bars = (data or {}).get("bars") or [] if isinstance(data, dict) else []
+
     candles: List[Candle] = []
     for b in bars:
         try:
             ts = datetime.fromisoformat(str(b.get("t")).replace("Z", "+00:00")).astimezone(EASTERN_TZ)
         except Exception:
             ts = now_et()
-        candles.append(Candle(ts, safe_float(b.get("o")), safe_float(b.get("h")), safe_float(b.get("l")), safe_float(b.get("c")), safe_int(b.get("v"))))
-    candles = [c for c in candles if c.open > 0 and c.close > 0]
+        c = Candle(
+            ts=ts,
+            open=safe_float(b.get("o")),
+            high=safe_float(b.get("h")),
+            low=safe_float(b.get("l")),
+            close=safe_float(b.get("c")),
+            volume=safe_int(b.get("v")),
+        )
+        if c.open > 0 and c.close > 0:
+            candles.append(c)
+
     if candles:
-        log.info("[CANDLES] %s: Alpaca %s bars", ticker, len(candles))
+        log.info("[CANDLES] %s Alpaca %s bars", ticker, len(candles))
     return candles
 
 
@@ -793,14 +866,12 @@ def best_candles(ticker: str) -> List[Candle]:
     candles = get_alpaca_candles(ticker)
     if len(candles) < 20:
         candles = get_yahoo_candles(ticker)
+
     if candles:
         CANDLE_CACHE[ticker] = (time.time(), candles)
+
     return candles
 
-
-# =============================================================================
-# STRUCTURE ENGINE
-# =============================================================================
 
 def calc_vwap(candles: Sequence[Candle]) -> Optional[float]:
     pv = 0.0
@@ -818,7 +889,6 @@ def detect_higher_lows(candles: Sequence[Candle], lookback: int = 8) -> bool:
     if len(candles) < lookback:
         return False
     lows = [c.low for c in candles[-lookback:]]
-    # Not strict every candle. Require recent low stair-step better than first half.
     first = min(lows[: lookback // 2])
     second = min(lows[lookback // 2 :])
     return second >= first * 0.995
@@ -827,16 +897,16 @@ def detect_higher_lows(candles: Sequence[Candle], lookback: int = 8) -> bool:
 def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
     if len(candles) < 8 or quote.price <= 0:
         return Structure(data_ok=False, reason="not enough candles")
-    recent = list(candles[-10:])
+
     vwap = calc_vwap(candles)
     recent_volume = sum(c.volume for c in candles[-5:])
     last3_change = pct_change(candles[-1].close, candles[-4].close) if len(candles) >= 4 else 0.0
     recent_high = max(c.high for c in candles[-12:]) if len(candles) >= 12 else max(c.high for c in candles)
     hod = max(c.high for c in candles)
     last5_low = min(c.low for c in candles[-5:])
+
     above_vwap = bool(vwap and quote.price >= vwap)
     near_hod = bool(hod and quote.price >= hod * 0.965)
-    new_high_push = bool(recent_high and quote.price >= recent_high * 0.995)
     higher_lows = detect_higher_lows(candles)
     breakout = bool(recent_high and quote.price >= recent_high * 1.005 and recent_volume >= MIN_RECENT_VOLUME)
 
@@ -861,7 +931,6 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
         recent_high=recent_high,
         hod=hod,
         near_hod=near_hod,
-        new_high_push=new_high_push,
         higher_lows=higher_lows,
         breakout=breakout,
         data_ok=True,
@@ -870,7 +939,7 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
 
 
 # =============================================================================
-# NEWS AND DILUTION AWARENESS
+# NEWS
 # =============================================================================
 
 STRONG_NEWS_TERMS = [
@@ -880,7 +949,7 @@ STRONG_NEWS_TERMS = [
     "mou", "memorandum of understanding", "financing agreement", "strategic", "collaboration",
 ]
 WEAK_NEWS_TERMS = [
-    "presentation", "conference", "appoints", "launch", "update", "announces", "expands",
+    "presentation", "conference", "appoints", "appointment", "launch", "update", "announces", "expands",
 ]
 JUNK_NEWS_PHRASES = [
     "stocks moving", "stock moving", "why shares are trading", "premarket movers", "most active",
@@ -898,6 +967,7 @@ def classify_headline(headline: str) -> Tuple[str, bool, str]:
     h = headline.lower()
     dilution = any(term in h for term in DILUTION_TERMS)
     dilution_note = "offering/dilution language" if dilution else ""
+
     if any(p in h for p in JUNK_NEWS_PHRASES):
         return "JUNK", dilution, dilution_note
     if any(term in h for term in STRONG_NEWS_TERMS):
@@ -910,6 +980,7 @@ def classify_headline(headline: str) -> Tuple[str, bool, str]:
 def get_finnhub_news(ticker: str) -> Optional[NewsResult]:
     if not FINNHUB_API_KEY:
         return None
+
     end = utc_now().date()
     start = end - timedelta(days=3)
     url = "https://finnhub.io/api/v1/company-news"
@@ -918,8 +989,10 @@ def get_finnhub_news(ticker: str) -> Optional[NewsResult]:
     rows = parse_json_response(resp, "finnhub_news")
     if not isinstance(rows, list):
         return None
-    best: Optional[NewsResult] = None
+
     rank = {"STRONG": 3, "WEAK": 2, "NONE": 1, "JUNK": 0}
+    best: Optional[NewsResult] = None
+
     for item in rows[:20]:
         headline = str(item.get("headline") or "").strip()
         if not headline:
@@ -938,6 +1011,7 @@ def get_finnhub_news(ticker: str) -> Optional[NewsResult]:
             best = nr
         if nr.grade == "STRONG":
             break
+
     return best
 
 
@@ -947,16 +1021,18 @@ def get_yahoo_news(ticker: str) -> Optional[NewsResult]:
     resp = http_get(url, source="yahoo_news", params=params)
     data = parse_json_response(resp, "yahoo_news")
     news = (data or {}).get("news") or [] if isinstance(data, dict) else []
-    best: Optional[NewsResult] = None
+
     rank = {"STRONG": 3, "WEAK": 2, "NONE": 1, "JUNK": 0}
+    best: Optional[NewsResult] = None
     ticker_word = re.compile(rf"\b{re.escape(ticker)}\b", re.I)
+
     for item in news:
         headline = str(item.get("title") or "").strip()
         if not headline:
             continue
-        # Strict ticker matching when symbol is in title; if no ticker shown, still allow because Yahoo search is ticker-scoped.
         if ticker.upper() in headline.upper() and not ticker_word.search(headline):
             continue
+
         grade, dilution, dilution_note = classify_headline(headline)
         nr = NewsResult(
             grade=grade,
@@ -969,15 +1045,11 @@ def get_yahoo_news(ticker: str) -> Optional[NewsResult]:
         )
         if best is None or rank.get(nr.grade, 0) > rank.get(best.grade, 0):
             best = nr
+
     return best
 
 
 def get_webull_news(ticker: str) -> Optional[NewsResult]:
-    """Best-effort Webull public web headline fallback.
-
-    This does not require a Webull API key. It scrapes Webull's public newslist pages
-    by exchange guess. If Webull changes the page shape, it safely returns None.
-    """
     ticker = normalize_ticker(ticker)
     if not ticker:
         return None
@@ -995,6 +1067,7 @@ def get_webull_news(ticker: str) -> Optional[NewsResult]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Referer": "https://www.webull.com/",
     }
+
     rank = {"STRONG": 3, "WEAK": 2, "NONE": 1, "JUNK": 0}
     best: Optional[NewsResult] = None
 
@@ -1002,10 +1075,12 @@ def get_webull_news(ticker: str) -> Optional[NewsResult]:
         resp = http_get(url, source="webull_news", headers=headers, timeout=min(HTTP_TIMEOUT, 3.0))
         if resp is None or not resp.text:
             continue
+
         text = resp.text
         raw_titles = re.findall(r'"title"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', text)
         if not raw_titles:
-            raw_titles = re.findall(r'<h[1-6][^>]*>(.*?)</h[1-6]>', text, flags=re.I | re.S)
+            raw_titles = re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", text, flags=re.I | re.S)
+
         for raw in raw_titles[:20]:
             try:
                 headline = bytes(raw, "utf-8").decode("unicode_escape")
@@ -1014,10 +1089,12 @@ def get_webull_news(ticker: str) -> Optional[NewsResult]:
             headline = re.sub(r"<[^>]+>", " ", headline)
             headline = html.unescape(headline)
             headline = re.sub(r"\s+", " ", headline).strip()
-            if len(headline) < 12 or ticker.lower() in {headline.lower(), headline.lower().replace(" ", "")}:
+
+            if len(headline) < 12:
                 continue
             if "webull" in headline.lower() and "news" in headline.lower() and len(headline) < 35:
                 continue
+
             grade, dilution, dilution_note = classify_headline(headline)
             nr = NewsResult(
                 grade=grade,
@@ -1031,16 +1108,19 @@ def get_webull_news(ticker: str) -> Optional[NewsResult]:
                 best = nr
             if nr.grade == "STRONG":
                 return nr
+
         if best and best.grade in {"STRONG", "WEAK"}:
             return best
+
     return best
 
 
+def should_check_news(ticker: str) -> bool:
+    top = {x.ticker for x in LAST_GOOD_LEADERS[:NEWS_TOP_N]}
+    return normalize_ticker(ticker) in top
+
+
 def best_news(ticker: str) -> NewsResult:
-    """
-    Return the best real catalyst headline. Junk aggregator headlines are never used as the displayed headline.
-    Cached to avoid hammering Finnhub/Yahoo news every scan.
-    """
     ticker = normalize_ticker(ticker)
     cached = NEWS_CACHE.get(ticker)
     if cached:
@@ -1050,6 +1130,7 @@ def best_news(ticker: str) -> NewsResult:
 
     fallback_dilution = False
     fallback_dilution_note = ""
+
     for fn in (get_finnhub_news, get_yahoo_news, get_webull_news):
         try:
             nr = fn(ticker)
@@ -1065,6 +1146,7 @@ def best_news(ticker: str) -> NewsResult:
                 return nr
         except Exception as exc:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
+
     nr = NewsResult(
         grade="NONE",
         headline="UNKNOWN CATALYST — INVESTIGATE",
@@ -1076,61 +1158,124 @@ def best_news(ticker: str) -> NewsResult:
     return nr
 
 
-def should_check_news(ticker: str) -> bool:
-    top = {x.ticker for x in LAST_GOOD_LEADERS[:NEWS_TOP_N]}
-    return normalize_ticker(ticker) in top
+def clean_news_text(n: NewsResult) -> str:
+    if not n or not n.headline:
+        return "UNKNOWN CATALYST — INVESTIGATE"
+    headline = str(n.headline).strip()
+    if headline.upper().startswith("UNKNOWN CATALYST"):
+        return "UNKNOWN CATALYST — INVESTIGATE"
+    return headline[:120]
 
 
 # =============================================================================
 # DECISION ENGINE
 # =============================================================================
 
+def market_minutes_elapsed(dt: Optional[datetime] = None) -> int:
+    dt = dt or now_et()
+    mins = dt.hour * 60 + dt.minute
+    start = 9 * 60 + 30
+    return max(1, mins - start + 1)
+
+
+def relative_volume_score(day_volume: int, dt: Optional[datetime] = None) -> Tuple[int, str]:
+    mins = market_minutes_elapsed(dt)
+    expected_by_time = max(100_000, mins * 7_500)
+    ratio = day_volume / expected_by_time if expected_by_time > 0 else 0.0
+
+    if ratio >= 5 or day_volume >= 5_000_000:
+        return 2, f"rVol hot {ratio:.1f}x"
+    if ratio >= 2 or day_volume >= 1_000_000:
+        return 1, f"rVol strong {ratio:.1f}x"
+    return 0, f"rVol {ratio:.1f}x"
+
+
+def initialize_first_seen(leaders: Sequence[Leader]) -> None:
+    global FIRST_SEEN_INITIALIZED
+    if FIRST_SEEN_INITIALIZED or not leaders:
+        return
+    now = time.time()
+    for leader in leaders:
+        ticker = normalize_ticker(leader.ticker)
+        if ticker and ticker not in FIRST_SEEN:
+            FIRST_SEEN[ticker] = {"gain": leader.change_pct, "ts": now, "price": leader.price}
+    FIRST_SEEN_INITIALIZED = True
+    log.info("[FIRST SEEN] initialized with %s leaders", len(FIRST_SEEN))
+
+
+def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
+    ticker = normalize_ticker(leader.ticker)
+    gain = max(quote.change_pct, leader.change_pct)
+    now = time.time()
+    row = FIRST_SEEN.get(ticker)
+
+    if not row:
+        FIRST_SEEN[ticker] = {"gain": gain, "ts": now, "price": quote.price}
+        return FIRST_SEEN_INITIALIZED, 0.0
+
+    age = now - float(row.get("ts", now))
+    return age <= 900, age
+
+
 def quality_score(leader: Leader, quote: Quote, structure: Structure, news: NewsResult) -> int:
     score = 0
     gain = max(quote.change_pct, leader.change_pct)
     vol = max(quote.day_volume, leader.volume)
 
-    if gain >= 25: score += 2
-    if gain >= 35: score += 1
-    if gain >= 50: score += 1
-    if vol >= 1_000_000: score += 2
-    elif vol >= 300_000: score += 1
+    if gain >= 25:
+        score += 2
+    if gain >= 35:
+        score += 1
+    if gain >= 50:
+        score += 1
+    if vol >= 1_000_000:
+        score += 2
+    elif vol >= 300_000:
+        score += 1
+
     rvol_bonus, _ = relative_volume_score(vol)
     score += rvol_bonus
-    if structure.above_vwap: score += 1
-    if structure.higher_lows: score += 1
-    if structure.near_hod: score += 1
-    if structure.breakout or structure.last3_change_pct >= 3: score += 1
-    if news.grade == "STRONG": score += 1
-    if news.grade == "JUNK": score -= 1
-    if quote.price < MIN_PRICE or quote.price > MAX_PRICE: score -= 3
-    if structure.vwap and quote.price < structure.vwap * 0.96: score -= 2
+
+    if structure.above_vwap:
+        score += 1
+    if structure.higher_lows:
+        score += 1
+    if structure.near_hod:
+        score += 1
+    if structure.breakout or structure.last3_change_pct >= 3:
+        score += 1
+    if news.grade == "STRONG":
+        score += 1
+    if news.grade == "JUNK":
+        score -= 1
+
+    if quote.price < MIN_PRICE or quote.price > MAX_PRICE:
+        score -= 3
+    if structure.vwap and quote.price < structure.vwap * 0.96:
+        score -= 2
+
     return int(clamp(score, 0, 10))
 
 
 def update_baseline(ticker: str, price: float) -> AlertState:
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
+
     if st.baseline_price <= 0 or now - st.baseline_ts > FAST_SPIKE_WINDOW_MIN * 60:
         st.baseline_price = price
         st.baseline_ts = now
-    # Let baseline ratchet down during pullbacks so fast re-pushes are caught.
+
     if price < st.baseline_price:
         st.baseline_price = price
         st.baseline_ts = now
+
     return st
 
 
 def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> bool:
-    """Strict anti-spam gate.
-
-    First alert is allowed. After that, no ticker repeats unless it makes a
-    real new move: +10% fast spike, +5% new high/price push after cooldown,
-    or a major quality upgrade after cooldown. Type changes alone do not bypass
-    the gate.
-    """
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
+
     if st.last_alert_ts <= 0:
         return True
 
@@ -1139,28 +1284,32 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
     high_push_pct = pct_change(structure.hod or quote.price, st.last_alert_high) if st.last_alert_high > 0 else 0.0
     quality_upgrade = quality >= st.last_quality + 2
 
-    if alert_type == "FAST LEADER SPIKE":
+    if alert_type == "FAST SPIKE":
         return (
             seconds_since >= FAST_SPIKE_REALERT_SECONDS
-            and (price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT or high_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT)
+            and (
+                price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+                or high_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+            )
         )
 
     cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
     meaningful_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
     return cooldown_done and (meaningful_push or quality_upgrade)
 
+
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
+
     st.last_alert_ts = now
     st.last_alert_price = quote.price
     st.last_alert_high = structure.hod or quote.price
     st.last_alert_type = alert_type
     st.last_quality = quality
-    # Reset spike baseline after any delivered alert. The next +10% spike must
-    # be a fresh push from the alert area, not the old first-seen low.
     st.baseline_price = quote.price
     st.baseline_ts = now
+
 
 def decide_candidate(leader: Leader) -> CandidateDecision:
     ticker = leader.ticker
@@ -1175,73 +1324,90 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         return CandidateDecision(ticker=ticker, should_alert=False, reasons=["no valid quote"], leader=leader)
 
     gain = max(quote.change_pct, leader.change_pct)
+    day_vol = max(quote.day_volume, leader.volume)
+
     if gain < MIN_ALERT_GAIN_PCT:
-        return CandidateDecision(ticker=ticker, should_alert=False, reasons=[f"gain {gain:.1f}% under {MIN_ALERT_GAIN_PCT:.0f}% floor"], quote=quote, leader=leader)
+        return CandidateDecision(
+            ticker=ticker,
+            should_alert=False,
+            reasons=[f"gain {gain:.1f}% under {MIN_ALERT_GAIN_PCT:.0f}% floor"],
+            quote=quote,
+            leader=leader,
+        )
+
     if not (MIN_PRICE <= quote.price <= MAX_PRICE):
-        return CandidateDecision(ticker=ticker, should_alert=False, reasons=["price outside range"], quote=quote, leader=leader)
+        return CandidateDecision(
+            ticker=ticker,
+            should_alert=False,
+            reasons=["price outside range"],
+            quote=quote,
+            leader=leader,
+        )
 
     candles = best_candles(ticker)
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
-    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="UNKNOWN CATALYST — INVESTIGATE", source="skipped")
-    quality = quality_score(leader, quote, structure, news)
-    fresh_leader, first_seen_age = remember_first_seen(leader, quote)
-    rvol_bonus, rvol_label = relative_volume_score(max(quote.day_volume, leader.volume))
 
-    # Market-leader override: huge gainers should not be buried just because news is unknown.
-    gain = max(quote.change_pct, leader.change_pct)
+    news = best_news(ticker) if should_check_news(ticker) else NewsResult(
+        grade="NONE",
+        headline="UNKNOWN CATALYST — INVESTIGATE",
+        source="skipped",
+    )
+
+    quality = quality_score(leader, quote, structure, news)
+
+    # Huge leader override so real movers do not get buried by unknown news.
     if gain >= 150:
         quality = max(quality, 9)
     elif gain >= 100:
         quality = max(quality, 8)
 
+    _, rvol_label = relative_volume_score(day_vol)
+    reasons.append(rvol_label)
+
     st = update_baseline(ticker, quote.price)
     spike_from_base = pct_change(quote.price, st.baseline_price) if st.baseline_price > 0 else 0.0
+
     if spike_from_base >= FAST_SPIKE_PCT:
         quality = int(clamp(quality + FAST_SPIKE_QUALITY_BONUS, 0, 10))
+        reasons.append(f"fast +{spike_from_base:.1f}% push")
 
-    day_vol = max(quote.day_volume, leader.volume)
-    if rvol_bonus > 0:
-        reasons.append(rvol_label)
+    if structure.reason:
+        reasons.append(structure.reason)
+
+    if news.grade == "STRONG":
+        reasons.append("strong catalyst")
+    elif news.grade == "WEAK":
+        reasons.append("weak catalyst")
+
     if day_vol < MIN_DAY_VOLUME and gain < MAJOR_LEADER_GAIN_PCT:
         risks.append("light total volume")
     if news.grade in {"NONE", "JUNK"} and gain >= 35:
         risks.append("UNKNOWN CATALYST — INVESTIGATE")
     if news.dilution_flag:
         risks.append(news.dilution_note or "dilution language")
-    if not structure.above_vwap and structure.data_ok:
+    if structure.data_ok and not structure.above_vwap:
         risks.append("not above VWAP")
 
     alert_type = ""
-    if fresh_leader and first_seen_age <= FRESH_LEADER_WINDOW_SECONDS and gain >= MIN_ALERT_GAIN_PCT and day_vol >= FRESH_LEADER_MIN_VOLUME:
-        alert_type = "FRESH LEADER"
-        reasons.append(f"fresh leader first seen {int(first_seen_age // 60)}m ago")
-    elif gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
-        alert_type = "FAST LEADER SPIKE"
-        reasons.append(f"fast +{spike_from_base:.1f}% push")
+
+    # Only 3 clean public alert types.
+    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
+        alert_type = "FAST SPIKE"
     elif spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
         alert_type = "FAST SPIKE"
-        reasons.append(f"fast +{spike_from_base:.1f}% push")
     elif gain >= MAJOR_LEADER_GAIN_PCT and day_vol >= MIN_DAY_VOLUME:
         alert_type = "MARKET LEADER"
-        reasons.append(f"major leader +{gain:.1f}%")
-    elif structure.breakout and structure.above_vwap:
-        alert_type = "BREAKOUT OVER HOD"
-        reasons.append("breakout + above VWAP")
-    elif structure.above_vwap and structure.higher_lows and structure.near_hod and structure.recent_volume >= MIN_RECENT_VOLUME:
-        alert_type = "VWAP HOLD CONTINUATION"
-        reasons.append("VWAP hold continuation")
     elif gain >= 35 and structure.last3_change_pct >= 3:
         alert_type = "LIVE PUSH"
-        reasons.append(f"last3 +{structure.last3_change_pct:.1f}%")
 
-    if structure.reason:
-        reasons.append(structure.reason)
-    if news.grade == "STRONG":
-        reasons.append("strong catalyst")
-    elif news.grade == "WEAK":
-        reasons.append("weak catalyst")
+    should = bool(alert_type) and quality >= 5 and is_meaningful_realert(
+        ticker,
+        alert_type,
+        quote,
+        structure,
+        quality,
+    )
 
-    should = bool(alert_type) and quality >= 5 and is_meaningful_realert(ticker, alert_type, quote, structure, quality)
     return CandidateDecision(
         ticker=ticker,
         should_alert=should,
@@ -1253,62 +1419,46 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         structure=structure,
         news=news,
         leader=leader,
+        spike_pct=spike_from_base,
     )
-
-
-def dedupe_text(items: Iterable[str]) -> List[str]:
-    out: List[str] = []
-    seen = set()
-    for item in items:
-        clean = str(item).strip()
-        key = clean.lower()
-        if clean and key not in seen:
-            out.append(clean)
-            seen.add(key)
-    return out
 
 
 # =============================================================================
 # ALERTING
 # =============================================================================
 
-def format_volume(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.0f}K"
-    return str(n)
-
-
 def format_alert(d: CandidateDecision) -> str:
     q = d.quote or Quote(d.ticker)
     s = d.structure or Structure()
     n = d.news or NewsResult()
-    vol = max(q.day_volume, d.leader.volume if d.leader else 0)
+
     gain = max(q.change_pct, d.leader.change_pct if d.leader else 0)
-    emoji = "🔥" if d.alert_type == "FRESH LEADER" else "🚀"
-    title = f"{emoji} {d.alert_type} — {d.ticker}"
-    lines = [
-        title,
-        "",
-        f"${q.price:.4g} | +{gain:.1f}%",
-        f"Vol: {format_volume(vol)} | Quality: {d.quality}/10",
-    ]
-    if s.vwap:
-        lines.append(f"VWAP: ${s.vwap:.4g} | RecentVol: {format_volume(s.recent_volume)}")
-    if d.reasons:
-        lines.append("Why: " + " + ".join(d.reasons))
-    if n.headline:
-        prefix = n.grade if n.grade != "NONE" else "INFO"
-        lines.append(f"NEWS: {prefix} — {n.headline[:180]}")
-    if d.risks:
-        lines.append("Risk: " + " | ".join(d.risks))
-    return "\n".join(lines)
+    float_txt = format_float_shares(d.leader.float_shares if d.leader else None)
+
+    if d.spike_pct >= FAST_SPIKE_PCT:
+        action_line = f"🔥 +{d.spike_pct:.1f}% Spike"
+    elif d.alert_type == "MARKET LEADER":
+        action_line = "🚀 Market Leader"
+    else:
+        action_line = "📈 Live Push"
+
+    vwap_line = "🟢 Above VWAP" if s.above_vwap else "⚠️ Check VWAP"
+    news_line = clean_news_text(n)
+
+    return f"""🚀 {d.ticker} +{gain:.0f}%
+
+${q.price:.2f} | Float {float_txt}
+
+{action_line}
+{vwap_line}
+
+NEWS: {news_line}"""
 
 
 def send_telegram(text: str) -> bool:
     first_line = text.splitlines()[0] if text else ""
-    ticker = first_line.split("—")[-1].strip() if "—" in first_line else "unknown"
+    ticker = first_line.split()[1] if len(first_line.split()) > 1 else "unknown"
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         log.warning(
             "[ALERT DRY RUN] missing Telegram config token=%s chats=%s ticker=%s\n%s",
@@ -1321,6 +1471,7 @@ def send_telegram(text: str) -> bool:
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     delivered = 0
+
     for chat_id in TELEGRAM_CHAT_IDS:
         payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
         try:
@@ -1347,13 +1498,20 @@ def run_scan_cycle() -> Dict[str, Any]:
     checked = 0
     alerts: List[str] = []
 
-    if not scanning_enabled():
-        summary = {"version": VERSION, "session": session_name, "checked": 0, "sent": 0, "message": "scanning disabled"}
+    if not alerts_enabled_now():
+        summary = {
+            "version": VERSION,
+            "session": session_name,
+            "checked": 0,
+            "sent": 0,
+            "message": "alerts blocked outside 9:30 AM–4:10 PM ET",
+        }
         log.info("[CYCLE SKIP] %s", summary)
         return summary
 
     leaders = get_leaders()
     initialize_first_seen(leaders)
+
     decisions: List[CandidateDecision] = []
     for leader in leaders[:MAX_LEADERS_PER_CYCLE]:
         checked += 1
@@ -1363,16 +1521,17 @@ def run_scan_cycle() -> Dict[str, Any]:
         except Exception as exc:
             log.warning("[DECISION ERROR] %s %s", leader.ticker, exc)
 
-    # Sort alertable by quality, gain, then volume.
     alertable = [d for d in decisions if d.should_alert]
-    def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
-        type_rank = 4 if d.alert_type == "FAST LEADER SPIKE" else 3 if d.alert_type == "FRESH LEADER" else 2 if d.alert_type in {"BREAKOUT OVER HOD", "LIVE PUSH"} else 1
-        gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
-        vol_rank = d.quote.day_volume if d.quote else 0
-        return (type_rank, d.quality, gain_rank, vol_rank)
-    alertable.sort(key=alert_priority, reverse=True)
 
+    def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
+        type_rank = 3 if d.alert_type == "FAST SPIKE" else 2 if d.alert_type == "MARKET LEADER" else 1
+        gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
+        vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
+        return (type_rank, d.quality, gain_rank, vol_rank)
+
+    alertable.sort(key=alert_priority, reverse=True)
     attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
+
     for d in alertable[:MAX_ALERTS_PER_CYCLE]:
         text = format_alert(d)
         if send_telegram(text):
@@ -1395,11 +1554,21 @@ def run_scan_cycle() -> Dict[str, Any]:
         "elapsed": elapsed,
         "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
         "news_top_n": NEWS_TOP_N,
-        "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
+        "cache_sizes": {
+            "quotes": len(QUOTE_CACHE),
+            "news": len(NEWS_CACHE),
+            "candles": len(CANDLE_CACHE),
+            "profiles": len(PROFILE_CACHE),
+        },
         "first_seen_count": len(FIRST_SEEN),
         "first_seen_initialized": FIRST_SEEN_INITIALIZED,
-        "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
+        "blocked_sources": {
+            k: max(0, int(v - time.time()))
+            for k, v in SOURCE_BLOCKED_UNTIL.items()
+            if v > time.time()
+        },
     }
+
     log.info("[DELIVERY] attempted=%s delivered=%s", attempted, sent)
     log.info("[CYCLE DONE] %s", json.dumps(summary, default=str))
     return summary
@@ -1407,7 +1576,13 @@ def run_scan_cycle() -> Dict[str, Any]:
 
 def scanner_loop() -> None:
     global LAST_CYCLE_SUMMARY
-    log.info("[START] %s interval=%ss min_alert_gain=%s", VERSION, SCAN_INTERVAL_SECONDS, MIN_ALERT_GAIN_PCT)
+
+    log.info(
+        "[START] %s interval=%ss min_alert_gain=%s alert_window=9:30-16:10ET",
+        VERSION,
+        SCAN_INTERVAL_SECONDS,
+        MIN_ALERT_GAIN_PCT,
+    )
     log.info(
         "[TELEGRAM CONFIG] token=%s chats=%s token_len=%s chat_count=%s",
         bool(TELEGRAM_BOT_TOKEN),
@@ -1421,6 +1596,7 @@ def scanner_loop() -> None:
         bool(ALPACA_API_KEY),
         bool(ALPACA_SECRET_KEY),
     )
+
     while RUNNING:
         try:
             LAST_CYCLE_SUMMARY = run_scan_cycle()
@@ -1437,6 +1613,7 @@ def scanner_loop() -> None:
 def build_app():
     if Flask is None:
         return None
+
     app = Flask(__name__)
 
     @app.get("/")
@@ -1446,14 +1623,24 @@ def build_app():
             "version": VERSION,
             "time_et": now_et().isoformat(),
             "session": market_session(),
+            "alerts_enabled_now": alerts_enabled_now(),
             "last_cycle": LAST_CYCLE_SUMMARY,
             "last_good_leaders": [x.ticker for x in LAST_GOOD_LEADERS[:20]],
             "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
-        "news_top_n": NEWS_TOP_N,
-        "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
-        "first_seen_count": len(FIRST_SEEN),
-        "first_seen_initialized": FIRST_SEEN_INITIALIZED,
-        "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
+            "news_top_n": NEWS_TOP_N,
+            "cache_sizes": {
+                "quotes": len(QUOTE_CACHE),
+                "news": len(NEWS_CACHE),
+                "candles": len(CANDLE_CACHE),
+                "profiles": len(PROFILE_CACHE),
+            },
+            "first_seen_count": len(FIRST_SEEN),
+            "first_seen_initialized": FIRST_SEEN_INITIALIZED,
+            "blocked_sources": {
+                k: max(0, int(v - time.time()))
+                for k, v in SOURCE_BLOCKED_UNTIL.items()
+                if v > time.time()
+            },
         }
 
     @app.get("/scan")
@@ -1471,6 +1658,7 @@ def main() -> None:
     app = build_app()
     t = threading.Thread(target=scanner_loop, daemon=True)
     t.start()
+
     if app is not None:
         app.run(host="0.0.0.0", port=PORT)
     else:
