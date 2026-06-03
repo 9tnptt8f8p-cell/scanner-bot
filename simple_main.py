@@ -2,7 +2,7 @@
 """
 simple_main.py
 
-v49-clean-alerts-no-premarket-float
+v50-elite-leader-scanner
 
 Clean leader-first momentum scanner for Render.
 
@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v49-clean-alerts-no-premarket-float"
+VERSION = "v50-elite-leader-scanner"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -62,6 +62,9 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
 MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "15"))
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "15"))
+MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
+MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "5"))
+MARKET_LEADER_OVERRIDE_QUALITY = int(os.getenv("MARKET_LEADER_OVERRIDE_QUALITY", "7"))
 
 MIN_ALERT_GAIN_PCT = float(os.getenv("MIN_ALERT_GAIN_PCT", "25"))
 MIN_SCAN_GAIN_PCT = float(os.getenv("MIN_SCAN_GAIN_PCT", "20"))
@@ -185,6 +188,9 @@ class Structure:
     near_hod: bool = False
     higher_lows: bool = False
     breakout: bool = False
+    extended_from_vwap_pct: float = 0.0
+    holding_recent_low: bool = False
+    setup_label: str = "CHECK CHART"
     data_ok: bool = False
     reason: str = ""
 
@@ -896,7 +902,7 @@ def detect_higher_lows(candles: Sequence[Candle], lookback: int = 8) -> bool:
 
 def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
     if len(candles) < 8 or quote.price <= 0:
-        return Structure(data_ok=False, reason="not enough candles")
+        return Structure(data_ok=False, reason="not enough candles", setup_label="NO DATA")
 
     vwap = calc_vwap(candles)
     recent_volume = sum(c.volume for c in candles[-5:])
@@ -909,6 +915,19 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
     near_hod = bool(hod and quote.price >= hod * 0.965)
     higher_lows = detect_higher_lows(candles)
     breakout = bool(recent_high and quote.price >= recent_high * 1.005 and recent_volume >= MIN_RECENT_VOLUME)
+    extended_from_vwap_pct = pct_change(quote.price, vwap) if vwap else 0.0
+    holding_recent_low = bool(last5_low and quote.price >= last5_low * 1.015)
+
+    if above_vwap and higher_lows and near_hod:
+        setup_label = "A+ VWAP HOLD"
+    elif above_vwap and breakout:
+        setup_label = "BREAKOUT PUSH"
+    elif above_vwap and last3_change >= 3:
+        setup_label = "LIVE MOMENTUM"
+    elif above_vwap:
+        setup_label = "ABOVE VWAP"
+    else:
+        setup_label = "CHECK VWAP"
 
     reasons = []
     if above_vwap:
@@ -921,6 +940,8 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
         reasons.append("breakout")
     if last3_change >= 3:
         reasons.append(f"last3 +{last3_change:.1f}%")
+    if extended_from_vwap_pct >= 18:
+        reasons.append(f"extended +{extended_from_vwap_pct:.0f}% from VWAP")
 
     return Structure(
         above_vwap=above_vwap,
@@ -933,6 +954,9 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
         near_hod=near_hod,
         higher_lows=higher_lows,
         breakout=breakout,
+        extended_from_vwap_pct=extended_from_vwap_pct,
+        holding_recent_low=holding_recent_low,
+        setup_label=setup_label,
         data_ok=True,
         reason=" + ".join(reasons) if reasons else "structure neutral",
     )
@@ -1165,6 +1189,32 @@ def clean_news_text(n: NewsResult) -> str:
     if headline.upper().startswith("UNKNOWN CATALYST"):
         return "UNKNOWN CATALYST — INVESTIGATE"
     return headline[:120]
+
+def summarize_news(headline: str) -> str:
+    """Short trader-friendly news label for Telegram."""
+    h = (headline or "").strip()
+    low = h.lower()
+
+    if not h or "unknown catalyst" in low:
+        return "UNKNOWN CATALYST — INVESTIGATE"
+    if "business combination" in low or "merger" in low or "acquisition" in low:
+        return "Merger/business combo update"
+    if "fda" in low or "clearance" in low or "approval" in low:
+        return "FDA/regulatory headline"
+    if "contract" in low or "purchase order" in low or "award" in low:
+        return "Contract/order headline"
+    if "phase" in low or "clinical" in low or "trial" in low or "data" in low:
+        return "Clinical/data headline"
+    if "offering" in low or "registered direct" in low or "private placement" in low:
+        return "Offering/dilution language"
+    if "appoints" in low or "appointment" in low or "resigns" in low or "cfo" in low or "ceo" in low:
+        return "Management change"
+    if "partnership" in low or "collaboration" in low or "strategic" in low:
+        return "Partnership/collaboration"
+    if "earnings" in low or "revenue" in low or "guidance" in low:
+        return "Earnings/guidance headline"
+
+    return h[:90]
 
 
 # =============================================================================
@@ -1400,13 +1450,27 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     elif gain >= 35 and structure.last3_change_pct >= 3:
         alert_type = "LIVE PUSH"
 
-    should = bool(alert_type) and quality >= 5 and is_meaningful_realert(
+    required_quality = MIN_FAST_SPIKE_QUALITY if alert_type == "FAST SPIKE" else MIN_ALERT_QUALITY
+    if alert_type == "MARKET LEADER" and gain >= MAJOR_LEADER_GAIN_PCT:
+        required_quality = min(required_quality, MARKET_LEADER_OVERRIDE_QUALITY)
+
+    # Avoid weak non-spike alerts below VWAP. Fast spikes can still surface but show Check VWAP.
+    if alert_type in {"MARKET LEADER", "LIVE PUSH"} and structure.data_ok and not structure.above_vwap:
+        alert_type = ""
+
+    should = bool(alert_type) and quality >= required_quality and is_meaningful_realert(
         ticker,
         alert_type,
         quote,
         structure,
         quality,
     )
+
+    if should:
+        log.info(
+            "[SCORE] %s type=%s quality=%s gain=%.1f spike=%.1f structure=%s news=%s risks=%s",
+            ticker, alert_type, quality, gain, spike_from_base, structure.reason, news.grade, "|".join(risks)
+        )
 
     return CandidateDecision(
         ticker=ticker,
@@ -1442,17 +1506,28 @@ def format_alert(d: CandidateDecision) -> str:
     else:
         action_line = "📈 Live Push"
 
-    vwap_line = "🟢 Above VWAP" if s.above_vwap else "⚠️ Check VWAP"
-    news_line = clean_news_text(n)
+    setup_line = f"🟢 {s.setup_label}" if s.above_vwap else f"⚠️ {s.setup_label}"
+    news_line = summarize_news(clean_news_text(n))
 
-    return f"""🚀 {d.ticker} +{gain:.0f}%
+    check_parts = []
+    if s.above_vwap:
+        check_parts.append("hold VWAP")
+    if s.near_hod:
+        check_parts.append("HOD push")
+    elif s.recent_high:
+        check_parts.append("clear recent high")
+    if s.extended_from_vwap_pct >= 18:
+        check_parts.append("extended")
+    check_line = " | ".join(check_parts[:2]) if check_parts else "confirm chart"
 
-${q.price:.2f} | Float {float_txt}
+    return f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
 
+Float {float_txt}
+{setup_line}
 {action_line}
-{vwap_line}
 
-NEWS: {news_line}"""
+NEWS: {news_line}
+CHECK: {check_line}"""
 
 
 def send_telegram(text: str) -> bool:
