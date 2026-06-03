@@ -2,7 +2,7 @@
 """
 simple_main.py
 
-v50-elite-leader-scanner
+v51-better-candle-data
 
 Clean leader-first momentum scanner for Render.
 
@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v50-elite-leader-scanner"
+VERSION = "v52-all-fixes-clean-leader-scanner"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -60,8 +60,8 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "15"))
-NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "15"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "12"))
+NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "8"))
 MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
 MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "5"))
 MARKET_LEADER_OVERRIDE_QUALITY = int(os.getenv("MARKET_LEADER_OVERRIDE_QUALITY", "7"))
@@ -79,6 +79,10 @@ FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
 FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "300"))
 FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
 FAST_SPIKE_QUALITY_BONUS = int(os.getenv("FAST_SPIKE_QUALITY_BONUS", "2"))
+MIN_FAST_SPIKE_DAY_VOLUME = int(os.getenv("MIN_FAST_SPIKE_DAY_VOLUME", "300000"))
+MIN_MARKET_LEADER_DAY_VOLUME = int(os.getenv("MIN_MARKET_LEADER_DAY_VOLUME", "300000"))
+LOW_FLOAT_BONUS_MAX_M = float(os.getenv("LOW_FLOAT_BONUS_MAX_M", "20"))
+MAX_EXTENDED_FROM_VWAP_WARN_PCT = float(os.getenv("MAX_EXTENDED_FROM_VWAP_WARN_PCT", "18"))
 
 MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
@@ -90,7 +94,9 @@ LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 
 QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
-CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "30"))
+CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "20"))
+CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "180"))
+MIN_GOOD_CANDLES = int(os.getenv("MIN_GOOD_CANDLES", "20"))
 PROFILE_CACHE_TTL_SECONDS = int(os.getenv("PROFILE_CACHE_TTL_SECONDS", "1800"))
 
 ALERT_START_TIME = dtime(9, 30)
@@ -392,6 +398,33 @@ def format_float_shares(shares: Optional[float]) -> str:
     if shares >= 1_000_000:
         return f"{shares / 1_000_000:.1f}M"
     return f"{shares:.1f}M"
+
+
+def candle_age_seconds(candles: Sequence[Candle]) -> Optional[int]:
+    if not candles:
+        return None
+    try:
+        return int((now_et() - candles[-1].ts).total_seconds())
+    except Exception:
+        return None
+
+
+def candles_fresh_enough(candles: Sequence[Candle]) -> bool:
+    if len(candles) < MIN_GOOD_CANDLES:
+        return False
+    age = candle_age_seconds(candles)
+    if age is None:
+        return False
+    return age <= CANDLE_MAX_AGE_SECONDS
+
+
+def candle_source_rank(candles: Sequence[Candle]) -> Tuple[int, int]:
+    """Rank candle set by freshness first, then length."""
+    if not candles:
+        return (-999999, 0)
+    age = candle_age_seconds(candles)
+    freshness = -999999 if age is None else -age
+    return (freshness, len(candles))
 
 
 def dedupe_text(items: Iterable[str]) -> List[str]:
@@ -814,7 +847,7 @@ def get_yahoo_candles(ticker: str, interval: str = "1m", range_: str = "1d") -> 
             continue
         candles.append(Candle(times[i], o, h, l, c, v))
 
-    log.info("[CANDLES] %s Yahoo %s bars", ticker, len(candles))
+    log.info("[CANDLES] %s Yahoo %s bars age=%s", ticker, len(candles), candle_age_seconds(candles))
     return candles
 
 
@@ -857,11 +890,68 @@ def get_alpaca_candles(ticker: str) -> List[Candle]:
             candles.append(c)
 
     if candles:
-        log.info("[CANDLES] %s Alpaca %s bars", ticker, len(candles))
+        log.info("[CANDLES] %s Alpaca %s bars age=%s", ticker, len(candles), candle_age_seconds(candles))
+    return candles
+
+
+
+def get_finnhub_candles(ticker: str) -> List[Candle]:
+    """Finnhub 1-minute candle fallback. Helps when Alpaca has sparse IEX bars or Yahoo is stale."""
+    if not FINNHUB_API_KEY:
+        return []
+
+    end_ts = int(utc_now().timestamp())
+    start_ts = int((utc_now() - timedelta(hours=8)).timestamp())
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        "symbol": ticker,
+        "resolution": "1",
+        "from": start_ts,
+        "to": end_ts,
+        "token": FINNHUB_API_KEY,
+    }
+    resp = http_get(url, source="finnhub_candles", params=params, timeout=min(HTTP_TIMEOUT, 2.5))
+    data = parse_json_response(resp, "finnhub_candles")
+    if not isinstance(data, dict) or data.get("s") != "ok":
+        return []
+
+    ts_list = data.get("t") or []
+    opens = data.get("o") or []
+    highs = data.get("h") or []
+    lows = data.get("l") or []
+    closes = data.get("c") or []
+    vols = data.get("v") or []
+
+    candles: List[Candle] = []
+    n = min(len(ts_list), len(opens), len(highs), len(lows), len(closes), len(vols))
+    for i in range(n):
+        o = safe_float(opens[i])
+        h = safe_float(highs[i])
+        l = safe_float(lows[i])
+        c = safe_float(closes[i])
+        v = safe_int(vols[i])
+        if o <= 0 or h <= 0 or l <= 0 or c <= 0:
+            continue
+        try:
+            ts = datetime.fromtimestamp(int(ts_list[i]), tz=timezone.utc).astimezone(EASTERN_TZ)
+        except Exception:
+            ts = now_et()
+        candles.append(Candle(ts, o, h, l, c, v))
+
+    log.info("[CANDLES] %s Finnhub %s bars age=%s", ticker, len(candles), candle_age_seconds(candles))
     return candles
 
 
 def best_candles(ticker: str) -> List[Candle]:
+    """Best available 1-minute candle set.
+
+    Priority is not just source order. It checks:
+    - enough bars
+    - last candle age
+    - fallback source freshness
+
+    This fixes cases where Alpaca IEX only returns a few bars on hot small caps.
+    """
     ticker = normalize_ticker(ticker)
     cached = CANDLE_CACHE.get(ticker)
     if cached:
@@ -869,13 +959,35 @@ def best_candles(ticker: str) -> List[Candle]:
         if time.time() - ts <= CANDLE_CACHE_TTL_SECONDS and candles:
             return candles
 
-    candles = get_alpaca_candles(ticker)
-    if len(candles) < 20:
-        candles = get_yahoo_candles(ticker)
+    candidates: List[Tuple[str, List[Candle]]] = []
 
-    if candles:
-        CANDLE_CACHE[ticker] = (time.time(), candles)
+    # Alpaca first, but IEX can be thin on runners.
+    alpaca = get_alpaca_candles(ticker)
+    if alpaca:
+        candidates.append(("Alpaca", alpaca))
 
+    # Yahoo often fills missing small-cap bars better.
+    yahoo_needed = not candles_fresh_enough(alpaca)
+    if yahoo_needed:
+        yahoo = get_yahoo_candles(ticker)
+        if yahoo:
+            candidates.append(("Yahoo", yahoo))
+
+    # Finnhub final fallback/validator when Yahoo or Alpaca is sparse/stale.
+    best_so_far = max((c for _, c in candidates), key=candle_source_rank, default=[])
+    if not candles_fresh_enough(best_so_far):
+        finnhub = get_finnhub_candles(ticker)
+        if finnhub:
+            candidates.append(("Finnhub", finnhub))
+
+    if not candidates:
+        return []
+
+    source, candles = max(candidates, key=lambda item: candle_source_rank(item[1]))
+    age = candle_age_seconds(candles)
+    log.info("[CANDLES BEST] %s source=%s bars=%s age=%s", ticker, source, len(candles), age)
+
+    CANDLE_CACHE[ticker] = (time.time(), candles)
     return candles
 
 
@@ -903,6 +1015,9 @@ def detect_higher_lows(candles: Sequence[Candle], lookback: int = 8) -> bool:
 def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
     if len(candles) < 8 or quote.price <= 0:
         return Structure(data_ok=False, reason="not enough candles", setup_label="NO DATA")
+    age = candle_age_seconds(candles)
+    if age is not None and age > CANDLE_MAX_AGE_SECONDS:
+        return Structure(data_ok=False, reason=f"stale candles {age}s", setup_label="STALE DATA")
 
     vwap = calc_vwap(candles)
     recent_volume = sum(c.volume for c in candles[-5:])
@@ -1217,6 +1332,29 @@ def summarize_news(headline: str) -> str:
     return h[:90]
 
 
+def setup_alert_label(d: CandidateDecision) -> str:
+    """Short public-facing setup label. Keeps alert fast to read."""
+    s = d.structure or Structure()
+    if d.alert_type == "FAST SPIKE":
+        return "🔥 Fast Spike"
+    if s.above_vwap and s.higher_lows and s.near_hod:
+        return "🟢 A+ VWAP Hold"
+    if s.above_vwap and s.breakout:
+        return "🟢 Breakout Push"
+    if s.above_vwap and s.last3_change_pct >= 3:
+        return "🟢 Live Momentum"
+    if s.above_vwap:
+        return "🟢 Above VWAP"
+    return "⚠️ Check VWAP"
+
+
+def compact_float_bonus(float_shares: Optional[float]) -> int:
+    """Float comes back as millions from Finnhub profile2 in this file."""
+    if float_shares and 0 < float_shares <= LOW_FLOAT_BONUS_MAX_M:
+        return 1
+    return 0
+
+
 # =============================================================================
 # DECISION ENGINE
 # =============================================================================
@@ -1272,13 +1410,20 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
     gain = max(quote.change_pct, leader.change_pct)
     vol = max(quote.day_volume, leader.volume)
 
+    # Leader strength
     if gain >= 25:
         score += 2
     if gain >= 35:
         score += 1
     if gain >= 50:
         score += 1
-    if vol >= 1_000_000:
+    if gain >= 100:
+        score += 1
+
+    # Liquidity / attention
+    if vol >= 5_000_000:
+        score += 3
+    elif vol >= 1_000_000:
         score += 2
     elif vol >= 300_000:
         score += 1
@@ -1286,6 +1431,7 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
     rvol_bonus, _ = relative_volume_score(vol)
     score += rvol_bonus
 
+    # Structure
     if structure.above_vwap:
         score += 1
     if structure.higher_lows:
@@ -1294,15 +1440,23 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
         score += 1
     if structure.breakout or structure.last3_change_pct >= 3:
         score += 1
+
+    # Low float deserves a small bump, but not enough to override terrible structure.
+    score += compact_float_bonus(leader.float_shares)
+
+    # News helps but unknown catalyst does not kill major leaders.
     if news.grade == "STRONG":
         score += 1
-    if news.grade == "JUNK":
+    elif news.grade == "JUNK" and gain < 50:
         score -= 1
 
+    # Risk penalties
     if quote.price < MIN_PRICE or quote.price > MAX_PRICE:
         score -= 3
     if structure.vwap and quote.price < structure.vwap * 0.96:
         score -= 2
+    if structure.data_ok and structure.extended_from_vwap_pct >= 30 and not structure.near_hod:
+        score -= 1
 
     return int(clamp(score, 0, 10))
 
@@ -1334,6 +1488,7 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
     high_push_pct = pct_change(structure.hod or quote.price, st.last_alert_high) if st.last_alert_high > 0 else 0.0
     quality_upgrade = quality >= st.last_quality + 2
 
+    # Fast spike re-alert requires a true fresh push.
     if alert_type == "FAST SPIKE":
         return (
             seconds_since >= FAST_SPIKE_REALERT_SECONDS
@@ -1343,9 +1498,12 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
             )
         )
 
+    # Setup upgrade can re-alert after a shorter delay if the chart meaningfully improves.
+    setup_upgrade = alert_type in {"A+ VWAP HOLD", "BREAKOUT PUSH"} and st.last_alert_type not in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
+
     cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
     meaningful_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
-    return cooldown_done and (meaningful_push or quality_upgrade)
+    return (cooldown_done and (meaningful_push or quality_upgrade)) or (seconds_since >= 600 and setup_upgrade)
 
 
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
@@ -1395,21 +1553,13 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         )
 
     candles = best_candles(ticker)
-    structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
+    structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles", setup_label="NO DATA")
 
     news = best_news(ticker) if should_check_news(ticker) else NewsResult(
         grade="NONE",
         headline="UNKNOWN CATALYST — INVESTIGATE",
         source="skipped",
     )
-
-    quality = quality_score(leader, quote, structure, news)
-
-    # Huge leader override so real movers do not get buried by unknown news.
-    if gain >= 150:
-        quality = max(quality, 9)
-    elif gain >= 100:
-        quality = max(quality, 8)
 
     _, rvol_label = relative_volume_score(day_vol)
     reasons.append(rvol_label)
@@ -1418,7 +1568,6 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     spike_from_base = pct_change(quote.price, st.baseline_price) if st.baseline_price > 0 else 0.0
 
     if spike_from_base >= FAST_SPIKE_PCT:
-        quality = int(clamp(quality + FAST_SPIKE_QUALITY_BONUS, 0, 10))
         reasons.append(f"fast +{spike_from_base:.1f}% push")
 
     if structure.reason:
@@ -1437,25 +1586,57 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         risks.append(news.dilution_note or "dilution language")
     if structure.data_ok and not structure.above_vwap:
         risks.append("not above VWAP")
+    if structure.extended_from_vwap_pct >= MAX_EXTENDED_FROM_VWAP_WARN_PCT:
+        risks.append(f"extended +{structure.extended_from_vwap_pct:.0f}% from VWAP")
+    if not structure.data_ok:
+        risks.append(structure.reason or "structure data weak")
+
+    quality = quality_score(leader, quote, structure, news)
+
+    # Massive gainers should stay visible.
+    if gain >= 150:
+        quality = max(quality, 9)
+    elif gain >= 100:
+        quality = max(quality, 8)
+
+    if spike_from_base >= FAST_SPIKE_PCT:
+        quality = int(clamp(quality + FAST_SPIKE_QUALITY_BONUS, 0, 10))
 
     alert_type = ""
 
-    # Only 3 clean public alert types.
-    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
+    # 1) The important trigger: a leader making a fresh +10% jump.
+    # Do not let perfect structure requirements hide this.
+    if (
+        gain >= MIN_ALERT_GAIN_PCT
+        and spike_from_base >= FAST_SPIKE_PCT
+        and day_vol >= MIN_FAST_SPIKE_DAY_VOLUME
+    ):
         alert_type = "FAST SPIKE"
-    elif spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
-        alert_type = "FAST SPIKE"
-    elif gain >= MAJOR_LEADER_GAIN_PCT and day_vol >= MIN_DAY_VOLUME:
+
+    # 2) Major leader awareness. Above VWAP preferred, but huge leaders still matter.
+    elif gain >= MAJOR_LEADER_GAIN_PCT and day_vol >= MIN_MARKET_LEADER_DAY_VOLUME:
         alert_type = "MARKET LEADER"
-    elif gain >= 35 and structure.last3_change_pct >= 3:
+
+    # 3) Clean chart setups.
+    elif structure.data_ok and structure.above_vwap and structure.breakout and day_vol >= MIN_DAY_VOLUME:
+        alert_type = "BREAKOUT PUSH"
+
+    elif structure.data_ok and structure.above_vwap and structure.higher_lows and structure.near_hod and day_vol >= MIN_DAY_VOLUME:
+        alert_type = "A+ VWAP HOLD"
+
+    elif gain >= 35 and structure.data_ok and structure.above_vwap and structure.last3_change_pct >= 3:
         alert_type = "LIVE PUSH"
 
-    required_quality = MIN_FAST_SPIKE_QUALITY if alert_type == "FAST SPIKE" else MIN_ALERT_QUALITY
-    if alert_type == "MARKET LEADER" and gain >= MAJOR_LEADER_GAIN_PCT:
-        required_quality = min(required_quality, MARKET_LEADER_OVERRIDE_QUALITY)
+    # Quality gates by type.
+    if alert_type == "FAST SPIKE":
+        required_quality = MIN_FAST_SPIKE_QUALITY
+    elif alert_type == "MARKET LEADER":
+        required_quality = 5 if gain >= 75 else MIN_ALERT_QUALITY
+    else:
+        required_quality = MIN_ALERT_QUALITY
 
-    # Avoid weak non-spike alerts below VWAP. Fast spikes can still surface but show Check VWAP.
-    if alert_type in {"MARKET LEADER", "LIVE PUSH"} and structure.data_ok and not structure.above_vwap:
+    # Avoid weak setup alerts below VWAP. Keep true leader/spike awareness.
+    if alert_type in {"BREAKOUT PUSH", "A+ VWAP HOLD", "LIVE PUSH"} and structure.data_ok and not structure.above_vwap:
         alert_type = ""
 
     should = bool(alert_type) and quality >= required_quality and is_meaningful_realert(
@@ -1466,11 +1647,20 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         quality,
     )
 
-    if should:
-        log.info(
-            "[SCORE] %s type=%s quality=%s gain=%.1f spike=%.1f structure=%s news=%s risks=%s",
-            ticker, alert_type, quality, gain, spike_from_base, structure.reason, news.grade, "|".join(risks)
-        )
+    log.info(
+        "[CHECK] %s type=%s alert=%s q=%s req=%s gain=%.1f spike=%.1f vol=%s structure=%s news=%s risks=%s",
+        ticker,
+        alert_type or "NONE",
+        should,
+        quality,
+        required_quality if alert_type else "-",
+        gain,
+        spike_from_base,
+        day_vol,
+        structure.reason,
+        news.grade,
+        "|".join(risks),
+    )
 
     return CandidateDecision(
         ticker=ticker,
@@ -1498,27 +1688,33 @@ def format_alert(d: CandidateDecision) -> str:
 
     gain = max(q.change_pct, d.leader.change_pct if d.leader else 0)
     float_txt = format_float_shares(d.leader.float_shares if d.leader else None)
+    setup_line = setup_alert_label(d)
 
     if d.spike_pct >= FAST_SPIKE_PCT:
         action_line = f"🔥 +{d.spike_pct:.1f}% Spike"
     elif d.alert_type == "MARKET LEADER":
         action_line = "🚀 Market Leader"
+    elif d.alert_type == "BREAKOUT PUSH":
+        action_line = "📈 Breakout Push"
+    elif d.alert_type == "A+ VWAP HOLD":
+        action_line = "🟢 VWAP Hold"
     else:
         action_line = "📈 Live Push"
 
-    setup_line = f"🟢 {s.setup_label}" if s.above_vwap else f"⚠️ {s.setup_label}"
     news_line = summarize_news(clean_news_text(n))
 
     check_parts = []
     if s.above_vwap:
         check_parts.append("hold VWAP")
+    else:
+        check_parts.append("confirm VWAP")
     if s.near_hod:
         check_parts.append("HOD push")
     elif s.recent_high:
         check_parts.append("clear recent high")
-    if s.extended_from_vwap_pct >= 18:
+    if s.extended_from_vwap_pct >= MAX_EXTENDED_FROM_VWAP_WARN_PCT:
         check_parts.append("extended")
-    check_line = " | ".join(check_parts[:2]) if check_parts else "confirm chart"
+    check_line = " | ".join(check_parts[:2])
 
     return f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
 
@@ -1599,7 +1795,7 @@ def run_scan_cycle() -> Dict[str, Any]:
     alertable = [d for d in decisions if d.should_alert]
 
     def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
-        type_rank = 3 if d.alert_type == "FAST SPIKE" else 2 if d.alert_type == "MARKET LEADER" else 1
+        type_rank = 5 if d.alert_type == "FAST SPIKE" else 4 if d.alert_type == "A+ VWAP HOLD" else 3 if d.alert_type == "BREAKOUT PUSH" else 2 if d.alert_type == "MARKET LEADER" else 1
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
         return (type_rank, d.quality, gain_rank, vol_rank)
