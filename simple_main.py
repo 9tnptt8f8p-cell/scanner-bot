@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v52-all-fixes-clean-leader-scanner"
+VERSION = "v53-fast-spike-bypass-reclaim-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -86,6 +86,8 @@ MAX_EXTENDED_FROM_VWAP_WARN_PCT = float(os.getenv("MAX_EXTENDED_FROM_VWAP_WARN_P
 
 MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
+FRESH_LEADER_REPUSH_PCT = float(os.getenv("FRESH_LEADER_REPUSH_PCT", "5"))
+FRESH_LEADER_REALERT_SECONDS = int(os.getenv("FRESH_LEADER_REALERT_SECONDS", "300"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
 
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
@@ -95,7 +97,7 @@ LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "20"))
-CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "180"))
+CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "60"))
 MIN_GOOD_CANDLES = int(os.getenv("MIN_GOOD_CANDLES", "20"))
 PROFILE_CACHE_TTL_SECONDS = int(os.getenv("PROFILE_CACHE_TTL_SECONDS", "1800"))
 
@@ -197,6 +199,7 @@ class Structure:
     extended_from_vwap_pct: float = 0.0
     holding_recent_low: bool = False
     setup_label: str = "CHECK CHART"
+    below_vwap_reclaim_watch: bool = False
     data_ok: bool = False
     reason: str = ""
 
@@ -1032,6 +1035,12 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
     breakout = bool(recent_high and quote.price >= recent_high * 1.005 and recent_volume >= MIN_RECENT_VOLUME)
     extended_from_vwap_pct = pct_change(quote.price, vwap) if vwap else 0.0
     holding_recent_low = bool(last5_low and quote.price >= last5_low * 1.015)
+    below_vwap_reclaim_watch = bool(
+        vwap
+        and quote.price < vwap
+        and quote.price >= vwap * 0.97
+        and (higher_lows or last3_change >= 3)
+    )
 
     if above_vwap and higher_lows and near_hod:
         setup_label = "A+ VWAP HOLD"
@@ -1041,6 +1050,8 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
         setup_label = "LIVE MOMENTUM"
     elif above_vwap:
         setup_label = "ABOVE VWAP"
+    elif below_vwap_reclaim_watch:
+        setup_label = "RECLAIM WATCH"
     else:
         setup_label = "CHECK VWAP"
 
@@ -1072,6 +1083,7 @@ def analyze_structure(candles: Sequence[Candle], quote: Quote) -> Structure:
         extended_from_vwap_pct=extended_from_vwap_pct,
         holding_recent_low=holding_recent_low,
         setup_label=setup_label,
+        below_vwap_reclaim_watch=below_vwap_reclaim_watch,
         data_ok=True,
         reason=" + ".join(reasons) if reasons else "structure neutral",
     )
@@ -1345,6 +1357,8 @@ def setup_alert_label(d: CandidateDecision) -> str:
         return "🟢 Live Momentum"
     if s.above_vwap:
         return "🟢 Above VWAP"
+    if getattr(s, "below_vwap_reclaim_watch", False):
+        return "🟡 Reclaim Watch"
     return "⚠️ Check VWAP"
 
 
@@ -1488,15 +1502,22 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
     high_push_pct = pct_change(structure.hod or quote.price, st.last_alert_high) if st.last_alert_high > 0 else 0.0
     quality_upgrade = quality >= st.last_quality + 2
 
-    # Fast spike re-alert requires a true fresh push.
+    # CRITICAL FIX:
+    # If a leader makes a real fresh +10% fast spike, do NOT let old market-leader
+    # cooldown logic hide it. This was blocking names like WCT in logs.
     if alert_type == "FAST SPIKE":
-        return (
-            seconds_since >= FAST_SPIKE_REALERT_SECONDS
-            and (
-                price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
-                or high_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
-            )
-        )
+        if seconds_since < 60:
+            return False
+        return True
+
+    # Big leaders can re-alert faster on a fresh +5% push/new high.
+    if alert_type == "MARKET LEADER":
+        if seconds_since >= FRESH_LEADER_REALERT_SECONDS and (
+            price_push_pct >= FRESH_LEADER_REPUSH_PCT
+            or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
+            or quality_upgrade
+        ):
+            return True
 
     # Setup upgrade can re-alert after a shorter delay if the chart meaningfully improves.
     setup_upgrade = alert_type in {"A+ VWAP HOLD", "BREAKOUT PUSH"} and st.last_alert_type not in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
@@ -1627,11 +1648,23 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     elif gain >= 35 and structure.data_ok and structure.above_vwap and structure.last3_change_pct >= 3:
         alert_type = "LIVE PUSH"
 
+    # High-quality below-VWAP leaders get a reclaim-watch alert instead of disappearing.
+    elif (
+        gain >= 40
+        and day_vol >= 5_000_000
+        and structure.data_ok
+        and structure.below_vwap_reclaim_watch
+        and news.grade in {"STRONG", "WEAK"}
+    ):
+        alert_type = "RECLAIM WATCH"
+
     # Quality gates by type.
     if alert_type == "FAST SPIKE":
         required_quality = MIN_FAST_SPIKE_QUALITY
     elif alert_type == "MARKET LEADER":
         required_quality = 5 if gain >= 75 else MIN_ALERT_QUALITY
+    elif alert_type == "RECLAIM WATCH":
+        required_quality = 7
     else:
         required_quality = MIN_ALERT_QUALITY
 
@@ -1698,6 +1731,8 @@ def format_alert(d: CandidateDecision) -> str:
         action_line = "📈 Breakout Push"
     elif d.alert_type == "A+ VWAP HOLD":
         action_line = "🟢 VWAP Hold"
+    elif d.alert_type == "RECLAIM WATCH":
+        action_line = "🟡 Wait for Reclaim"
     else:
         action_line = "📈 Live Push"
 
@@ -1706,6 +1741,8 @@ def format_alert(d: CandidateDecision) -> str:
     check_parts = []
     if s.above_vwap:
         check_parts.append("hold VWAP")
+    elif getattr(s, "below_vwap_reclaim_watch", False):
+        check_parts.append("reclaim VWAP")
     else:
         check_parts.append("confirm VWAP")
     if s.near_hod:
@@ -1795,7 +1832,7 @@ def run_scan_cycle() -> Dict[str, Any]:
     alertable = [d for d in decisions if d.should_alert]
 
     def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
-        type_rank = 5 if d.alert_type == "FAST SPIKE" else 4 if d.alert_type == "A+ VWAP HOLD" else 3 if d.alert_type == "BREAKOUT PUSH" else 2 if d.alert_type == "MARKET LEADER" else 1
+        type_rank = 6 if d.alert_type == "FAST SPIKE" else 5 if d.alert_type == "A+ VWAP HOLD" else 4 if d.alert_type == "BREAKOUT PUSH" else 3 if d.alert_type == "MARKET LEADER" else 2 if d.alert_type == "RECLAIM WATCH" else 1
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
         return (type_rank, d.quality, gain_rank, vol_rank)
