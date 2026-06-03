@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-simple_main_v43_clean_rebuild.py
+simple_main_v47_leader_hunter.py
 
 Clean leader-first momentum scanner rebuild.
 
@@ -10,7 +10,7 @@ Goal:
 - No alerts under 25% gain.
 - No PST/fade/backside/watchlist clutter.
 - Keep dilution/news as awareness, not automatic rejection.
-- Alert only when a leader is moving now, setting up cleanly, or making a fast +10% push.
+- Alert only when a leader is fresh, moving now, setting up cleanly, or making a fast +10% push.
 
 Deploy notes:
 - Designed for Render web service with Flask health endpoint on PORT.
@@ -52,15 +52,15 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v46-spike-memory-spam-quote-fix"
+VERSION = "v47-leader-hunter-fresh-rvol"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "12"))
-NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "5"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "25"))
+NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "15"))
 
 MIN_ALERT_GAIN_PCT = float(os.getenv("MIN_ALERT_GAIN_PCT", "25"))
 MIN_SCAN_GAIN_PCT = float(os.getenv("MIN_SCAN_GAIN_PCT", "20"))
@@ -73,6 +73,10 @@ FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
 FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
 FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "300"))
 FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
+FAST_SPIKE_QUALITY_BONUS = int(os.getenv("FAST_SPIKE_QUALITY_BONUS", "2"))
+FRESH_LEADER_WINDOW_SECONDS = int(os.getenv("FRESH_LEADER_WINDOW_SECONDS", "900"))
+FRESH_LEADER_MIN_VOLUME = int(os.getenv("FRESH_LEADER_MIN_VOLUME", "500000"))
+MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
@@ -221,6 +225,7 @@ SOURCE_BLOCKED_UNTIL: Dict[str, float] = {}
 LAST_GOOD_LEADERS: List[Leader] = []
 LAST_GOOD_LEADERS_TS: float = 0.0
 ALERT_STATES: Dict[str, AlertState] = {}
+FIRST_SEEN: Dict[str, Dict[str, float]] = {}
 RUNNING = True
 LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
 QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
@@ -293,6 +298,37 @@ def pct_change(new: float, old: float) -> float:
     if old <= 0:
         return 0.0
     return ((new - old) / old) * 100.0
+
+
+def market_minutes_elapsed(dt: Optional[datetime] = None) -> int:
+    dt = dt or now_et()
+    mins = dt.hour * 60 + dt.minute
+    start = 4 * 60 if mins < 9 * 60 + 30 else 9 * 60 + 30
+    return max(1, mins - start + 1)
+
+
+def relative_volume_score(day_volume: int, dt: Optional[datetime] = None) -> Tuple[int, str]:
+    """Time-adjusted volume pressure. Early volume gets more credit than same volume late day."""
+    mins = market_minutes_elapsed(dt)
+    expected_by_time = max(100_000, mins * 7_500)
+    ratio = day_volume / expected_by_time if expected_by_time > 0 else 0.0
+    if ratio >= 5 or day_volume >= 5_000_000:
+        return 2, f"rVol hot {ratio:.1f}x"
+    if ratio >= 2 or day_volume >= 1_000_000:
+        return 1, f"rVol strong {ratio:.1f}x"
+    return 0, f"rVol {ratio:.1f}x"
+
+
+def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
+    ticker = normalize_ticker(leader.ticker)
+    gain = max(quote.change_pct, leader.change_pct)
+    now = time.time()
+    row = FIRST_SEEN.get(ticker)
+    if not row:
+        FIRST_SEEN[ticker] = {"gain": gain, "ts": now, "price": quote.price}
+        return True, 0.0
+    age = now - float(row.get("ts", now))
+    return age <= FRESH_LEADER_WINDOW_SECONDS, age
 
 
 def clamp(n: float, low: float, high: float) -> float:
@@ -978,6 +1014,8 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
     if gain >= 50: score += 1
     if vol >= 1_000_000: score += 2
     elif vol >= 300_000: score += 1
+    rvol_bonus, _ = relative_volume_score(vol)
+    score += rvol_bonus
     if structure.above_vwap: score += 1
     if structure.higher_lows: score += 1
     if structure.near_hod: score += 1
@@ -1027,7 +1065,7 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
         )
 
     cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
-    meaningful_push = price_push_pct >= MEANINGFUL_NEW_HIGH_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
+    meaningful_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
     return cooldown_done and (meaningful_push or quality_upgrade)
 
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
@@ -1065,6 +1103,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
     news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="NO VERIFIED CATALYST", source="skipped")
     quality = quality_score(leader, quote, structure, news)
+    fresh_leader, first_seen_age = remember_first_seen(leader, quote)
+    rvol_bonus, rvol_label = relative_volume_score(max(quote.day_volume, leader.volume))
 
     # Market-leader override: huge gainers should not be buried just because news is unknown.
     gain = max(quote.change_pct, leader.change_pct)
@@ -1075,8 +1115,12 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     st = update_baseline(ticker, quote.price)
     spike_from_base = pct_change(quote.price, st.baseline_price) if st.baseline_price > 0 else 0.0
+    if spike_from_base >= FAST_SPIKE_PCT:
+        quality = int(clamp(quality + FAST_SPIKE_QUALITY_BONUS, 0, 10))
 
     day_vol = max(quote.day_volume, leader.volume)
+    if rvol_bonus > 0:
+        reasons.append(rvol_label)
     if day_vol < MIN_DAY_VOLUME and gain < MAJOR_LEADER_GAIN_PCT:
         risks.append("light total volume")
     if news.grade in {"NONE", "JUNK"} and gain >= 35:
@@ -1087,7 +1131,10 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         risks.append("not above VWAP")
 
     alert_type = ""
-    if gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
+    if fresh_leader and first_seen_age <= FRESH_LEADER_WINDOW_SECONDS and gain >= MIN_ALERT_GAIN_PCT and day_vol >= FRESH_LEADER_MIN_VOLUME:
+        alert_type = "FRESH LEADER"
+        reasons.append(f"fresh leader first seen {int(first_seen_age // 60)}m ago")
+    elif gain >= 50 and spike_from_base >= FAST_SPIKE_PCT and structure.above_vwap:
         alert_type = "FAST LEADER SPIKE"
         reasons.append(f"fast +{spike_from_base:.1f}% push")
     elif spike_from_base >= FAST_SPIKE_PCT and structure.recent_volume >= MIN_RECENT_VOLUME:
@@ -1158,7 +1205,8 @@ def format_alert(d: CandidateDecision) -> str:
     n = d.news or NewsResult()
     vol = max(q.day_volume, d.leader.volume if d.leader else 0)
     gain = max(q.change_pct, d.leader.change_pct if d.leader else 0)
-    title = f"🚀 {d.alert_type} — {d.ticker}"
+    emoji = "🔥" if d.alert_type == "FRESH LEADER" else "🚀"
+    title = f"{emoji} {d.alert_type} — {d.ticker}"
     lines = [
         title,
         "",
@@ -1236,7 +1284,7 @@ def run_scan_cycle() -> Dict[str, Any]:
     # Sort alertable by quality, gain, then volume.
     alertable = [d for d in decisions if d.should_alert]
     def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
-        type_rank = 3 if d.alert_type == "FAST LEADER SPIKE" else 2 if d.alert_type in {"BREAKOUT OVER HOD", "LIVE PUSH"} else 1
+        type_rank = 4 if d.alert_type == "FAST LEADER SPIKE" else 3 if d.alert_type == "FRESH LEADER" else 2 if d.alert_type in {"BREAKOUT OVER HOD", "LIVE PUSH"} else 1
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = d.quote.day_volume if d.quote else 0
         return (type_rank, d.quality, gain_rank, vol_rank)
@@ -1250,7 +1298,7 @@ def run_scan_cycle() -> Dict[str, Any]:
             alerts.append(d.ticker)
             sent += 1
         else:
-            log.warning("[ALERT FAILED] %s not delivered; cooldown not applied", d.ticker)
+            log.error("[ALERT LOST] %s not delivered; cooldown not applied", d.ticker)
 
     elapsed = round(time.time() - started, 2)
     summary = {
@@ -1266,6 +1314,7 @@ def run_scan_cycle() -> Dict[str, Any]:
         "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
         "news_top_n": NEWS_TOP_N,
         "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
+        "first_seen_count": len(FIRST_SEEN),
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
     }
     log.info("[DELIVERY] attempted=%s delivered=%s", attempted, sent)
@@ -1319,6 +1368,7 @@ def build_app():
             "max_leaders_per_cycle": MAX_LEADERS_PER_CYCLE,
         "news_top_n": NEWS_TOP_N,
         "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
+        "first_seen_count": len(FIRST_SEEN),
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
         }
 
