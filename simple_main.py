@@ -21,6 +21,7 @@ Deploy notes:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import math
@@ -52,7 +53,7 @@ except Exception:  # pragma: no cover
 # CONFIG
 # =============================================================================
 
-VERSION = "v47-leader-hunter-fresh-rvol"
+VERSION = "v48-webull-news-fresh-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -226,6 +227,7 @@ LAST_GOOD_LEADERS: List[Leader] = []
 LAST_GOOD_LEADERS_TS: float = 0.0
 ALERT_STATES: Dict[str, AlertState] = {}
 FIRST_SEEN: Dict[str, Dict[str, float]] = {}
+FIRST_SEEN_INITIALIZED = False
 RUNNING = True
 LAST_CYCLE_SUMMARY: Dict[str, Any] = {}
 QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
@@ -319,6 +321,20 @@ def relative_volume_score(day_volume: int, dt: Optional[datetime] = None) -> Tup
     return 0, f"rVol {ratio:.1f}x"
 
 
+def initialize_first_seen(leaders: Sequence[Leader]) -> None:
+    """Seed first-seen memory on startup so the first scan does not spam every current leader."""
+    global FIRST_SEEN_INITIALIZED
+    if FIRST_SEEN_INITIALIZED or not leaders:
+        return
+    now = time.time()
+    for leader in leaders:
+        ticker = normalize_ticker(leader.ticker)
+        if ticker and ticker not in FIRST_SEEN:
+            FIRST_SEEN[ticker] = {"gain": leader.change_pct, "ts": now, "price": leader.price}
+    FIRST_SEEN_INITIALIZED = True
+    log.info("[FIRST SEEN] initialized with %s leaders", len(FIRST_SEEN))
+
+
 def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
     ticker = normalize_ticker(leader.ticker)
     gain = max(quote.change_pct, leader.change_pct)
@@ -326,7 +342,8 @@ def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
     row = FIRST_SEEN.get(ticker)
     if not row:
         FIRST_SEEN[ticker] = {"gain": gain, "ts": now, "price": quote.price}
-        return True, 0.0
+        # Only names that appear after startup memory is initialized qualify as fresh.
+        return FIRST_SEEN_INITIALIZED, 0.0
     age = now - float(row.get("ts", now))
     return age <= FRESH_LEADER_WINDOW_SECONDS, age
 
@@ -955,6 +972,70 @@ def get_yahoo_news(ticker: str) -> Optional[NewsResult]:
     return best
 
 
+def get_webull_news(ticker: str) -> Optional[NewsResult]:
+    """Best-effort Webull public web headline fallback.
+
+    This does not require a Webull API key. It scrapes Webull's public newslist pages
+    by exchange guess. If Webull changes the page shape, it safely returns None.
+    """
+    ticker = normalize_ticker(ticker)
+    if not ticker:
+        return None
+
+    candidates = [
+        f"https://www.webull.com/newslist/nasdaq-{ticker.lower()}",
+        f"https://www.webull.com/newslist/nyse-{ticker.lower()}",
+        f"https://www.webull.com/newslist/amex-{ticker.lower()}",
+        f"https://www.webullapp.com/newslist/nasdaq-{ticker.lower()}",
+        f"https://www.webullapp.com/newslist/nyse-{ticker.lower()}",
+        f"https://www.webullapp.com/newslist/amex-{ticker.lower()}",
+    ]
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.webull.com/",
+    }
+    rank = {"STRONG": 3, "WEAK": 2, "NONE": 1, "JUNK": 0}
+    best: Optional[NewsResult] = None
+
+    for url in candidates:
+        resp = http_get(url, source="webull_news", headers=headers, timeout=min(HTTP_TIMEOUT, 3.0))
+        if resp is None or not resp.text:
+            continue
+        text = resp.text
+        raw_titles = re.findall(r'"title"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', text)
+        if not raw_titles:
+            raw_titles = re.findall(r'<h[1-6][^>]*>(.*?)</h[1-6]>', text, flags=re.I | re.S)
+        for raw in raw_titles[:20]:
+            try:
+                headline = bytes(raw, "utf-8").decode("unicode_escape")
+            except Exception:
+                headline = raw
+            headline = re.sub(r"<[^>]+>", " ", headline)
+            headline = html.unescape(headline)
+            headline = re.sub(r"\s+", " ", headline).strip()
+            if len(headline) < 12 or ticker.lower() in {headline.lower(), headline.lower().replace(" ", "")}:
+                continue
+            if "webull" in headline.lower() and "news" in headline.lower() and len(headline) < 35:
+                continue
+            grade, dilution, dilution_note = classify_headline(headline)
+            nr = NewsResult(
+                grade=grade,
+                headline=headline,
+                source="Webull",
+                url=url,
+                dilution_flag=dilution,
+                dilution_note=dilution_note,
+            )
+            if best is None or rank.get(nr.grade, 0) > rank.get(best.grade, 0):
+                best = nr
+            if nr.grade == "STRONG":
+                return nr
+        if best and best.grade in {"STRONG", "WEAK"}:
+            return best
+    return best
+
+
 def best_news(ticker: str) -> NewsResult:
     """
     Return the best real catalyst headline. Junk aggregator headlines are never used as the displayed headline.
@@ -969,7 +1050,7 @@ def best_news(ticker: str) -> NewsResult:
 
     fallback_dilution = False
     fallback_dilution_note = ""
-    for fn in (get_finnhub_news, get_yahoo_news):
+    for fn in (get_finnhub_news, get_yahoo_news, get_webull_news):
         try:
             nr = fn(ticker)
             if not nr or not nr.headline:
@@ -986,7 +1067,7 @@ def best_news(ticker: str) -> NewsResult:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
     nr = NewsResult(
         grade="NONE",
-        headline="NO VERIFIED CATALYST",
+        headline="UNKNOWN CATALYST — INVESTIGATE",
         source="none",
         dilution_flag=fallback_dilution,
         dilution_note=fallback_dilution_note,
@@ -1101,7 +1182,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     candles = best_candles(ticker)
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles")
-    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="NO VERIFIED CATALYST", source="skipped")
+    news = best_news(ticker) if should_check_news(ticker) else NewsResult(grade="NONE", headline="UNKNOWN CATALYST — INVESTIGATE", source="skipped")
     quality = quality_score(leader, quote, structure, news)
     fresh_leader, first_seen_age = remember_first_seen(leader, quote)
     rvol_bonus, rvol_label = relative_volume_score(max(quote.day_volume, leader.volume))
@@ -1124,7 +1205,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     if day_vol < MIN_DAY_VOLUME and gain < MAJOR_LEADER_GAIN_PCT:
         risks.append("light total volume")
     if news.grade in {"NONE", "JUNK"} and gain >= 35:
-        risks.append("NO VERIFIED CATALYST")
+        risks.append("UNKNOWN CATALYST — INVESTIGATE")
     if news.dilution_flag:
         risks.append(news.dilution_note or "dilution language")
     if not structure.above_vwap and structure.data_ok:
@@ -1272,6 +1353,7 @@ def run_scan_cycle() -> Dict[str, Any]:
         return summary
 
     leaders = get_leaders()
+    initialize_first_seen(leaders)
     decisions: List[CandidateDecision] = []
     for leader in leaders[:MAX_LEADERS_PER_CYCLE]:
         checked += 1
@@ -1315,6 +1397,7 @@ def run_scan_cycle() -> Dict[str, Any]:
         "news_top_n": NEWS_TOP_N,
         "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
         "first_seen_count": len(FIRST_SEEN),
+        "first_seen_initialized": FIRST_SEEN_INITIALIZED,
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
     }
     log.info("[DELIVERY] attempted=%s delivered=%s", attempted, sent)
@@ -1369,6 +1452,7 @@ def build_app():
         "news_top_n": NEWS_TOP_N,
         "cache_sizes": {"quotes": len(QUOTE_CACHE), "news": len(NEWS_CACHE), "candles": len(CANDLE_CACHE)},
         "first_seen_count": len(FIRST_SEEN),
+        "first_seen_initialized": FIRST_SEEN_INITIALIZED,
         "blocked_sources": {k: max(0, int(v - time.time())) for k, v in SOURCE_BLOCKED_UNTIL.items() if v > time.time()},
         }
 
