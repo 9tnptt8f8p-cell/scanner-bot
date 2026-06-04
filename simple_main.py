@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v56-consensus-live-leaders-bad-data-guard"
+VERSION = "v58-scan-only-confirmed-leaders"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -63,7 +63,8 @@ MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
 MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "40"))
 MAX_LEADERS_FETCH = int(os.getenv("MAX_LEADERS_FETCH", "250"))
 VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "120"))
-EXTRA_TICKERS_RAW = os.getenv("EXTRA_TICKERS", "")
+ALLOW_SEED_ONLY_LEADERS = False  # scan-only: never trust unconfirmed seed/watchlist data
+REQUIRE_CONFIRMED_LEADER_DATA = os.getenv("REQUIRE_CONFIRMED_LEADER_DATA", "true").lower() in {"1", "true", "yes", "y"}
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "12"))
 MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
 MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "5"))
@@ -821,34 +822,16 @@ def get_finnhub_movers_seed() -> List[Leader]:
 
 
 
-def extra_tickers() -> List[str]:
-    """Manual emergency seed list via Render env EXTRA_TICKERS=FOXX,STI,WCT.
-    This is not required, but gives you a panic button when a screener feed lags.
-    """
-    out: List[str] = []
-    for raw in EXTRA_TICKERS_RAW.split(','):
-        t = normalize_ticker(raw)
-        if t and t not in out and not is_probably_warrant_or_unit(t):
-            out.append(t)
-    return out
-
-
-def get_extra_ticker_seeds() -> List[Leader]:
-    out: List[Leader] = []
-    for t in extra_tickers():
-        q = get_finnhub_quote(t)
-        if q and q.change_pct >= MIN_SCAN_GAIN_PCT:
-            out.append(Leader(ticker=t, price=q.price, change_pct=q.change_pct, volume=q.day_volume, source='extra_live'))
-    if out:
-        log.info("[EXTRA LIVE SEEDS] %s", ','.join(f"{x.ticker}:{x.change_pct:.1f}%" for x in out))
-    return out
-
-
 
 def get_yahoo_quote_snapshot(ticker: str) -> Optional[Quote]:
-    """Fresh Yahoo chart/meta quote used to prevent bad Finnhub/Nasdaq % data.
+    """Fresh Yahoo chart quote used as the hard data validator.
 
-    If Yahoo chart is fresh, it gives price, previous close/chartPreviousClose, volume and day high.
+    v58 fix:
+    - Do not rely only on screener % gain.
+    - Pull the actual 1m chart.
+    - Use last valid close as current price.
+    - Use chartPreviousClose/previousClose as base.
+    - Require a fresh last candle, unless the chart only gives metadata.
     """
     ticker = normalize_ticker(ticker)
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -858,66 +841,98 @@ def get_yahoo_quote_snapshot(ticker: str) -> Optional[Quote]:
     try:
         result = data["chart"]["result"][0]
         meta = result.get("meta") or {}
+        timestamps = result.get("timestamp") or []
+        q = (result.get("indicators") or {}).get("quote") or [{}]
+        quote = q[0] if q else {}
     except Exception:
         return None
 
-    price = safe_float(meta.get("regularMarketPrice") or meta.get("previousClose"))
+    closes = quote.get("close") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    vols = quote.get("volume") or []
+
+    last_i = None
+    for i in range(min(len(closes), len(timestamps)) - 1, -1, -1):
+        c = safe_float(closes[i])
+        if c > 0:
+            last_i = i
+            break
+
+    price = safe_float(meta.get("regularMarketPrice"))
+    if (price <= 0 or last_i is not None) and last_i is not None:
+        # Last chart close is usually fresher than regularMarketPrice on hot movers.
+        price = safe_float(closes[last_i], price)
+
     prev = safe_float(meta.get("chartPreviousClose") or meta.get("previousClose"))
     high = safe_float(meta.get("regularMarketDayHigh"))
     low = safe_float(meta.get("regularMarketDayLow"))
     vol = safe_int(meta.get("regularMarketVolume"))
+
+    if last_i is not None:
+        try:
+            last_ts = datetime.fromtimestamp(int(timestamps[last_i]), tz=timezone.utc).astimezone(EASTERN_TZ)
+            age = int((now_et() - last_ts).total_seconds())
+            if age > max(CANDLE_MAX_AGE_SECONDS * 2, 150):
+                log.info("[YAHOO VERIFY STALE] %s age=%ss", ticker, age)
+                return None
+        except Exception:
+            pass
+        if highs:
+            high = max(high, max(safe_float(x) for x in highs if safe_float(x) > 0) if any(safe_float(x) > 0 for x in highs) else high)
+        if lows:
+            valid_lows = [safe_float(x) for x in lows if safe_float(x) > 0]
+            if valid_lows:
+                low = min([x for x in [low] if x > 0] + valid_lows)
+        if vols:
+            vol = max(vol, sum(safe_int(x) for x in vols))
+
     gain = pct_change(price, prev)
     if price <= 0 or prev <= 0 or gain < -95 or gain > 2000:
         return None
-    return Quote(ticker=ticker, price=price, prev_close=prev, change_pct=gain, day_volume=vol, high=high, low=low, source="yahoo_verify")
+    return Quote(ticker=ticker, price=price, prev_close=prev, change_pct=gain, day_volume=vol, high=high, low=low, source="yahoo_verify_chart")
 
 
 def consensus_live_leader(leader: Leader) -> Optional[Leader]:
-    """Return a verified leader or None.
+    """Return a hard-confirmed live leader or None.
 
-    Bad data fix:
-    - Do not blindly trust Nasdaq/Yahoo/Finnhub percent gain.
-    - Prefer fresh Yahoo chart/meta percent when available.
-    - If Finnhub and Yahoo disagree badly, use Yahoo and flag the source.
-    - If only one source exists, keep it only if it passes basic sanity + candle/price range.
+    v57 rules:
+    - Yahoo fresh chart confirmation wins.
+    - Finnhub can confirm only when Yahoo is unavailable.
+    - Screener/seed-only data is dropped by default because it caused wrong names.
+    - Seed-only/manual/watchlist data is disabled. Only scanned leaders confirmed by fresh chart data survive.
     """
     ticker = normalize_ticker(leader.ticker)
     if not ticker or is_probably_warrant_or_unit(ticker):
         return None
 
-    fin = get_finnhub_quote(ticker) if FINNHUB_API_KEY else None
     yah = get_yahoo_quote_snapshot(ticker)
+    fin = None
+    if not yah and FINNHUB_API_KEY and source_allowed("finnhub"):
+        fin = get_finnhub_quote(ticker)
 
-    gains = []
-    if yah and yah.change_pct >= MIN_SCAN_GAIN_PCT:
-        gains.append(("yahoo", yah.change_pct, yah))
-    if fin and fin.change_pct >= MIN_SCAN_GAIN_PCT:
-        gains.append(("finnhub", fin.change_pct, fin))
-    if leader.change_pct >= MIN_SCAN_GAIN_PCT and leader.price > 0:
-        gains.append((leader.source, leader.change_pct, None))
-
-    if not gains:
-        return None
-
-    # Fresh Yahoo chart/meta wins because it prevents stale screener/bad Finnhub pct issues.
     if yah and yah.change_pct >= MIN_SCAN_GAIN_PCT:
         chosen = yah
         source = f"{leader.source}+yahoo_confirmed"
-        # If Finnhub disagrees massively, note it in source instead of using Finnhub's bad gain.
-        if fin and abs(fin.change_pct - yah.change_pct) >= 35:
-            source += "+finnhub_disagree"
     elif fin and fin.change_pct >= MIN_SCAN_GAIN_PCT:
         chosen = fin
-        source = f"{leader.source}+finnhub_only"
-    else:
-        # Last resort seed only. This should be rare.
+        source = f"{leader.source}+finnhub_confirmed"
+    elif ALLOW_SEED_ONLY_LEADERS and leader.change_pct >= MIN_SCAN_GAIN_PCT and leader.price > 0:
         chosen = Quote(ticker=ticker, price=leader.price, change_pct=leader.change_pct, day_volume=leader.volume, source=leader.source)
-        source = f"{leader.source}+seed_only"
+        source = f"{leader.source}+seed_only_ALLOWED"
+    else:
+        log.info("[UNCONFIRMED LEADER DROP] %s source=%s seed_gain=%.1f", ticker, leader.source, leader.change_pct)
+        return None
 
     if chosen.price <= 0 or not (MIN_PRICE <= chosen.price <= MAX_PRICE):
+        log.info("[BAD PRICE DROP] %s price=%.4f", ticker, chosen.price)
         return None
     if chosen.change_pct < MIN_SCAN_GAIN_PCT:
         return None
+
+    # If screener disagrees by a huge amount, keep confirmed chart data but log it.
+    if leader.change_pct and abs(leader.change_pct - chosen.change_pct) >= 35:
+        log.info("[GAIN CORRECTED] %s seed=%.1f confirmed=%.1f source=%s", ticker, leader.change_pct, chosen.change_pct, leader.source)
 
     leader.price = chosen.price or leader.price
     leader.change_pct = chosen.change_pct
@@ -964,7 +979,6 @@ def get_leaders() -> List[Leader]:
         ("yahoo", get_yahoo_gainers),
         ("yahoo_active", get_yahoo_most_active),
         ("stockanalysis", get_stockanalysis_gainers),
-        ("extra", get_extra_ticker_seeds),
     ):
         try:
             rows = fn()
@@ -973,11 +987,11 @@ def get_leaders() -> List[Leader]:
         except Exception as exc:
             log.warning("[%s LEADERS ERROR] %s", name.upper(), exc)
 
+    # Scan-only rule: do NOT backfill from previous leaders, manual tickers, or watchlists.
+    # If the live public leader feeds fail, return no leaders instead of recycling stale/bad names.
     if not all_rows:
-        try:
-            all_rows.extend(get_finnhub_movers_seed())
-        except Exception as exc:
-            log.warning("[FINNHUB_SEED ERROR] %s", exc)
+        log.warning("[LEADERS] no scan-source rows; not using fallback/watchlist")
+        return []
 
     leaders = verify_and_rerank_leaders(all_rows)
 
@@ -2154,11 +2168,12 @@ def run_scan_cycle() -> Dict[str, Any]:
 
     alertable = [d for d in decisions if d.should_alert]
 
-    def alert_priority(d: CandidateDecision) -> Tuple[int, int, float, int]:
-        type_rank = 6 if d.alert_type == "FAST SPIKE" else 5 if d.alert_type == "A+ VWAP HOLD" else 4 if d.alert_type == "BREAKOUT PUSH" else 3 if d.alert_type == "MARKET LEADER" else 2 if d.alert_type == "RECLAIM WATCH" else 1
+    def alert_priority(d: CandidateDecision) -> Tuple[float, float, int, int]:
+        # v57: for your scanner, current live gain/spike matters more than setup label.
+        # This prevents a lower-gain setup from beating STI/FOXX/NEXR-style leaders.
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
-        return (type_rank, d.quality, gain_rank, vol_rank)
+        return (gain_rank, d.spike_pct, d.quality, vol_rank)
 
     alertable.sort(key=alert_priority, reverse=True)
     attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
