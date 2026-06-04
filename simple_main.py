@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v53-fast-spike-bypass-reclaim-fix"
+VERSION = "v54-today-only-leaders-reset"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -259,6 +259,62 @@ CANDLE_CACHE: Dict[str, Tuple[float, List[Candle]]] = {}
 PROFILE_CACHE: Dict[str, Tuple[float, Optional[float]]] = {}
 
 RUNNING = True
+TRADE_DATE = ""
+LAST_GOOD_LEADERS_TRADE_DATE = ""
+
+
+# =============================================================================
+# DAILY STATE / TODAY-ONLY GUARD
+# =============================================================================
+
+def current_trade_date() -> str:
+    return now_et().date().isoformat()
+
+
+def reset_daily_state_if_needed(force: bool = False) -> None:
+    """Hard reset all intraday memory at the first scan of a new ET date.
+
+    This prevents yesterday's LAST_GOOD_LEADERS, FIRST_SEEN rows, candle/news/quote
+    caches, and alert cooldown state from recycling into today's live scanner.
+    """
+    global TRADE_DATE, FIRST_SEEN_INITIALIZED, LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS
+    global LAST_GOOD_LEADERS_TRADE_DATE
+
+    today = current_trade_date()
+    if not force and TRADE_DATE == today:
+        return
+
+    old_date = TRADE_DATE or "none"
+    TRADE_DATE = today
+    LAST_GOOD_LEADERS_TRADE_DATE = today
+
+    FIRST_SEEN.clear()
+    FIRST_SEEN_INITIALIZED = False
+    ALERT_STATES.clear()
+    LAST_GOOD_LEADERS = []
+    LAST_GOOD_LEADERS_TS = 0.0
+
+    QUOTE_CACHE.clear()
+    NEWS_CACHE.clear()
+    CANDLE_CACHE.clear()
+    PROFILE_CACHE.clear()
+
+    log.info("[DAILY RESET] old_date=%s new_date=%s cleared intraday leader/alert/cache state", old_date, today)
+
+
+def prune_not_today_state() -> None:
+    """Remove any legacy rows that do not explicitly belong to today's ET date."""
+    today = current_trade_date()
+
+    stale_first_seen = [
+        t for t, row in FIRST_SEEN.items()
+        if not isinstance(row, dict) or row.get("date") != today
+    ]
+    for t in stale_first_seen:
+        FIRST_SEEN.pop(t, None)
+
+    if stale_first_seen:
+        log.info("[TODAY GUARD] removed %s stale FIRST_SEEN rows", len(stale_first_seen))
 
 
 # =============================================================================
@@ -661,7 +717,7 @@ def get_finnhub_movers_seed() -> List[Leader]:
 
 
 def get_leaders() -> List[Leader]:
-    global LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS
+    global LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS, LAST_GOOD_LEADERS_TRADE_DATE
 
     all_rows: List[Leader] = []
 
@@ -691,13 +747,21 @@ def get_leaders() -> List[Leader]:
             leader.float_shares = best_float(leader.ticker)
         LAST_GOOD_LEADERS = leaders[:80]
         LAST_GOOD_LEADERS_TS = time.time()
+        LAST_GOOD_LEADERS_TRADE_DATE = current_trade_date()
         log.info("[LEADERS] %s candidates: %s", len(leaders), ",".join(x.ticker for x in leaders[:20]))
         return leaders[:80]
 
     age = time.time() - LAST_GOOD_LEADERS_TS if LAST_GOOD_LEADERS_TS else 999999
-    if LAST_GOOD_LEADERS and age <= LEADER_CACHE_TTL_SECONDS:
-        log.warning("[LEADERS FALLBACK] using last good leaders age=%ss", int(age))
+    if (
+        LAST_GOOD_LEADERS
+        and LAST_GOOD_LEADERS_TRADE_DATE == current_trade_date()
+        and age <= LEADER_CACHE_TTL_SECONDS
+    ):
+        log.warning("[LEADERS FALLBACK] using TODAY last good leaders age=%ss", int(age))
         return LAST_GOOD_LEADERS[:50]
+
+    if LAST_GOOD_LEADERS and LAST_GOOD_LEADERS_TRADE_DATE != current_trade_date():
+        log.warning("[LEADERS FALLBACK BLOCKED] cached leaders are from %s, today=%s", LAST_GOOD_LEADERS_TRADE_DATE, current_trade_date())
 
     log.warning("[LEADERS] 0 candidates")
     return []
@@ -1400,7 +1464,7 @@ def initialize_first_seen(leaders: Sequence[Leader]) -> None:
     for leader in leaders:
         ticker = normalize_ticker(leader.ticker)
         if ticker and ticker not in FIRST_SEEN:
-            FIRST_SEEN[ticker] = {"gain": leader.change_pct, "ts": now, "price": leader.price}
+            FIRST_SEEN[ticker] = {"date": current_trade_date(), "gain": leader.change_pct, "ts": now, "price": leader.price}
     FIRST_SEEN_INITIALIZED = True
     log.info("[FIRST SEEN] initialized with %s leaders", len(FIRST_SEEN))
 
@@ -1410,9 +1474,12 @@ def remember_first_seen(leader: Leader, quote: Quote) -> Tuple[bool, float]:
     gain = max(quote.change_pct, leader.change_pct)
     now = time.time()
     row = FIRST_SEEN.get(ticker)
+    if row and row.get("date") != current_trade_date():
+        FIRST_SEEN.pop(ticker, None)
+        row = None
 
     if not row:
-        FIRST_SEEN[ticker] = {"gain": gain, "ts": now, "price": quote.price}
+        FIRST_SEEN[ticker] = {"date": current_trade_date(), "gain": gain, "ts": now, "price": quote.price}
         return FIRST_SEEN_INITIALIZED, 0.0
 
     age = now - float(row.get("ts", now))
@@ -1554,6 +1621,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     gain = max(quote.change_pct, leader.change_pct)
     day_vol = max(quote.day_volume, leader.volume)
+    remember_first_seen(leader, quote)
 
     if gain < MIN_ALERT_GAIN_PCT:
         return CandidateDecision(
@@ -1668,8 +1736,20 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     else:
         required_quality = MIN_ALERT_QUALITY
 
-    # Avoid weak setup alerts below VWAP. Keep true leader/spike awareness.
+    # Avoid weak setup alerts below VWAP. Keep true leader/spike awareness only for
+    # extreme leaders or true fast-spike events. This blocks +50–70% stale/fading names
+    # from alerting just because they remain on a gainer list.
     if alert_type in {"BREAKOUT PUSH", "A+ VWAP HOLD", "LIVE PUSH"} and structure.data_ok and not structure.above_vwap:
+        alert_type = ""
+
+    if (
+        alert_type == "MARKET LEADER"
+        and structure.data_ok
+        and not structure.above_vwap
+        and gain < 100
+        and spike_from_base < FAST_SPIKE_PCT
+    ):
+        risks.append("blocked below VWAP leader without fresh spike")
         alert_type = ""
 
     should = bool(alert_type) and quality >= required_quality and is_meaningful_realert(
@@ -1800,6 +1880,9 @@ def send_telegram(text: str) -> bool:
 # =============================================================================
 
 def run_scan_cycle() -> Dict[str, Any]:
+    reset_daily_state_if_needed()
+    prune_not_today_state()
+
     started = time.time()
     session_name = market_session()
     sent = 0
@@ -1870,6 +1953,8 @@ def run_scan_cycle() -> Dict[str, Any]:
         },
         "first_seen_count": len(FIRST_SEEN),
         "first_seen_initialized": FIRST_SEEN_INITIALIZED,
+        "trade_date": TRADE_DATE,
+        "last_good_leaders_trade_date": LAST_GOOD_LEADERS_TRADE_DATE,
         "blocked_sources": {
             k: max(0, int(v - time.time()))
             for k, v in SOURCE_BLOCKED_UNTIL.items()
@@ -1944,6 +2029,8 @@ def build_app():
             },
             "first_seen_count": len(FIRST_SEEN),
             "first_seen_initialized": FIRST_SEEN_INITIALIZED,
+            "trade_date": TRADE_DATE,
+            "last_good_leaders_trade_date": LAST_GOOD_LEADERS_TRADE_DATE,
             "blocked_sources": {
                 k: max(0, int(v - time.time()))
                 for k, v in SOURCE_BLOCKED_UNTIL.items()
