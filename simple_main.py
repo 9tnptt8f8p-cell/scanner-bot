@@ -2,16 +2,16 @@
 """
 simple_main.py
 
-v51-better-candle-data
+v60-elite-dynamic-leader
 
 Clean leader-first momentum scanner for Render.
 
 Core rules:
 - No alerts before 9:30 AM ET.
 - No alerts after 4:10 PM ET.
-- No alerts under 25% gain.
-- Focus live leaders only.
-- Fast +10% spike trigger.
+- Dynamic gain floor: hot days ignore weak +27% names.
+- Focus top live leaders only.
+- Fast +10% spike trigger kept.
 - Short Telegram alerts only.
 - Float shown in alert.
 - Quality/why/details kept internal, not displayed.
@@ -52,31 +52,31 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v59-live-candles-only"
+VERSION = "v60-elite-dynamic-leader"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 
-MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "40"))
+MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "2"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "12"))
 MAX_LEADERS_FETCH = int(os.getenv("MAX_LEADERS_FETCH", "250"))
 VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "120"))
 ALLOW_SEED_ONLY_LEADERS = False  # scan-only: never trust unconfirmed seed/watchlist data
 ALLOW_FINNHUB_LEADER_CONFIRM = False  # live-only: do not confirm leaders with quote-only data
 REQUIRE_CONFIRMED_LEADER_DATA = os.getenv("REQUIRE_CONFIRMED_LEADER_DATA", "true").lower() in {"1", "true", "yes", "y"}
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "12"))
-MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
-MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "5"))
+MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "8"))
+MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "7"))
 MARKET_LEADER_OVERRIDE_QUALITY = int(os.getenv("MARKET_LEADER_OVERRIDE_QUALITY", "7"))
 
 MIN_ALERT_GAIN_PCT = float(os.getenv("MIN_ALERT_GAIN_PCT", "25"))
 MIN_SCAN_GAIN_PCT = float(os.getenv("MIN_SCAN_GAIN_PCT", "20"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.30"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "80"))
-MIN_DAY_VOLUME = int(os.getenv("MIN_DAY_VOLUME", "300000"))
-MIN_RECENT_VOLUME = int(os.getenv("MIN_RECENT_VOLUME", "75000"))
+MIN_DAY_VOLUME = int(os.getenv("MIN_DAY_VOLUME", "1000000"))
+MIN_RECENT_VOLUME = int(os.getenv("MIN_RECENT_VOLUME", "150000"))
 
 MAJOR_LEADER_GAIN_PCT = float(os.getenv("MAJOR_LEADER_GAIN_PCT", "50"))
 FAST_SPIKE_PCT = float(os.getenv("FAST_SPIKE_PCT", "10"))
@@ -84,10 +84,32 @@ FAST_SPIKE_WINDOW_MIN = int(os.getenv("FAST_SPIKE_WINDOW_MIN", "5"))
 FAST_SPIKE_REALERT_SECONDS = int(os.getenv("FAST_SPIKE_REALERT_SECONDS", "300"))
 FAST_SPIKE_FROM_LAST_ALERT_PCT = float(os.getenv("FAST_SPIKE_FROM_LAST_ALERT_PCT", "10"))
 FAST_SPIKE_QUALITY_BONUS = int(os.getenv("FAST_SPIKE_QUALITY_BONUS", "2"))
-MIN_FAST_SPIKE_DAY_VOLUME = int(os.getenv("MIN_FAST_SPIKE_DAY_VOLUME", "300000"))
-MIN_MARKET_LEADER_DAY_VOLUME = int(os.getenv("MIN_MARKET_LEADER_DAY_VOLUME", "300000"))
+MIN_FAST_SPIKE_DAY_VOLUME = int(os.getenv("MIN_FAST_SPIKE_DAY_VOLUME", "1000000"))
+MIN_MARKET_LEADER_DAY_VOLUME = int(os.getenv("MIN_MARKET_LEADER_DAY_VOLUME", "5000000"))
 LOW_FLOAT_BONUS_MAX_M = float(os.getenv("LOW_FLOAT_BONUS_MAX_M", "20"))
 MAX_EXTENDED_FROM_VWAP_WARN_PCT = float(os.getenv("MAX_EXTENDED_FROM_VWAP_WARN_PCT", "18"))
+
+# Elite v60 filters: cut alert spam on hot days.
+ELITE_ONLY_MODE = os.getenv("ELITE_ONLY_MODE", "true").lower() in {"1", "true", "yes", "y"}
+TOP_ELITE_LEADERS_ONLY = int(os.getenv("TOP_ELITE_LEADERS_ONLY", "10"))
+MIN_ELITE_DAY_VOLUME = int(os.getenv("MIN_ELITE_DAY_VOLUME", "5_000_000".replace("_", "")))
+MIN_ELITE_RVOL_RATIO = float(os.getenv("MIN_ELITE_RVOL_RATIO", "3.0"))
+MIN_ELITE_POTENTIAL_SCORE = int(os.getenv("MIN_ELITE_POTENTIAL_SCORE", "6"))
+DAILY_CACHE_TTL_SECONDS = int(os.getenv("DAILY_CACHE_TTL_SECONDS", "900"))
+DAILY_BREAKOUT_LOOKBACK_DAYS = int(os.getenv("DAILY_BREAKOUT_LOOKBACK_DAYS", "60"))
+HOT_DAY_NORMAL_TOP_GAIN = float(os.getenv("HOT_DAY_NORMAL_TOP_GAIN", "50"))
+HOT_DAY_HOT_TOP_GAIN = float(os.getenv("HOT_DAY_HOT_TOP_GAIN", "100"))
+HOT_DAY_INSANE_TOP_GAIN = float(os.getenv("HOT_DAY_INSANE_TOP_GAIN", "200"))
+HOT_DAY_NORMAL_MIN_GAIN = float(os.getenv("HOT_DAY_NORMAL_MIN_GAIN", "35"))
+HOT_DAY_HOT_MIN_GAIN = float(os.getenv("HOT_DAY_HOT_MIN_GAIN", "50"))
+HOT_DAY_INSANE_MIN_GAIN = float(os.getenv("HOT_DAY_INSANE_MIN_GAIN", "75"))
+FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR = os.getenv("FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR", "true").lower() in {"1", "true", "yes", "y"}
+
+HOT_SECTOR_TERMS = [
+    "ai", "artificial intelligence", "quantum", "crypto", "bitcoin", "blockchain",
+    "nuclear", "uranium", "defense", "drone", "robotics", "biotech", "fda",
+    "clinical", "china", "ev", "battery", "semiconductor", "data center",
+]
 
 MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
@@ -102,7 +124,7 @@ LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "20"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "5"))
-CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "60"))
+CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "180"))
 IDEAL_CANDLE_AGE_SECONDS = int(os.getenv("IDEAL_CANDLE_AGE_SECONDS", "20"))
 WARN_CANDLE_AGE_SECONDS = int(os.getenv("WARN_CANDLE_AGE_SECONDS", "30"))
 MIN_GOOD_CANDLES = int(os.getenv("MIN_GOOD_CANDLES", "20"))
@@ -264,6 +286,7 @@ QUOTE_CACHE: Dict[str, Tuple[float, Quote]] = {}
 NEWS_CACHE: Dict[str, Tuple[float, NewsResult]] = {}
 CANDLE_CACHE: Dict[str, Tuple[float, List[Candle]]] = {}
 PROFILE_CACHE: Dict[str, Tuple[float, Optional[float]]] = {}
+DAILY_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 RUNNING = True
 TRADE_DATE = ""
@@ -305,6 +328,7 @@ def reset_daily_state_if_needed(force: bool = False) -> None:
     NEWS_CACHE.clear()
     CANDLE_CACHE.clear()
     PROFILE_CACHE.clear()
+    DAILY_CACHE.clear()
 
     log.info("[DAILY RESET] old_date=%s new_date=%s cleared intraday leader/alert/cache state", old_date, today)
 
@@ -1673,6 +1697,10 @@ def setup_alert_label(d: CandidateDecision) -> str:
     s = d.structure or Structure()
     if d.alert_type == "FAST SPIKE":
         return "🔥 Fast Spike"
+    if d.alert_type == "MONSTER LEADER":
+        return "⭐ Monster Leader"
+    if d.alert_type == "ELITE RUNNER":
+        return "🔥 Elite Runner"
     if s.above_vwap and s.higher_lows and s.near_hod:
         return "🟢 A+ VWAP Hold"
     if s.above_vwap and s.breakout:
@@ -1714,6 +1742,145 @@ def relative_volume_score(day_volume: int, dt: Optional[datetime] = None) -> Tup
     if ratio >= 2 or day_volume >= 1_000_000:
         return 1, f"rVol strong {ratio:.1f}x"
     return 0, f"rVol {ratio:.1f}x"
+
+
+def relative_volume_ratio(day_volume: int, dt: Optional[datetime] = None) -> float:
+    mins = market_minutes_elapsed(dt)
+    expected_by_time = max(100_000, mins * 7_500)
+    return day_volume / expected_by_time if expected_by_time > 0 else 0.0
+
+
+def market_regime_from_leaders(leaders: Sequence[Leader]) -> Tuple[str, float, float]:
+    """Return regime, top gain, and dynamic minimum alert gain.
+
+    On hot days, +27% names become noise. This raises the floor when the
+    leading gainers are +50%, +100%, or +200%+.
+    """
+    top_gain = max((safe_float(x.change_pct) for x in leaders), default=0.0)
+    if top_gain >= HOT_DAY_INSANE_TOP_GAIN:
+        return "INSANE", top_gain, max(MIN_ALERT_GAIN_PCT, HOT_DAY_INSANE_MIN_GAIN)
+    if top_gain >= HOT_DAY_HOT_TOP_GAIN:
+        return "HOT", top_gain, max(MIN_ALERT_GAIN_PCT, HOT_DAY_HOT_MIN_GAIN)
+    if top_gain >= HOT_DAY_NORMAL_TOP_GAIN:
+        return "NORMAL-HOT", top_gain, max(MIN_ALERT_GAIN_PCT, HOT_DAY_NORMAL_MIN_GAIN)
+    return "DEAD/NORMAL", top_gain, MIN_ALERT_GAIN_PCT
+
+
+def get_dynamic_min_gain() -> float:
+    regime, _, min_gain = market_regime_from_leaders(LAST_GOOD_LEADERS)
+    return min_gain
+
+
+def get_daily_context(ticker: str) -> Dict[str, Any]:
+    ticker = normalize_ticker(ticker)
+    cached = DAILY_CACHE.get(ticker)
+    if cached and time.time() - cached[0] <= DAILY_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    ctx: Dict[str, Any] = {
+        "daily_breakout": False,
+        "near_60d_high": False,
+        "room_to_52w_high_pct": None,
+        "above_20d": False,
+        "above_50d": False,
+        "reason": "daily unavailable",
+    }
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"interval": "1d", "range": "1y", "includePrePost": "false"}
+    resp = http_get(url, source="yahoo_daily", params=params, timeout=min(HTTP_TIMEOUT, 3.0))
+    data = parse_json_response(resp, "yahoo_daily")
+    try:
+        result = data["chart"]["result"][0]
+        quote = result["indicators"]["quote"][0]
+        highs = [safe_float(x) for x in (quote.get("high") or []) if safe_float(x) > 0]
+        closes = [safe_float(x) for x in (quote.get("close") or []) if safe_float(x) > 0]
+    except Exception:
+        DAILY_CACHE[ticker] = (time.time(), ctx)
+        return ctx
+
+    if len(closes) < 20 or not highs:
+        DAILY_CACHE[ticker] = (time.time(), ctx)
+        return ctx
+
+    last = closes[-1]
+    lookback = max(20, min(DAILY_BREAKOUT_LOOKBACK_DAYS, len(highs) - 1))
+    prev_high = max(highs[-lookback-1:-1]) if len(highs) > lookback else max(highs[:-1] or highs)
+    high_52w = max(highs)
+    ma20 = sum(closes[-20:]) / 20
+    ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else ma20
+    room = pct_change(high_52w, last) if last > 0 else None
+
+    daily_breakout = bool(last >= prev_high * 0.995)
+    near_60d_high = bool(last >= prev_high * 0.97)
+    ctx = {
+        "daily_breakout": daily_breakout,
+        "near_60d_high": near_60d_high,
+        "room_to_52w_high_pct": room,
+        "above_20d": last >= ma20,
+        "above_50d": last >= ma50,
+        "reason": "daily breakout" if daily_breakout else ("near daily high" if near_60d_high else "daily not breaking out"),
+    }
+    DAILY_CACHE[ticker] = (time.time(), ctx)
+    return ctx
+
+
+def hot_sector_score(leader: Leader, news: NewsResult) -> Tuple[int, str]:
+    text = " ".join([leader.ticker or "", leader.name or "", news.headline or ""]).lower()
+    hits = [term for term in HOT_SECTOR_TERMS if term in text]
+    if hits:
+        return 1, f"hot theme: {hits[0]}"
+    return 0, ""
+
+
+def elite_potential_score(leader: Leader, quote: Quote, structure: Structure, news: NewsResult, daily: Dict[str, Any]) -> Tuple[int, List[str]]:
+    score = 0
+    why: List[str] = []
+    gain = max(quote.change_pct, leader.change_pct)
+    vol = max(quote.day_volume, leader.volume)
+    rvol = relative_volume_ratio(vol)
+
+    if vol >= 25_000_000:
+        score += 2; why.append("monster volume")
+    elif vol >= MIN_ELITE_DAY_VOLUME:
+        score += 1; why.append("elite volume")
+
+    if rvol >= 5:
+        score += 2; why.append(f"rVol {rvol:.1f}x")
+    elif rvol >= MIN_ELITE_RVOL_RATIO:
+        score += 1; why.append(f"rVol {rvol:.1f}x")
+
+    if leader.float_shares and 0 < leader.float_shares <= LOW_FLOAT_BONUS_MAX_M:
+        score += 2; why.append("low float")
+
+    if daily.get("daily_breakout"):
+        score += 2; why.append("daily breakout")
+    elif daily.get("near_60d_high"):
+        score += 1; why.append("near daily high")
+
+    if structure.above_vwap and structure.higher_lows:
+        score += 2; why.append("VWAP + higher lows")
+    elif structure.above_vwap:
+        score += 1; why.append("above VWAP")
+
+    if structure.near_hod or structure.breakout:
+        score += 1; why.append("near HOD/breakout")
+
+    if news.grade == "STRONG":
+        score += 1; why.append("strong catalyst")
+
+    sec_score, sec_why = hot_sector_score(leader, news)
+    score += sec_score
+    if sec_why:
+        why.append(sec_why)
+
+    if gain >= 100:
+        score += 1; why.append("monster gainer")
+
+    if structure.extended_from_vwap_pct >= 45 and not structure.near_hod:
+        score -= 2; why.append("too extended")
+
+    return int(clamp(score, 0, 10)), dedupe_text(why)
 
 
 def initialize_first_seen(leaders: Sequence[Leader]) -> None:
@@ -1897,23 +2064,10 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     day_vol = max(quote.day_volume, leader.volume)
     remember_first_seen(leader, quote)
 
-    if gain < MIN_ALERT_GAIN_PCT:
-        return CandidateDecision(
-            ticker=ticker,
-            should_alert=False,
-            reasons=[f"gain {gain:.1f}% under {MIN_ALERT_GAIN_PCT:.0f}% floor"],
-            quote=quote,
-            leader=leader,
-        )
+    regime, top_gain, dynamic_min_gain = market_regime_from_leaders(LAST_GOOD_LEADERS)
 
     if not (MIN_PRICE <= quote.price <= MAX_PRICE):
-        return CandidateDecision(
-            ticker=ticker,
-            should_alert=False,
-            reasons=["price outside range"],
-            quote=quote,
-            leader=leader,
-        )
+        return CandidateDecision(ticker=ticker, should_alert=False, reasons=["price outside range"], quote=quote, leader=leader)
 
     candles = best_candles(ticker)
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles", setup_label="NO DATA")
@@ -1924,25 +2078,30 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         source="skipped",
     )
 
+    daily = get_daily_context(ticker)
+    potential, potential_reasons = elite_potential_score(leader, quote, structure, news, daily)
+
+    rvol = relative_volume_ratio(day_vol)
     _, rvol_label = relative_volume_score(day_vol)
+    reasons.append(f"{regime} tape top +{top_gain:.0f}% / floor +{dynamic_min_gain:.0f}%")
     reasons.append(rvol_label)
+    reasons.extend(potential_reasons)
 
     st = update_baseline(ticker, quote.price)
     spike_from_base = pct_change(quote.price, st.baseline_price) if st.baseline_price > 0 else 0.0
-
     if spike_from_base >= FAST_SPIKE_PCT:
         reasons.append(f"fast +{spike_from_base:.1f}% push")
 
     if structure.reason:
         reasons.append(structure.reason)
+    if daily.get("reason"):
+        reasons.append(str(daily.get("reason")))
 
     if news.grade == "STRONG":
         reasons.append("strong catalyst")
     elif news.grade == "WEAK":
         reasons.append("weak catalyst")
 
-    if day_vol < MIN_DAY_VOLUME and gain < MAJOR_LEADER_GAIN_PCT:
-        risks.append("light total volume")
     if news.grade in {"NONE", "JUNK"} and gain >= 35:
         risks.append("UNKNOWN CATALYST — INVESTIGATE")
     if news.dilution_flag:
@@ -1953,11 +2112,17 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         risks.append(f"extended +{structure.extended_from_vwap_pct:.0f}% from VWAP")
     if not structure.data_ok:
         risks.append(structure.reason or "structure data weak")
+    if day_vol < MIN_ELITE_DAY_VOLUME:
+        risks.append("below elite volume")
+    if potential < MIN_ELITE_POTENTIAL_SCORE:
+        risks.append(f"potential {potential}/10 below {MIN_ELITE_POTENTIAL_SCORE}")
 
     quality = quality_score(leader, quote, structure, news)
+    quality = max(quality, potential)
 
-    # Massive gainers should stay visible.
-    if gain >= 150:
+    if gain >= 200:
+        quality = max(quality, 10)
+    elif gain >= 150:
         quality = max(quality, 9)
     elif gain >= 100:
         quality = max(quality, 8)
@@ -1967,70 +2132,63 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 
     alert_type = ""
 
-    # 1) The important trigger: a leader making a fresh +10% jump.
-    # Do not let perfect structure requirements hide this.
-    if (
-        gain >= MIN_ALERT_GAIN_PCT
-        and spike_from_base >= FAST_SPIKE_PCT
+    fast_spike_ok = (
+        spike_from_base >= FAST_SPIKE_PCT
+        and gain >= MIN_ALERT_GAIN_PCT
         and day_vol >= MIN_FAST_SPIKE_DAY_VOLUME
-    ):
-        alert_type = "FAST SPIKE"
-
-    # 2) Major leader awareness. Above VWAP preferred, but huge leaders still matter.
-    elif gain >= MAJOR_LEADER_GAIN_PCT and day_vol >= MIN_MARKET_LEADER_DAY_VOLUME:
-        alert_type = "MARKET LEADER"
-
-    # 3) Clean chart setups.
-    elif structure.data_ok and structure.above_vwap and structure.breakout and day_vol >= MIN_DAY_VOLUME:
-        alert_type = "BREAKOUT PUSH"
-
-    elif structure.data_ok and structure.above_vwap and structure.higher_lows and structure.near_hod and day_vol >= MIN_DAY_VOLUME:
-        alert_type = "A+ VWAP HOLD"
-
-    elif gain >= 35 and structure.data_ok and structure.above_vwap and structure.last3_change_pct >= 3:
-        alert_type = "LIVE PUSH"
-
-    # High-quality below-VWAP leaders get a reclaim-watch alert instead of disappearing.
-    elif (
-        gain >= 40
-        and day_vol >= 5_000_000
         and structure.data_ok
-        and structure.below_vwap_reclaim_watch
-        and news.grade in {"STRONG", "WEAK"}
-    ):
-        alert_type = "RECLAIM WATCH"
+    )
 
-    # Quality gates by type.
+    # On hot/insane days, do not alert a lazy +27% name. Only a true fresh +10% push can bypass
+    # the dynamic gain floor, and even then it must have elite liquidity/potential.
+    passes_dynamic_gain = gain >= dynamic_min_gain or (FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR and fast_spike_ok)
+    if not passes_dynamic_gain:
+        return CandidateDecision(
+            ticker=ticker,
+            should_alert=False,
+            reasons=[f"gain {gain:.1f}% under dynamic {dynamic_min_gain:.0f}% floor ({regime})"],
+            risks=dedupe_text(risks),
+            quote=quote,
+            structure=structure,
+            news=news,
+            leader=leader,
+            spike_pct=spike_from_base,
+        )
+
+    # Must have fresh candles for all alerts.
+    if not structure.data_ok:
+        alert_type = ""
+    elif fast_spike_ok and potential >= max(4, MIN_ELITE_POTENTIAL_SCORE - 2):
+        alert_type = "FAST SPIKE"
+    elif gain >= 100 and day_vol >= MIN_ELITE_DAY_VOLUME and potential >= 5:
+        alert_type = "MONSTER LEADER"
+    elif (
+        gain >= dynamic_min_gain
+        and day_vol >= MIN_ELITE_DAY_VOLUME
+        and rvol >= MIN_ELITE_RVOL_RATIO
+        and structure.above_vwap
+        and potential >= MIN_ELITE_POTENTIAL_SCORE
+    ):
+        alert_type = "ELITE RUNNER"
+
+    # Block random extended leaders unless they are a real fast spike or monster 100%+ leader.
+    if (
+        alert_type == "ELITE RUNNER"
+        and structure.extended_from_vwap_pct >= 45
+        and spike_from_base < FAST_SPIKE_PCT
+        and gain < 100
+    ):
+        risks.append("blocked: too extended without fresh spike")
+        alert_type = ""
+
     if alert_type == "FAST SPIKE":
         required_quality = MIN_FAST_SPIKE_QUALITY
-    elif alert_type == "MARKET LEADER":
-        required_quality = 5 if gain >= 75 else MIN_ALERT_QUALITY
-    elif alert_type == "RECLAIM WATCH":
-        required_quality = 7
-    else:
+    elif alert_type == "MONSTER LEADER":
+        required_quality = 8
+    elif alert_type == "ELITE RUNNER":
         required_quality = MIN_ALERT_QUALITY
-
-    # Hard live-candle alert rule: do not alert anything when structure data is missing/stale.
-    # This prevents MARKET LEADER alerts based only on stale screener/quote data.
-    if alert_type and not structure.data_ok:
-        risks.append(structure.reason or "no fresh candle data")
-        alert_type = ""
-
-    # Avoid weak setup alerts below VWAP. Keep true leader/spike awareness only for
-    # extreme leaders or true fast-spike events. This blocks +50–70% stale/fading names
-    # from alerting just because they remain on a gainer list.
-    if alert_type in {"BREAKOUT PUSH", "A+ VWAP HOLD", "LIVE PUSH"} and structure.data_ok and not structure.above_vwap:
-        alert_type = ""
-
-    if (
-        alert_type == "MARKET LEADER"
-        and structure.data_ok
-        and not structure.above_vwap
-        and gain < 100
-        and spike_from_base < FAST_SPIKE_PCT
-    ):
-        risks.append("blocked below VWAP leader without fresh spike")
-        alert_type = ""
+    else:
+        required_quality = 99
 
     should = bool(alert_type) and quality >= required_quality and is_meaningful_realert(
         ticker,
@@ -2041,15 +2199,21 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     )
 
     log.info(
-        "[CHECK] %s type=%s alert=%s q=%s req=%s gain=%.1f spike=%.1f vol=%s structure=%s news=%s risks=%s",
+        "[CHECK] %s regime=%s top=%.1f floor=%.1f type=%s alert=%s q=%s req=%s pot=%s gain=%.1f spike=%.1f rvol=%.1f vol=%s daily=%s structure=%s news=%s risks=%s",
         ticker,
+        regime,
+        top_gain,
+        dynamic_min_gain,
         alert_type or "NONE",
         should,
         quality,
         required_quality if alert_type else "-",
+        potential,
         gain,
         spike_from_base,
+        rvol,
         day_vol,
+        daily.get("reason"),
         structure.reason,
         news.grade,
         "|".join(risks),
@@ -2060,7 +2224,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         should_alert=should,
         alert_type=alert_type,
         quality=quality,
-        reasons=dedupe_text(reasons)[:5],
+        reasons=dedupe_text(reasons)[:6],
         risks=dedupe_text(risks)[:4],
         quote=quote,
         structure=structure,
@@ -2068,7 +2232,6 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         leader=leader,
         spike_pct=spike_from_base,
     )
-
 
 # =============================================================================
 # ALERTING
@@ -2085,6 +2248,10 @@ def format_alert(d: CandidateDecision) -> str:
 
     if d.spike_pct >= FAST_SPIKE_PCT:
         action_line = f"🔥 +{d.spike_pct:.1f}% Spike"
+    elif d.alert_type == "MONSTER LEADER":
+        action_line = "⭐ Monster Leader"
+    elif d.alert_type == "ELITE RUNNER":
+        action_line = "🔥 Elite Runner"
     elif d.alert_type == "MARKET LEADER":
         action_line = "🚀 Market Leader"
     elif d.alert_type == "BREAKOUT PUSH":
@@ -2194,12 +2361,11 @@ def run_scan_cycle() -> Dict[str, Any]:
 
     alertable = [d for d in decisions if d.should_alert]
 
-    def alert_priority(d: CandidateDecision) -> Tuple[float, float, int, int]:
-        # v57: for your scanner, current live gain/spike matters more than setup label.
-        # This prevents a lower-gain setup from beating STI/FOXX/NEXR-style leaders.
+    def alert_priority(d: CandidateDecision) -> Tuple[int, float, int, float, int]:
+        type_rank = {"FAST SPIKE": 4, "MONSTER LEADER": 3, "ELITE RUNNER": 2}.get(d.alert_type, 0)
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
-        return (gain_rank, d.spike_pct, d.quality, vol_rank)
+        return (type_rank, d.spike_pct, d.quality, gain_rank, vol_rank)
 
     alertable.sort(key=alert_priority, reverse=True)
     attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
@@ -2218,6 +2384,8 @@ def run_scan_cycle() -> Dict[str, Any]:
         "version": VERSION,
         "session": session_name,
         "leaders": len(leaders),
+        "market_regime": market_regime_from_leaders(leaders)[0],
+        "dynamic_min_gain": market_regime_from_leaders(leaders)[2],
         "checked": checked,
         "alertable": len(alertable),
         "attempted": attempted,
@@ -2231,6 +2399,7 @@ def run_scan_cycle() -> Dict[str, Any]:
             "news": len(NEWS_CACHE),
             "candles": len(CANDLE_CACHE),
             "profiles": len(PROFILE_CACHE),
+                "daily": len(DAILY_CACHE),
         },
         "first_seen_count": len(FIRST_SEEN),
         "first_seen_initialized": FIRST_SEEN_INITIALIZED,
@@ -2307,6 +2476,7 @@ def build_app():
                 "news": len(NEWS_CACHE),
                 "candles": len(CANDLE_CACHE),
                 "profiles": len(PROFILE_CACHE),
+                "daily": len(DAILY_CACHE),
             },
             "first_seen_count": len(FIRST_SEEN),
             "first_seen_initialized": FIRST_SEEN_INITIALIZED,
