@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v61.2-elite-alert-cleanup"
+VERSION = "v61.2-news-ranked"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -502,12 +502,12 @@ def float_flag(shares: Optional[float]) -> str:
     if shares is None or shares <= 0:
         return ""
     if shares <= 10:
-        return " ⭐ LOW FLOAT"
+        return " ⭐ Low Float"
     if shares <= 30:
-        return " 🟢 TRADABLE FLOAT"
+        return " 🟢 Tradable Float"
     if shares <= 50:
-        return " ⚠️ MID FLOAT"
-    return " ⚠️ LARGE FLOAT"
+        return " ⚠️ Mid Float"
+    return " ⚠️ Large Float"
 
 
 def format_vol_rvol(volume: int, rvol: float) -> str:
@@ -1492,6 +1492,10 @@ JUNK_NEWS_PHRASES = [
     "gap-ups and gap-downs", "top gainers", "market movers", "52-week", "benzinga pro's top",
     "stocks that are on the move", "on the move in today", "moving in today", "closing bell",
     "intraday session", "pre-market session", "after the closing bell",
+    "top premarket gainers", "top pre-market gainers", "top gainers", "stocks moving today",
+    "stocks to watch", "most active stocks", "why shares are trading higher",
+    "why shares are trading", "trending stocks", "biggest premarket movers",
+    "biggest stock movers", "market update", "morning movers", "session movers",
     # Officer/bio snippets are not catalysts. These caused alerts like:
     # NEWS: Founder, Executive Chairman of the Board, Chief Executive Officer
     "founder, executive chairman", "executive chairman of the board", "chief executive officer",
@@ -1500,52 +1504,89 @@ JUNK_NEWS_PHRASES = [
 ]
 
 OFFICER_BIO_NEWS_TERMS = [
-    "founder", "co-founder", "executive chairman", "chairman of the board",
-    "chief executive officer", "chief financial officer", "chief operating officer",
-    "chief technology officer", "chief medical officer", "board of directors",
-    "independent director", "president and ceo", "chairman and ceo",
-    "ceo", "cfo", "coo", "cto", "cmo", "director", "officer",
+    "founder", "executive chairman", "chairman of the board", "chief executive officer",
+    "chief financial officer", "chief operating officer", "board of directors",
+    "independent director", "president and ceo", "chairman and ceo", "director",
 ]
 
 
 def is_officer_bio_snippet(text: str) -> bool:
-    """Reject management/title fragments that are bios, not tradable catalysts.
-
-    Allows real corporate actions like appoints/resigns, but blocks fragments like
-    "Founder, Executive Chairman of the Board, Chief Executive Officer".
-    """
+    """Reject management/title fragments that are bios, not tradable catalysts."""
     h = (text or "").strip().lower()
     if not h:
         return False
-
-    action_words = (
-        "announces", "appoints", "appointed", "resigns", "resigned",
-        "steps down", "named", "elects", "elected", "hires", "joins",
-        "retire", "retires", "transition", "promotes", "promoted",
-    )
-    has_action = any(w in h for w in action_words)
-    hits = sum(1 for term in OFFICER_BIO_NEWS_TERMS if re.search(rf"\b{re.escape(term)}\b", h))
-
-    # Multiple titles with no action verb = bio/sidebar snippet, not news.
-    if hits >= 2 and not has_action:
+    hits = sum(1 for term in OFFICER_BIO_NEWS_TERMS if term in h)
+    # Two or more officer terms, or a comma-separated title fragment with no action verb, is junk.
+    action_words = ("announces", "appoints", "appointed", "resigns", "steps down", "named", "elects", "hires")
+    if hits >= 2 and not any(w in h for w in action_words):
         return True
-
-    # Short comma-separated title fragments are almost always profile text.
-    if hits >= 1 and "," in h and len(h) <= 120 and not has_action:
+    if hits >= 1 and "," in h and len(h) <= 95 and not any(w in h for w in action_words):
         return True
-
-    # Standalone officer/title fragments should never show as catalyst.
-    if hits >= 1 and len(h.split()) <= 10 and not has_action:
-        return True
-
     return False
-
-
 DILUTION_TERMS = [
     "registered direct", "private placement", "atm", "at-the-market", "shelf", "s-3", "s-1",
     "424b5", "warrant", "convertible", "equity line", "resale", "offering", "securities purchase agreement",
 ]
 
+
+
+NEWS_A_PLUS_TERMS = [
+    "fda approval", "fda clearance", "approved by the fda", "phase 3", "positive phase 3",
+    "acquisition", "to acquire", "will acquire", "definitive merger", "major contract",
+]
+NEWS_A_TERMS = [
+    "contract", "purchase order", "merger", "business combination", "definitive agreement",
+    "licensing agreement", "license agreement", "strategic partnership", "partnership",
+    "collaboration", "positive data", "clinical data", "earnings", "guidance",
+]
+NEWS_B_TERMS = [
+    "mou", "memorandum of understanding", "facility", "expansion", "financing agreement",
+    "share consolidation", "reverse split", "launch", "distribution agreement", "strategic update",
+]
+NEWS_C_TERMS = [
+    "presentation", "conference", "appoints", "appointment", "corporate update", "announces", "expands",
+]
+
+
+def news_rank_code_from_headline(headline: str, grade: str = "") -> str:
+    """User-facing news confidence rank.
+
+    A+ = elite catalyst, A = strong catalyst, B = moderate catalyst,
+    C = weak/company update, D = unknown/missing catalyst, F = junk/aggregator.
+    This is context only; market leaders are not rejected just because news is weak/missing.
+    """
+    h = (headline or "").strip().lower()
+    g = (grade or "").upper()
+    if g == "JUNK" or is_officer_bio_snippet(headline) or any(p in h for p in JUNK_NEWS_PHRASES):
+        return "F"
+    if not h or "unknown catalyst" in h or g in {"NONE", "D"}:
+        return "D"
+    if any(term in h for term in NEWS_A_PLUS_TERMS):
+        return "A+"
+    if any(term in h for term in NEWS_A_TERMS):
+        return "A"
+    if any(term in h for term in NEWS_B_TERMS):
+        return "B"
+    if any(term in h for term in NEWS_C_TERMS) or g == "WEAK":
+        return "C"
+    if g == "STRONG":
+        return "A"
+    return "D"
+
+
+def news_rank_label(rank: str) -> str:
+    return {
+        "A+": "🟢 NEWS A+",
+        "A": "🟢 NEWS A",
+        "B": "🟡 NEWS B",
+        "C": "🟠 NEWS C",
+        "D": "⚪ NEWS D",
+        "F": "🔴 NEWS F",
+    }.get(rank, "⚪ NEWS D")
+
+
+def news_rank_score(rank: str) -> int:
+    return {"A+": 3, "A": 2, "B": 1, "C": 0, "D": 0, "F": -1}.get(rank, 0)
 
 def classify_headline(headline: str) -> Tuple[str, bool, str]:
     h = headline.lower()
@@ -1714,6 +1755,7 @@ def best_news(ticker: str) -> NewsResult:
 
     fallback_dilution = False
     fallback_dilution_note = ""
+    saw_junk_headline = False
 
     for fn in (get_finnhub_news, get_yahoo_news, get_webull_news):
         try:
@@ -1724,6 +1766,7 @@ def best_news(ticker: str) -> NewsResult:
                 fallback_dilution = True
                 fallback_dilution_note = nr.dilution_note
             if nr.grade == "JUNK":
+                saw_junk_headline = True
                 continue
             if nr.grade in {"STRONG", "WEAK"}:
                 NEWS_CACHE[ticker] = (time.time(), nr)
@@ -1731,13 +1774,22 @@ def best_news(ticker: str) -> NewsResult:
         except Exception as exc:
             log.warning("[NEWS ERROR] %s %s", ticker, exc)
 
-    nr = NewsResult(
-        grade="NONE",
-        headline="UNKNOWN CATALYST — INVESTIGATE",
-        source="none",
-        dilution_flag=fallback_dilution,
-        dilution_note=fallback_dilution_note,
-    )
+    if saw_junk_headline:
+        nr = NewsResult(
+            grade="JUNK",
+            headline="Aggregator/Junk Headline",
+            source="junk-filter",
+            dilution_flag=fallback_dilution,
+            dilution_note=fallback_dilution_note,
+        )
+    else:
+        nr = NewsResult(
+            grade="NONE",
+            headline="UNKNOWN CATALYST — INVESTIGATE",
+            source="none",
+            dilution_flag=fallback_dilution,
+            dilution_note=fallback_dilution_note,
+        )
     NEWS_CACHE[ticker] = (time.time(), nr)
     return nr
 
@@ -1752,7 +1804,7 @@ def clean_news_text(n: NewsResult) -> str:
         return "UNKNOWN CATALYST — INVESTIGATE"
     grade, _, _ = classify_headline(headline)
     if grade == "JUNK":
-        return "UNKNOWN CATALYST — INVESTIGATE"
+        return "Aggregator/Junk Headline"
     return headline[:120]
 
 def summarize_news(headline: str) -> str:
@@ -1760,8 +1812,10 @@ def summarize_news(headline: str) -> str:
     h = (headline or "").strip()
     low = h.lower()
 
-    if not h or "unknown catalyst" in low or is_officer_bio_snippet(h):
+    if not h or "unknown catalyst" in low:
         return "UNKNOWN CATALYST — INVESTIGATE"
+    if is_officer_bio_snippet(h) or any(p in low for p in JUNK_NEWS_PHRASES) or "aggregator/junk" in low:
+        return "Aggregator/Junk Headline"
     if "share consolidation" in low or "reverse split" in low:
         return "Share Consolidation"
     if "business combination" in low or "merger" in low or "acquisition" in low:
@@ -2032,6 +2086,10 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
 
     rvol_bonus, _ = relative_volume_score(vol)
     score += rvol_bonus
+
+    # News rank is context only. It can boost true catalysts and slightly de-rate junk,
+    # but it should never block a real market leader by itself.
+    score += news_rank_score(news_rank_code_from_headline(news.headline, news.grade))
 
     # Structure
     if structure.above_vwap:
@@ -2364,20 +2422,6 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 # ALERTING
 # =============================================================================
 
-def dedupe_alert_lines(text: str) -> str:
-    """Remove accidental duplicate non-blank alert lines while preserving spacing."""
-    seen = set()
-    out = []
-    for line in text.splitlines():
-        key = line.strip().lower()
-        if key and key in seen:
-            continue
-        out.append(line.rstrip())
-        if key:
-            seen.add(key)
-    return "\n".join(out).strip()
-
-
 def format_alert(d: CandidateDecision) -> str:
     q = d.quote or Quote(d.ticker)
     s = d.structure or Structure()
@@ -2401,6 +2445,8 @@ def format_alert(d: CandidateDecision) -> str:
     else:
         action_line = "📈 Live Push"
 
+    news_rank = news_rank_code_from_headline(n.headline, n.grade)
+    news_header = news_rank_label(news_rank)
     news_line = summarize_news(clean_news_text(n))
 
     structure_parts = []
@@ -2428,7 +2474,7 @@ def format_alert(d: CandidateDecision) -> str:
         signal_lines.append(action_line)
     signal_block = "\n".join(dedupe_text(signal_lines))
 
-    alert_text = f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
+    return f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
 
 {rank_txt}
 Float: {float_txt}
@@ -2436,7 +2482,7 @@ Float: {float_txt}
 
 {signal_block}
 
-NEWS:
+{news_header}
 {news_line}
 
 STRUCTURE:
@@ -2444,7 +2490,6 @@ STRUCTURE:
 
 NEXT:
 {next_line}"""
-    return dedupe_alert_lines(alert_text)
 
 
 def send_telegram(text: str) -> bool:
