@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v58-scan-only-confirmed-leaders"
+VERSION = "v59-live-candles-only"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -64,6 +64,7 @@ MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "40"))
 MAX_LEADERS_FETCH = int(os.getenv("MAX_LEADERS_FETCH", "250"))
 VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "120"))
 ALLOW_SEED_ONLY_LEADERS = False  # scan-only: never trust unconfirmed seed/watchlist data
+ALLOW_FINNHUB_LEADER_CONFIRM = False  # live-only: do not confirm leaders with quote-only data
 REQUIRE_CONFIRMED_LEADER_DATA = os.getenv("REQUIRE_CONFIRMED_LEADER_DATA", "true").lower() in {"1", "true", "yes", "y"}
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "12"))
 MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
@@ -100,8 +101,10 @@ LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 
 QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "20"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
-CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "20"))
+CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "5"))
 CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "60"))
+IDEAL_CANDLE_AGE_SECONDS = int(os.getenv("IDEAL_CANDLE_AGE_SECONDS", "20"))
+WARN_CANDLE_AGE_SECONDS = int(os.getenv("WARN_CANDLE_AGE_SECONDS", "30"))
 MIN_GOOD_CANDLES = int(os.getenv("MIN_GOOD_CANDLES", "20"))
 PROFILE_CACHE_TTL_SECONDS = int(os.getenv("PROFILE_CACHE_TTL_SECONDS", "1800"))
 
@@ -873,8 +876,8 @@ def get_yahoo_quote_snapshot(ticker: str) -> Optional[Quote]:
         try:
             last_ts = datetime.fromtimestamp(int(timestamps[last_i]), tz=timezone.utc).astimezone(EASTERN_TZ)
             age = int((now_et() - last_ts).total_seconds())
-            if age > max(CANDLE_MAX_AGE_SECONDS * 2, 150):
-                log.info("[YAHOO VERIFY STALE] %s age=%ss", ticker, age)
+            if age > CANDLE_MAX_AGE_SECONDS:
+                log.info("[YAHOO VERIFY STALE] %s age=%ss max=%ss", ticker, age, CANDLE_MAX_AGE_SECONDS)
                 return None
         except Exception:
             pass
@@ -908,7 +911,7 @@ def consensus_live_leader(leader: Leader) -> Optional[Leader]:
 
     yah = get_yahoo_quote_snapshot(ticker)
     fin = None
-    if not yah and FINNHUB_API_KEY and source_allowed("finnhub"):
+    if ALLOW_FINNHUB_LEADER_CONFIRM and not yah and FINNHUB_API_KEY and source_allowed("finnhub"):
         fin = get_finnhub_quote(ticker)
 
     if yah and yah.change_pct >= MIN_SCAN_GAIN_PCT:
@@ -1277,29 +1280,26 @@ def best_candles(ticker: str) -> List[Candle]:
     cached = CANDLE_CACHE.get(ticker)
     if cached:
         ts, candles = cached
-        if time.time() - ts <= CANDLE_CACHE_TTL_SECONDS and candles:
+        age = candle_age_seconds(candles)
+        if (
+            time.time() - ts <= CANDLE_CACHE_TTL_SECONDS
+            and candles
+            and age is not None
+            and age <= CANDLE_MAX_AGE_SECONDS
+        ):
             return candles
 
     candidates: List[Tuple[str, List[Candle]]] = []
 
-    # Alpaca first, but IEX can be thin on runners.
+    # Yahoo 1m is the primary live validation source for hot small caps.
+    yahoo = get_yahoo_candles(ticker)
+    if yahoo:
+        candidates.append(("Yahoo", yahoo))
+
+    # Alpaca IEX can be thin, but it can still beat Yahoo when Yahoo is stale.
     alpaca = get_alpaca_candles(ticker)
     if alpaca:
         candidates.append(("Alpaca", alpaca))
-
-    # Yahoo often fills missing small-cap bars better.
-    yahoo_needed = not candles_fresh_enough(alpaca)
-    if yahoo_needed:
-        yahoo = get_yahoo_candles(ticker)
-        if yahoo:
-            candidates.append(("Yahoo", yahoo))
-
-    # Finnhub final fallback/validator when Yahoo or Alpaca is sparse/stale.
-    best_so_far = max((c for _, c in candidates), key=candle_source_rank, default=[])
-    if not candles_fresh_enough(best_so_far):
-        finnhub = get_finnhub_candles(ticker)
-        if finnhub:
-            candidates.append(("Finnhub", finnhub))
 
     if not candidates:
         return []
@@ -1307,6 +1307,12 @@ def best_candles(ticker: str) -> List[Candle]:
     source, candles = max(candidates, key=lambda item: candle_source_rank(item[1]))
     age = candle_age_seconds(candles)
     log.info("[CANDLES BEST] %s source=%s bars=%s age=%s", ticker, source, len(candles), age)
+
+    # Hard live-data rule: never cache/return stale candle data as usable.
+    if age is None or age > CANDLE_MAX_AGE_SECONDS:
+        log.info("[CANDLES LIVE REJECT] %s source=%s age=%s max=%s", ticker, source, age, CANDLE_MAX_AGE_SECONDS)
+        CANDLE_CACHE.pop(ticker, None)
+        return []
 
     CANDLE_CACHE[ticker] = (time.time(), candles)
     return candles
@@ -1793,6 +1799,20 @@ def quality_score(leader: Leader, quote: Quote, structure: Structure, news: News
     if structure.data_ok and structure.extended_from_vwap_pct >= 30 and not structure.near_hod:
         score -= 1
 
+    # Live-candle quality penalty. Good scans need fresh bars; stale bars should not alert.
+    age = None
+    try:
+        age_txt = structure.reason if structure.reason else ""
+        m = re.search(r"stale candles (\d+)s", age_txt)
+        if m:
+            age = int(m.group(1))
+    except Exception:
+        age = None
+    if not structure.data_ok:
+        score -= 3
+    elif age is not None and age > WARN_CANDLE_AGE_SECONDS:
+        score -= 2
+
     return int(clamp(score, 0, 10))
 
 
@@ -1989,6 +2009,12 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         required_quality = 7
     else:
         required_quality = MIN_ALERT_QUALITY
+
+    # Hard live-candle alert rule: do not alert anything when structure data is missing/stale.
+    # This prevents MARKET LEADER alerts based only on stale screener/quote data.
+    if alert_type and not structure.data_ok:
+        risks.append(structure.reason or "no fresh candle data")
+        alert_type = ""
 
     # Avoid weak setup alerts below VWAP. Keep true leader/spike awareness only for
     # extreme leaders or true fast-spike events. This blocks +50–70% stale/fading names
