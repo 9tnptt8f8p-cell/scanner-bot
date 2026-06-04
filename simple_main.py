@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v54-today-only-leaders-reset"
+VERSION = "v55-live-leader-verification"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -60,8 +60,11 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "12"))
-NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "8"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "30"))
+MAX_LEADERS_FETCH = int(os.getenv("MAX_LEADERS_FETCH", "250"))
+VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "60"))
+EXTRA_TICKERS_RAW = os.getenv("EXTRA_TICKERS", "")
+NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "12"))
 MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
 MIN_FAST_SPIKE_QUALITY = int(os.getenv("MIN_FAST_SPIKE_QUALITY", "5"))
 MARKET_LEADER_OVERRIDE_QUALITY = int(os.getenv("MARKET_LEADER_OVERRIDE_QUALITY", "7"))
@@ -94,7 +97,7 @@ YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
 LEADER_CACHE_TTL_SECONDS = int(os.getenv("LEADER_CACHE_TTL_SECONDS", "900"))
 
-QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "60"))
+QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "20"))
 NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 CANDLE_CACHE_TTL_SECONDS = int(os.getenv("CANDLE_CACHE_TTL_SECONDS", "20"))
 CANDLE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_MAX_AGE_SECONDS", "60"))
@@ -625,18 +628,7 @@ def get_nasdaq_gainers() -> List[Leader]:
     return leaders[:80]
 
 
-def get_yahoo_gainers() -> List[Leader]:
-    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-    params = {
-        "scrIds": "day_gainers",
-        "count": "100",
-        "start": "0",
-        "formatted": "false",
-        "lang": "en-US",
-        "region": "US",
-    }
-    resp = http_get(url, source="yahoo", params=params)
-    data = parse_json_response(resp, "yahoo")
+def _parse_yahoo_screener_quotes(data: Any, source_name: str) -> List[Leader]:
     try:
         quotes = data["finance"]["result"][0]["quotes"]
     except Exception:
@@ -656,17 +648,75 @@ def get_yahoo_gainers() -> List[Leader]:
                 price=price,
                 change_pct=pct,
                 volume=vol,
-                source="yahoo",
+                source=source_name,
                 name=name,
                 market_cap=market_cap,
                 raw=q,
             )
         )
+    return leaders
+
+
+def get_yahoo_gainers() -> List[Leader]:
+    """Fetch more than Yahoo's first page. Hot names can fall off page 1 while feeds reshuffle."""
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    leaders: List[Leader] = []
+    page_size = 100
+    max_fetch = max(100, MAX_LEADERS_FETCH)
+
+    for start in range(0, max_fetch, page_size):
+        params = {
+            "scrIds": "day_gainers",
+            "count": str(page_size),
+            "start": str(start),
+            "formatted": "false",
+            "lang": "en-US",
+            "region": "US",
+        }
+        resp = http_get(url, source="yahoo", params=params)
+        data = parse_json_response(resp, "yahoo")
+        rows = _parse_yahoo_screener_quotes(data, "yahoo")
+        if not rows:
+            break
+        leaders.extend(rows)
+        if len(rows) < page_size:
+            break
 
     leaders = [x for x in leaders if x.change_pct >= MIN_SCAN_GAIN_PCT]
     leaders.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
     log.info("[YAHOO GAINERS] %s names", len(leaders))
-    return leaders[:80]
+    return leaders[:MAX_LEADERS_FETCH]
+
+
+def get_yahoo_most_active() -> List[Leader]:
+    """Secondary source. Some monster runners appear in most-active before day-gainers updates."""
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    leaders: List[Leader] = []
+    page_size = 100
+    max_fetch = min(MAX_LEADERS_FETCH, 200)
+
+    for start in range(0, max_fetch, page_size):
+        params = {
+            "scrIds": "most_actives",
+            "count": str(page_size),
+            "start": str(start),
+            "formatted": "false",
+            "lang": "en-US",
+            "region": "US",
+        }
+        resp = http_get(url, source="yahoo_active", params=params)
+        data = parse_json_response(resp, "yahoo_active")
+        rows = _parse_yahoo_screener_quotes(data, "yahoo_active")
+        if not rows:
+            break
+        leaders.extend(rows)
+        if len(rows) < page_size:
+            break
+
+    leaders = [x for x in leaders if x.change_pct >= MIN_SCAN_GAIN_PCT]
+    leaders.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
+    log.info("[YAHOO MOST ACTIVE HOT] %s names", len(leaders))
+    return leaders[:MAX_LEADERS_FETCH]
 
 
 def get_webull_gainers_placeholder() -> List[Leader]:
@@ -716,6 +766,61 @@ def get_finnhub_movers_seed() -> List[Leader]:
     return out
 
 
+
+def extra_tickers() -> List[str]:
+    """Manual emergency seed list via Render env EXTRA_TICKERS=FOXX,STI,WCT.
+    This is not required, but gives you a panic button when a screener feed lags.
+    """
+    out: List[str] = []
+    for raw in EXTRA_TICKERS_RAW.split(','):
+        t = normalize_ticker(raw)
+        if t and t not in out and not is_probably_warrant_or_unit(t):
+            out.append(t)
+    return out
+
+
+def get_extra_ticker_seeds() -> List[Leader]:
+    out: List[Leader] = []
+    for t in extra_tickers():
+        q = get_finnhub_quote(t)
+        if q and q.change_pct >= MIN_SCAN_GAIN_PCT:
+            out.append(Leader(ticker=t, price=q.price, change_pct=q.change_pct, volume=q.day_volume, source='extra_live'))
+    if out:
+        log.info("[EXTRA LIVE SEEDS] %s", ','.join(f"{x.ticker}:{x.change_pct:.1f}%" for x in out))
+    return out
+
+
+def verify_and_rerank_leaders(leaders: Sequence[Leader]) -> List[Leader]:
+    """Live quote verification pass.
+
+    Screeners can lag. This rechecks the top pool with Finnhub/leader quote, then
+    reranks by CURRENT percent gain so +300% names rise above stale +60% names.
+    """
+    pool = dedupe_leaders(leaders)[:VERIFY_TOP_N_LEADERS]
+    verified: List[Leader] = []
+
+    for leader in pool:
+        q = best_quote(leader.ticker, leader)
+        if not q or q.price <= 0:
+            continue
+        live_gain = max(q.change_pct, leader.change_pct)
+        live_vol = max(q.day_volume, leader.volume)
+        if live_gain < MIN_SCAN_GAIN_PCT:
+            continue
+        leader.price = q.price or leader.price
+        leader.change_pct = live_gain
+        leader.volume = live_vol
+        leader.source = f"{leader.source}+verified"
+        verified.append(leader)
+
+    verified = dedupe_leaders(verified)
+    verified.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
+
+    for rank, leader in enumerate(verified[:40], start=1):
+        log.info("[LIVE LEADER] #%02d %s gain=%.1f vol=%s source=%s", rank, leader.ticker, leader.change_pct, leader.volume, leader.source)
+
+    return verified
+
 def get_leaders() -> List[Leader]:
     global LAST_GOOD_LEADERS, LAST_GOOD_LEADERS_TS, LAST_GOOD_LEADERS_TRADE_DATE
 
@@ -725,6 +830,8 @@ def get_leaders() -> List[Leader]:
         ("nasdaq", get_nasdaq_gainers),
         ("webull", get_webull_gainers_placeholder),
         ("yahoo", get_yahoo_gainers),
+        ("yahoo_active", get_yahoo_most_active),
+        ("extra", get_extra_ticker_seeds),
     ):
         try:
             rows = fn()
@@ -739,7 +846,7 @@ def get_leaders() -> List[Leader]:
         except Exception as exc:
             log.warning("[FINNHUB_SEED ERROR] %s", exc)
 
-    leaders = dedupe_leaders(all_rows)
+    leaders = verify_and_rerank_leaders(all_rows)
 
     if leaders:
         # Add float/profile only for top names to avoid slowing scanner.
