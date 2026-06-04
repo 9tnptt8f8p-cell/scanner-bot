@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v60-elite-dynamic-leader"
+VERSION = "v60.1-elite-fixed-hot-day"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -100,10 +100,13 @@ DAILY_BREAKOUT_LOOKBACK_DAYS = int(os.getenv("DAILY_BREAKOUT_LOOKBACK_DAYS", "60
 HOT_DAY_NORMAL_TOP_GAIN = float(os.getenv("HOT_DAY_NORMAL_TOP_GAIN", "50"))
 HOT_DAY_HOT_TOP_GAIN = float(os.getenv("HOT_DAY_HOT_TOP_GAIN", "100"))
 HOT_DAY_INSANE_TOP_GAIN = float(os.getenv("HOT_DAY_INSANE_TOP_GAIN", "200"))
-HOT_DAY_NORMAL_MIN_GAIN = float(os.getenv("HOT_DAY_NORMAL_MIN_GAIN", "35"))
-HOT_DAY_HOT_MIN_GAIN = float(os.getenv("HOT_DAY_HOT_MIN_GAIN", "50"))
-HOT_DAY_INSANE_MIN_GAIN = float(os.getenv("HOT_DAY_INSANE_MIN_GAIN", "75"))
+HOT_DAY_NORMAL_MIN_GAIN = float(os.getenv("HOT_DAY_NORMAL_MIN_GAIN", "30"))
+HOT_DAY_HOT_MIN_GAIN = float(os.getenv("HOT_DAY_HOT_MIN_GAIN", "40"))
+HOT_DAY_INSANE_MIN_GAIN = float(os.getenv("HOT_DAY_INSANE_MIN_GAIN", "50"))
 FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR = os.getenv("FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR", "true").lower() in {"1", "true", "yes", "y"}
+TOP3_LEADER_OVERRIDE = os.getenv("TOP3_LEADER_OVERRIDE", "true").lower() in {"1", "true", "yes", "y"}
+TOP3_OVERRIDE_MIN_GAIN = float(os.getenv("TOP3_OVERRIDE_MIN_GAIN", "40"))
+TOP3_OVERRIDE_MIN_VOLUME = int(os.getenv("TOP3_OVERRIDE_MIN_VOLUME", "10000000"))
 
 HOT_SECTOR_TERMS = [
     "ai", "artificial intelligence", "quantum", "crypto", "bitcoin", "blockchain",
@@ -2065,6 +2068,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     remember_first_seen(leader, quote)
 
     regime, top_gain, dynamic_min_gain = market_regime_from_leaders(LAST_GOOD_LEADERS)
+    leader_rank = next((i + 1 for i, x in enumerate(LAST_GOOD_LEADERS) if normalize_ticker(x.ticker) == ticker), 999)
 
     if not (MIN_PRICE <= quote.price <= MAX_PRICE):
         return CandidateDecision(ticker=ticker, should_alert=False, reasons=["price outside range"], quote=quote, leader=leader)
@@ -2138,10 +2142,22 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         and day_vol >= MIN_FAST_SPIKE_DAY_VOLUME
         and structure.data_ok
     )
+    top3_override_ok = (
+        TOP3_LEADER_OVERRIDE
+        and leader_rank <= 3
+        and gain >= TOP3_OVERRIDE_MIN_GAIN
+        and day_vol >= TOP3_OVERRIDE_MIN_VOLUME
+        and structure.data_ok
+    )
 
-    # On hot/insane days, do not alert a lazy +27% name. Only a true fresh +10% push can bypass
-    # the dynamic gain floor, and even then it must have elite liquidity/potential.
-    passes_dynamic_gain = gain >= dynamic_min_gain or (FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR and fast_spike_ok)
+    # On hot/insane days, do not alert a lazy +27% name. A true fresh +10% push
+    # can bypass the dynamic floor. Also allow top-3 volume monsters so the scanner
+    # does not go blind when the tape is very hot.
+    passes_dynamic_gain = (
+        gain >= dynamic_min_gain
+        or (FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR and fast_spike_ok)
+        or top3_override_ok
+    )
     if not passes_dynamic_gain:
         return CandidateDecision(
             ticker=ticker,
@@ -2160,6 +2176,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         alert_type = ""
     elif fast_spike_ok and potential >= max(4, MIN_ELITE_POTENTIAL_SCORE - 2):
         alert_type = "FAST SPIKE"
+    elif top3_override_ok and potential >= 4:
+        alert_type = "MONSTER LEADER"
     elif gain >= 100 and day_vol >= MIN_ELITE_DAY_VOLUME and potential >= 5:
         alert_type = "MONSTER LEADER"
     elif (
@@ -2199,8 +2217,9 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     )
 
     log.info(
-        "[CHECK] %s regime=%s top=%.1f floor=%.1f type=%s alert=%s q=%s req=%s pot=%s gain=%.1f spike=%.1f rvol=%.1f vol=%s daily=%s structure=%s news=%s risks=%s",
+        "[CHECK] %s rank=%s regime=%s top=%.1f floor=%.1f type=%s alert=%s q=%s req=%s pot=%s gain=%.1f spike=%.1f rvol=%.1f vol=%s daily=%s structure=%s news=%s risks=%s",
         ticker,
+        leader_rank,
         regime,
         top_gain,
         dynamic_min_gain,
