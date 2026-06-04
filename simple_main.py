@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v55-live-leader-verification"
+VERSION = "v56-consensus-live-leaders-bad-data-guard"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -60,9 +60,9 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "45"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
 
 MAX_ALERTS_PER_CYCLE = int(os.getenv("MAX_ALERTS_PER_CYCLE", "3"))
-MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "30"))
+MAX_LEADERS_PER_CYCLE = int(os.getenv("MAX_LEADERS_PER_CYCLE", "40"))
 MAX_LEADERS_FETCH = int(os.getenv("MAX_LEADERS_FETCH", "250"))
-VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "60"))
+VERIFY_TOP_N_LEADERS = int(os.getenv("VERIFY_TOP_N_LEADERS", "120"))
 EXTRA_TICKERS_RAW = os.getenv("EXTRA_TICKERS", "")
 NEWS_TOP_N = int(os.getenv("NEWS_TOP_N", "12"))
 MIN_ALERT_QUALITY = int(os.getenv("MIN_ALERT_QUALITY", "6"))
@@ -719,6 +719,60 @@ def get_yahoo_most_active() -> List[Leader]:
     return leaders[:MAX_LEADERS_FETCH]
 
 
+
+def get_stockanalysis_gainers() -> List[Leader]:
+    """HTML fallback source for current top gainers.
+
+    This catches symbols that Yahoo/Nasdaq/Finnhub miss or stale-rank.
+    It is only used as a seed list; every symbol still goes through live quote/chart validation.
+    """
+    url = "https://stockanalysis.com/markets/gainers/"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://stockanalysis.com/",
+    }
+    resp = http_get(url, source="stockanalysis", headers=headers, timeout=min(HTTP_TIMEOUT, 4.0))
+    if resp is None or not resp.text:
+        return []
+
+    text = resp.text
+    leaders: List[Leader] = []
+
+    # Table rows usually contain /stocks/SYMBOL/ plus price, change %, volume.
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", text, flags=re.I | re.S)
+    for row in rows:
+        m = re.search(r'/stocks/([a-z0-9\-]+)/', row, flags=re.I)
+        if not m:
+            continue
+        ticker = normalize_ticker(m.group(1))
+        clean = html.unescape(re.sub(r"<[^>]+>", " ", row))
+        clean = re.sub(r"\s+", " ", clean).strip()
+
+        pct_matches = re.findall(r'([+-]?\d+(?:\.\d+)?)\s*%', clean)
+        if not pct_matches:
+            continue
+        pct = max(safe_float(x) for x in pct_matches)
+        if pct < MIN_SCAN_GAIN_PCT:
+            continue
+
+        money = re.findall(r'\$\s*([0-9]+(?:\.[0-9]+)?)', clean)
+        price = safe_float(money[0]) if money else 0.0
+
+        vol = 0
+        # Last compact K/M/B number is often volume. It is only a seed; live quote/candles validate later.
+        compact_nums = re.findall(r'\b([0-9]+(?:\.[0-9]+)?[KMB])\b', clean, flags=re.I)
+        if compact_nums:
+            vol = safe_int(compact_nums[-1])
+
+        leaders.append(Leader(ticker=ticker, price=price, change_pct=pct, volume=vol, source="stockanalysis", raw={"row": clean[:300]}))
+
+    leaders = dedupe_leaders(leaders)
+    leaders.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
+    log.info("[STOCKANALYSIS GAINERS] %s names", len(leaders))
+    return leaders[:MAX_LEADERS_FETCH]
+
+
 def get_webull_gainers_placeholder() -> List[Leader]:
     """
     Insert a working Webull gainers endpoint here if you find a stable one.
@@ -790,33 +844,111 @@ def get_extra_ticker_seeds() -> List[Leader]:
     return out
 
 
-def verify_and_rerank_leaders(leaders: Sequence[Leader]) -> List[Leader]:
-    """Live quote verification pass.
 
-    Screeners can lag. This rechecks the top pool with Finnhub/leader quote, then
-    reranks by CURRENT percent gain so +300% names rise above stale +60% names.
+def get_yahoo_quote_snapshot(ticker: str) -> Optional[Quote]:
+    """Fresh Yahoo chart/meta quote used to prevent bad Finnhub/Nasdaq % data.
+
+    If Yahoo chart is fresh, it gives price, previous close/chartPreviousClose, volume and day high.
+    """
+    ticker = normalize_ticker(ticker)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
+    resp = http_get(url, source="yahoo_verify", params=params, timeout=min(HTTP_TIMEOUT, 3.0))
+    data = parse_json_response(resp, "yahoo_verify")
+    try:
+        result = data["chart"]["result"][0]
+        meta = result.get("meta") or {}
+    except Exception:
+        return None
+
+    price = safe_float(meta.get("regularMarketPrice") or meta.get("previousClose"))
+    prev = safe_float(meta.get("chartPreviousClose") or meta.get("previousClose"))
+    high = safe_float(meta.get("regularMarketDayHigh"))
+    low = safe_float(meta.get("regularMarketDayLow"))
+    vol = safe_int(meta.get("regularMarketVolume"))
+    gain = pct_change(price, prev)
+    if price <= 0 or prev <= 0 or gain < -95 or gain > 2000:
+        return None
+    return Quote(ticker=ticker, price=price, prev_close=prev, change_pct=gain, day_volume=vol, high=high, low=low, source="yahoo_verify")
+
+
+def consensus_live_leader(leader: Leader) -> Optional[Leader]:
+    """Return a verified leader or None.
+
+    Bad data fix:
+    - Do not blindly trust Nasdaq/Yahoo/Finnhub percent gain.
+    - Prefer fresh Yahoo chart/meta percent when available.
+    - If Finnhub and Yahoo disagree badly, use Yahoo and flag the source.
+    - If only one source exists, keep it only if it passes basic sanity + candle/price range.
+    """
+    ticker = normalize_ticker(leader.ticker)
+    if not ticker or is_probably_warrant_or_unit(ticker):
+        return None
+
+    fin = get_finnhub_quote(ticker) if FINNHUB_API_KEY else None
+    yah = get_yahoo_quote_snapshot(ticker)
+
+    gains = []
+    if yah and yah.change_pct >= MIN_SCAN_GAIN_PCT:
+        gains.append(("yahoo", yah.change_pct, yah))
+    if fin and fin.change_pct >= MIN_SCAN_GAIN_PCT:
+        gains.append(("finnhub", fin.change_pct, fin))
+    if leader.change_pct >= MIN_SCAN_GAIN_PCT and leader.price > 0:
+        gains.append((leader.source, leader.change_pct, None))
+
+    if not gains:
+        return None
+
+    # Fresh Yahoo chart/meta wins because it prevents stale screener/bad Finnhub pct issues.
+    if yah and yah.change_pct >= MIN_SCAN_GAIN_PCT:
+        chosen = yah
+        source = f"{leader.source}+yahoo_confirmed"
+        # If Finnhub disagrees massively, note it in source instead of using Finnhub's bad gain.
+        if fin and abs(fin.change_pct - yah.change_pct) >= 35:
+            source += "+finnhub_disagree"
+    elif fin and fin.change_pct >= MIN_SCAN_GAIN_PCT:
+        chosen = fin
+        source = f"{leader.source}+finnhub_only"
+    else:
+        # Last resort seed only. This should be rare.
+        chosen = Quote(ticker=ticker, price=leader.price, change_pct=leader.change_pct, day_volume=leader.volume, source=leader.source)
+        source = f"{leader.source}+seed_only"
+
+    if chosen.price <= 0 or not (MIN_PRICE <= chosen.price <= MAX_PRICE):
+        return None
+    if chosen.change_pct < MIN_SCAN_GAIN_PCT:
+        return None
+
+    leader.price = chosen.price or leader.price
+    leader.change_pct = chosen.change_pct
+    leader.volume = max(chosen.day_volume, leader.volume)
+    leader.source = source
+    return leader
+
+
+def verify_and_rerank_leaders(leaders: Sequence[Leader]) -> List[Leader]:
+    """Consensus live verification pass.
+
+    The old version could show wrong leaders because a single feed could report stale/bad % gain.
+    This version validates each seed with fresh Yahoo chart/meta and Finnhub quote, then reranks.
     """
     pool = dedupe_leaders(leaders)[:VERIFY_TOP_N_LEADERS]
     verified: List[Leader] = []
 
     for leader in pool:
-        q = best_quote(leader.ticker, leader)
-        if not q or q.price <= 0:
-            continue
-        live_gain = max(q.change_pct, leader.change_pct)
-        live_vol = max(q.day_volume, leader.volume)
-        if live_gain < MIN_SCAN_GAIN_PCT:
-            continue
-        leader.price = q.price or leader.price
-        leader.change_pct = live_gain
-        leader.volume = live_vol
-        leader.source = f"{leader.source}+verified"
-        verified.append(leader)
+        try:
+            v = consensus_live_leader(leader)
+            if v is None:
+                log.info("[BAD LEADER DATA DROP] %s source=%s seed_gain=%.1f", leader.ticker, leader.source, leader.change_pct)
+                continue
+            verified.append(v)
+        except Exception as exc:
+            log.warning("[VERIFY ERROR] %s %s", leader.ticker, exc)
 
     verified = dedupe_leaders(verified)
     verified.sort(key=lambda x: (x.change_pct, x.volume), reverse=True)
 
-    for rank, leader in enumerate(verified[:40], start=1):
+    for rank, leader in enumerate(verified[:50], start=1):
         log.info("[LIVE LEADER] #%02d %s gain=%.1f vol=%s source=%s", rank, leader.ticker, leader.change_pct, leader.volume, leader.source)
 
     return verified
@@ -831,6 +963,7 @@ def get_leaders() -> List[Leader]:
         ("webull", get_webull_gainers_placeholder),
         ("yahoo", get_yahoo_gainers),
         ("yahoo_active", get_yahoo_most_active),
+        ("stockanalysis", get_stockanalysis_gainers),
         ("extra", get_extra_ticker_seeds),
     ):
         try:
