@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v61.0-elite-alert-rvol-rank-hod"
+VERSION = "v61.2-elite-alert-cleanup"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -502,12 +502,12 @@ def float_flag(shares: Optional[float]) -> str:
     if shares is None or shares <= 0:
         return ""
     if shares <= 10:
-        return " ⭐ Low Float"
+        return " ⭐ LOW FLOAT"
     if shares <= 30:
-        return " 🟢 Tradable Float"
+        return " 🟢 TRADABLE FLOAT"
     if shares <= 50:
-        return " ⚠️ Mid Float"
-    return " ⚠️ Large Float"
+        return " ⚠️ MID FLOAT"
+    return " ⚠️ LARGE FLOAT"
 
 
 def format_vol_rvol(volume: int, rvol: float) -> str:
@@ -1492,7 +1492,55 @@ JUNK_NEWS_PHRASES = [
     "gap-ups and gap-downs", "top gainers", "market movers", "52-week", "benzinga pro's top",
     "stocks that are on the move", "on the move in today", "moving in today", "closing bell",
     "intraday session", "pre-market session", "after the closing bell",
+    # Officer/bio snippets are not catalysts. These caused alerts like:
+    # NEWS: Founder, Executive Chairman of the Board, Chief Executive Officer
+    "founder, executive chairman", "executive chairman of the board", "chief executive officer",
+    "chief financial officer", "chief operating officer", "board of directors",
+    "independent director", "president and ceo", "chairman and ceo",
 ]
+
+OFFICER_BIO_NEWS_TERMS = [
+    "founder", "co-founder", "executive chairman", "chairman of the board",
+    "chief executive officer", "chief financial officer", "chief operating officer",
+    "chief technology officer", "chief medical officer", "board of directors",
+    "independent director", "president and ceo", "chairman and ceo",
+    "ceo", "cfo", "coo", "cto", "cmo", "director", "officer",
+]
+
+
+def is_officer_bio_snippet(text: str) -> bool:
+    """Reject management/title fragments that are bios, not tradable catalysts.
+
+    Allows real corporate actions like appoints/resigns, but blocks fragments like
+    "Founder, Executive Chairman of the Board, Chief Executive Officer".
+    """
+    h = (text or "").strip().lower()
+    if not h:
+        return False
+
+    action_words = (
+        "announces", "appoints", "appointed", "resigns", "resigned",
+        "steps down", "named", "elects", "elected", "hires", "joins",
+        "retire", "retires", "transition", "promotes", "promoted",
+    )
+    has_action = any(w in h for w in action_words)
+    hits = sum(1 for term in OFFICER_BIO_NEWS_TERMS if re.search(rf"\b{re.escape(term)}\b", h))
+
+    # Multiple titles with no action verb = bio/sidebar snippet, not news.
+    if hits >= 2 and not has_action:
+        return True
+
+    # Short comma-separated title fragments are almost always profile text.
+    if hits >= 1 and "," in h and len(h) <= 120 and not has_action:
+        return True
+
+    # Standalone officer/title fragments should never show as catalyst.
+    if hits >= 1 and len(h.split()) <= 10 and not has_action:
+        return True
+
+    return False
+
+
 DILUTION_TERMS = [
     "registered direct", "private placement", "atm", "at-the-market", "shelf", "s-3", "s-1",
     "424b5", "warrant", "convertible", "equity line", "resale", "offering", "securities purchase agreement",
@@ -1504,7 +1552,7 @@ def classify_headline(headline: str) -> Tuple[str, bool, str]:
     dilution = any(term in h for term in DILUTION_TERMS)
     dilution_note = "offering/dilution language" if dilution else ""
 
-    if any(p in h for p in JUNK_NEWS_PHRASES):
+    if is_officer_bio_snippet(headline) or any(p in h for p in JUNK_NEWS_PHRASES):
         return "JUNK", dilution, dilution_note
     if any(term in h for term in STRONG_NEWS_TERMS):
         return "STRONG", dilution, dilution_note
@@ -1700,6 +1748,11 @@ def clean_news_text(n: NewsResult) -> str:
     headline = str(n.headline).strip()
     if headline.upper().startswith("UNKNOWN CATALYST"):
         return "UNKNOWN CATALYST — INVESTIGATE"
+    if is_officer_bio_snippet(headline):
+        return "UNKNOWN CATALYST — INVESTIGATE"
+    grade, _, _ = classify_headline(headline)
+    if grade == "JUNK":
+        return "UNKNOWN CATALYST — INVESTIGATE"
     return headline[:120]
 
 def summarize_news(headline: str) -> str:
@@ -1707,7 +1760,7 @@ def summarize_news(headline: str) -> str:
     h = (headline or "").strip()
     low = h.lower()
 
-    if not h or "unknown catalyst" in low:
+    if not h or "unknown catalyst" in low or is_officer_bio_snippet(h):
         return "UNKNOWN CATALYST — INVESTIGATE"
     if "share consolidation" in low or "reverse split" in low:
         return "Share Consolidation"
@@ -2311,6 +2364,20 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
 # ALERTING
 # =============================================================================
 
+def dedupe_alert_lines(text: str) -> str:
+    """Remove accidental duplicate non-blank alert lines while preserving spacing."""
+    seen = set()
+    out = []
+    for line in text.splitlines():
+        key = line.strip().lower()
+        if key and key in seen:
+            continue
+        out.append(line.rstrip())
+        if key:
+            seen.add(key)
+    return "\n".join(out).strip()
+
+
 def format_alert(d: CandidateDecision) -> str:
     q = d.quote or Quote(d.ticker)
     s = d.structure or Structure()
@@ -2328,10 +2395,9 @@ def format_alert(d: CandidateDecision) -> str:
         action_line = f"🔥 +{d.spike_pct:.1f}% in {FAST_SPIKE_WINDOW_MIN} min"
     elif d.alert_type == "HOD BREAK":
         action_line = "🚨 New High / HOD Push"
-    elif d.alert_type == "MONSTER LEADER":
-        action_line = "⭐ Monster Leader"
-    elif d.alert_type == "ELITE RUNNER":
-        action_line = "🔥 Elite Runner"
+    elif d.alert_type in {"MONSTER LEADER", "ELITE RUNNER"}:
+        # Do not duplicate the setup line (e.g. ⭐ Monster Leader twice).
+        action_line = ""
     else:
         action_line = "📈 Live Push"
 
@@ -2357,18 +2423,28 @@ def format_alert(d: CandidateDecision) -> str:
 
     next_line = "Watch HOD break" if s.near_hod or d.alert_type == "HOD BREAK" else ("Hold VWAP" if s.above_vwap else "Wait for VWAP reclaim")
 
-    return f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
+    signal_lines = [setup_line]
+    if action_line and action_line != setup_line:
+        signal_lines.append(action_line)
+    signal_block = "\n".join(dedupe_text(signal_lines))
+
+    alert_text = f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
 
 {rank_txt}
 Float: {float_txt}
 {vol_line}
 
-{setup_line}
-{action_line}
+{signal_block}
 
-NEWS: {news_line}
-STRUCTURE: {structure_line}
-NEXT: {next_line}"""
+NEWS:
+{news_line}
+
+STRUCTURE:
+{structure_line}
+
+NEXT:
+{next_line}"""
+    return dedupe_alert_lines(alert_text)
 
 
 def send_telegram(text: str) -> bool:
