@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v60.1-elite-fixed-hot-day"
+VERSION = "v61.0-elite-alert-rvol-rank-hod"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -107,6 +107,8 @@ FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR = os.getenv("FAST_SPIKE_ALLOWED_UNDER_DYN
 TOP3_LEADER_OVERRIDE = os.getenv("TOP3_LEADER_OVERRIDE", "true").lower() in {"1", "true", "yes", "y"}
 TOP3_OVERRIDE_MIN_GAIN = float(os.getenv("TOP3_OVERRIDE_MIN_GAIN", "40"))
 TOP3_OVERRIDE_MIN_VOLUME = int(os.getenv("TOP3_OVERRIDE_MIN_VOLUME", "10000000"))
+HOD_BREAK_MIN_GAIN = float(os.getenv("HOD_BREAK_MIN_GAIN", "40"))
+HOD_BREAK_MIN_VOLUME = int(os.getenv("HOD_BREAK_MIN_VOLUME", "5000000"))
 
 HOT_SECTOR_TERMS = [
     "ai", "artificial intelligence", "quantum", "crypto", "bitcoin", "blockchain",
@@ -264,6 +266,8 @@ class CandidateDecision:
     should_alert: bool
     alert_type: str = ""
     quality: int = 0
+    leader_rank: int = 999
+    rvol: float = 0.0
     reasons: List[str] = field(default_factory=list)
     risks: List[str] = field(default_factory=list)
     quote: Optional[Quote] = None
@@ -491,6 +495,27 @@ def format_float_shares(shares: Optional[float]) -> str:
     if shares >= 1_000_000:
         return f"{shares / 1_000_000:.1f}M"
     return f"{shares:.1f}M"
+
+
+def float_flag(shares: Optional[float]) -> str:
+    """Finnhub profile2 shareOutstanding is usually in millions in this file."""
+    if shares is None or shares <= 0:
+        return ""
+    if shares <= 10:
+        return " ⭐ Low Float"
+    if shares <= 30:
+        return " 🟢 Tradable Float"
+    if shares <= 50:
+        return " ⚠️ Mid Float"
+    return " ⚠️ Large Float"
+
+
+def format_vol_rvol(volume: int, rvol: float) -> str:
+    if volume <= 0 and rvol <= 0:
+        return "Vol: Unknown"
+    if rvol > 0:
+        return f"Vol: {format_volume(volume)} ({rvol:.1f}x RVOL)"
+    return f"Vol: {format_volume(volume)}"
 
 
 def candle_age_seconds(candles: Sequence[Candle]) -> Optional[int]:
@@ -1122,6 +1147,11 @@ def get_finnhub_quote(ticker: str) -> Optional[Quote]:
 
 
 def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
+    """Yahoo-chart first quote stack for hot small caps.
+
+    v61: avoids Finnhub lag overriding the already Yahoo-confirmed leader price.
+    Priority: Yahoo 1m chart -> confirmed leader snapshot -> Finnhub fallback.
+    """
     ticker = normalize_ticker(ticker)
     cached = QUOTE_CACHE.get(ticker)
     if cached:
@@ -1129,15 +1159,14 @@ def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
         if time.time() - ts <= QUOTE_CACHE_TTL_SECONDS and q and q.price > 0:
             return q
 
-    q = get_finnhub_quote(ticker)
-    if q and q.price > 0:
+    yah = get_yahoo_quote_snapshot(ticker)
+    if yah and yah.price > 0:
         if leader:
-            if not q.change_pct and leader.change_pct:
-                q.change_pct = leader.change_pct
-            if not q.day_volume and leader.volume:
-                q.day_volume = leader.volume
-        QUOTE_CACHE[ticker] = (time.time(), q)
-        return q
+            yah.day_volume = max(yah.day_volume, leader.volume)
+            if not yah.change_pct and leader.change_pct:
+                yah.change_pct = leader.change_pct
+        QUOTE_CACHE[ticker] = (time.time(), yah)
+        return yah
 
     if leader and leader.price > 0:
         q = Quote(
@@ -1147,6 +1176,11 @@ def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
             day_volume=leader.volume,
             source=f"leader:{leader.source}",
         )
+        QUOTE_CACHE[ticker] = (time.time(), q)
+        return q
+
+    q = get_finnhub_quote(ticker)
+    if q and q.price > 0:
         QUOTE_CACHE[ticker] = (time.time(), q)
         return q
 
@@ -1675,6 +1709,8 @@ def summarize_news(headline: str) -> str:
 
     if not h or "unknown catalyst" in low:
         return "UNKNOWN CATALYST — INVESTIGATE"
+    if "share consolidation" in low or "reverse split" in low:
+        return "Share Consolidation"
     if "business combination" in low or "merger" in low or "acquisition" in low:
         return "Merger/business combo update"
     if "fda" in low or "clearance" in low or "approval" in low:
@@ -1700,6 +1736,8 @@ def setup_alert_label(d: CandidateDecision) -> str:
     s = d.structure or Structure()
     if d.alert_type == "FAST SPIKE":
         return "🔥 Fast Spike"
+    if d.alert_type == "HOD BREAK":
+        return "🚨 HOD Break"
     if d.alert_type == "MONSTER LEADER":
         return "⭐ Monster Leader"
     if d.alert_type == "ELITE RUNNER":
@@ -2016,7 +2054,7 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
     # CRITICAL FIX:
     # If a leader makes a real fresh +10% fast spike, do NOT let old market-leader
     # cooldown logic hide it. This was blocking names like WCT in logs.
-    if alert_type == "FAST SPIKE":
+    if alert_type in {"FAST SPIKE", "HOD BREAK"}:
         if seconds_since < 60:
             return False
         return True
@@ -2149,6 +2187,14 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         and day_vol >= TOP3_OVERRIDE_MIN_VOLUME
         and structure.data_ok
     )
+    hod_break_ok = (
+        gain >= HOD_BREAK_MIN_GAIN
+        and day_vol >= HOD_BREAK_MIN_VOLUME
+        and structure.data_ok
+        and structure.above_vwap
+        and (structure.breakout or structure.near_hod)
+        and structure.recent_volume >= MIN_RECENT_VOLUME
+    )
 
     # On hot/insane days, do not alert a lazy +27% name. A true fresh +10% push
     # can bypass the dynamic floor. Also allow top-3 volume monsters so the scanner
@@ -2156,6 +2202,7 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
     passes_dynamic_gain = (
         gain >= dynamic_min_gain
         or (FAST_SPIKE_ALLOWED_UNDER_DYNAMIC_FLOOR and fast_spike_ok)
+        or hod_break_ok
         or top3_override_ok
     )
     if not passes_dynamic_gain:
@@ -2164,6 +2211,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
             should_alert=False,
             reasons=[f"gain {gain:.1f}% under dynamic {dynamic_min_gain:.0f}% floor ({regime})"],
             risks=dedupe_text(risks),
+            leader_rank=leader_rank,
+            rvol=rvol,
             quote=quote,
             structure=structure,
             news=news,
@@ -2176,6 +2225,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         alert_type = ""
     elif fast_spike_ok and potential >= max(4, MIN_ELITE_POTENTIAL_SCORE - 2):
         alert_type = "FAST SPIKE"
+    elif hod_break_ok and potential >= max(4, MIN_ELITE_POTENTIAL_SCORE - 2):
+        alert_type = "HOD BREAK"
     elif top3_override_ok and potential >= 4:
         alert_type = "MONSTER LEADER"
     elif gain >= 100 and day_vol >= MIN_ELITE_DAY_VOLUME and potential >= 5:
@@ -2200,6 +2251,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         alert_type = ""
 
     if alert_type == "FAST SPIKE":
+        required_quality = MIN_FAST_SPIKE_QUALITY
+    elif alert_type == "HOD BREAK":
         required_quality = MIN_FAST_SPIKE_QUALITY
     elif alert_type == "MONSTER LEADER":
         required_quality = 8
@@ -2245,6 +2298,8 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         quality=quality,
         reasons=dedupe_text(reasons)[:6],
         risks=dedupe_text(risks)[:4],
+        leader_rank=leader_rank,
+        rvol=rvol,
         quote=quote,
         structure=structure,
         news=news,
@@ -2262,51 +2317,58 @@ def format_alert(d: CandidateDecision) -> str:
     n = d.news or NewsResult()
 
     gain = max(q.change_pct, d.leader.change_pct if d.leader else 0)
-    float_txt = format_float_shares(d.leader.float_shares if d.leader else None)
+    day_vol = max(q.day_volume, d.leader.volume if d.leader else 0)
+    float_m = d.leader.float_shares if d.leader else None
+    float_txt = format_float_shares(float_m) + float_flag(float_m)
     setup_line = setup_alert_label(d)
+    rank_txt = f"🏆 Leader #{d.leader_rank}" if d.leader_rank and d.leader_rank < 999 else "🏆 Live Leader"
+    vol_line = format_vol_rvol(day_vol, d.rvol or relative_volume_ratio(day_vol))
 
     if d.spike_pct >= FAST_SPIKE_PCT:
-        action_line = f"🔥 +{d.spike_pct:.1f}% Spike"
+        action_line = f"🔥 +{d.spike_pct:.1f}% in {FAST_SPIKE_WINDOW_MIN} min"
+    elif d.alert_type == "HOD BREAK":
+        action_line = "🚨 New High / HOD Push"
     elif d.alert_type == "MONSTER LEADER":
         action_line = "⭐ Monster Leader"
     elif d.alert_type == "ELITE RUNNER":
         action_line = "🔥 Elite Runner"
-    elif d.alert_type == "MARKET LEADER":
-        action_line = "🚀 Market Leader"
-    elif d.alert_type == "BREAKOUT PUSH":
-        action_line = "📈 Breakout Push"
-    elif d.alert_type == "A+ VWAP HOLD":
-        action_line = "🟢 VWAP Hold"
-    elif d.alert_type == "RECLAIM WATCH":
-        action_line = "🟡 Wait for Reclaim"
     else:
         action_line = "📈 Live Push"
 
     news_line = summarize_news(clean_news_text(n))
 
-    check_parts = []
+    structure_parts = []
     if s.above_vwap:
-        check_parts.append("hold VWAP")
+        structure_parts.append("🟢 Above VWAP")
     elif getattr(s, "below_vwap_reclaim_watch", False):
-        check_parts.append("reclaim VWAP")
+        structure_parts.append("🟡 Reclaim VWAP")
     else:
-        check_parts.append("confirm VWAP")
+        structure_parts.append("⚠️ Confirm VWAP")
+
     if s.near_hod:
-        check_parts.append("HOD push")
+        structure_parts.append("🟢 Near HOD")
     elif s.recent_high:
-        check_parts.append("clear recent high")
+        structure_parts.append("clear recent high")
+
     if s.extended_from_vwap_pct >= MAX_EXTENDED_FROM_VWAP_WARN_PCT:
-        check_parts.append("extended")
-    check_line = " | ".join(check_parts[:2])
+        structure_parts.append(f"⚠️ Extended +{s.extended_from_vwap_pct:.0f}%")
+
+    structure_line = " | ".join(structure_parts[:3])
+
+    next_line = "Watch HOD break" if s.near_hod or d.alert_type == "HOD BREAK" else ("Hold VWAP" if s.above_vwap else "Wait for VWAP reclaim")
 
     return f"""🚀 {d.ticker} +{gain:.0f}% | ${q.price:.2f}
 
-Float {float_txt}
+{rank_txt}
+Float: {float_txt}
+{vol_line}
+
 {setup_line}
 {action_line}
 
 NEWS: {news_line}
-CHECK: {check_line}"""
+STRUCTURE: {structure_line}
+NEXT: {next_line}"""
 
 
 def send_telegram(text: str) -> bool:
