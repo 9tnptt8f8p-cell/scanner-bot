@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v61.2-news-ranked"
+VERSION = "v61.3-live-candle-volume-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -991,7 +991,7 @@ def consensus_live_leader(leader: Leader) -> Optional[Leader]:
 
     leader.price = chosen.price or leader.price
     leader.change_pct = chosen.change_pct
-    leader.volume = max(chosen.day_volume, leader.volume)
+    leader.volume = chosen.day_volume if chosen.day_volume > 0 else leader.volume
     leader.source = source
     return leader
 
@@ -1162,7 +1162,10 @@ def best_quote(ticker: str, leader: Optional[Leader] = None) -> Optional[Quote]:
     yah = get_yahoo_quote_snapshot(ticker)
     if yah and yah.price > 0:
         if leader:
-            yah.day_volume = max(yah.day_volume, leader.volume)
+            # Do NOT let stale screener volume override fresh Yahoo chart volume.
+            # Screener volume caused alerts like SCAG showing 56M while live charts showed ~19M.
+            if yah.day_volume <= 0:
+                yah.day_volume = leader.volume
             if not yah.change_pct and leader.change_pct:
                 yah.change_pct = leader.change_pct
         QUOTE_CACHE[ticker] = (time.time(), yah)
@@ -1377,6 +1380,26 @@ def best_candles(ticker: str) -> List[Candle]:
 
     CANDLE_CACHE[ticker] = (time.time(), candles)
     return candles
+
+
+def live_day_volume_from_candles(candles: Sequence[Candle]) -> int:
+    """Authoritative alert volume from today's live 1-minute candles.
+
+    This fixes stale screener volume. Yahoo/Nasdaq screener rows can report a
+    much larger or delayed total than what traders see on live charts. For
+    alerts and scoring, trust summed current-day 1m candle volume first.
+    """
+    if not candles:
+        return 0
+    today = current_trade_date()
+    total = 0
+    for c in candles:
+        try:
+            if c.ts.astimezone(EASTERN_TZ).date().isoformat() == today:
+                total += safe_int(c.volume)
+        except Exception:
+            total += safe_int(c.volume)
+    return total
 
 
 def calc_vwap(candles: Sequence[Candle]) -> Optional[float]:
@@ -2213,7 +2236,6 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         return CandidateDecision(ticker=ticker, should_alert=False, reasons=["no valid quote"], leader=leader)
 
     gain = max(quote.change_pct, leader.change_pct)
-    day_vol = max(quote.day_volume, leader.volume)
     remember_first_seen(leader, quote)
 
     regime, top_gain, dynamic_min_gain = market_regime_from_leaders(LAST_GOOD_LEADERS)
@@ -2223,6 +2245,23 @@ def decide_candidate(leader: Leader) -> CandidateDecision:
         return CandidateDecision(ticker=ticker, should_alert=False, reasons=["price outside range"], quote=quote, leader=leader)
 
     candles = best_candles(ticker)
+
+    # Volume fix: once candles are loaded, use summed live 1m candle volume as the
+    # authority. Do not display or score stale Yahoo/Nasdaq screener volume.
+    live_candle_vol = live_day_volume_from_candles(candles)
+    seed_vol = max(quote.day_volume, leader.volume)
+    if live_candle_vol > 0:
+        if seed_vol > 0 and abs(seed_vol - live_candle_vol) / max(seed_vol, live_candle_vol) > 0.30:
+            log.info(
+                "[VOLUME CORRECTED] %s seed=%s live_candles=%s using=live_candles",
+                ticker,
+                seed_vol,
+                live_candle_vol,
+            )
+        quote.day_volume = live_candle_vol
+        leader.volume = live_candle_vol
+
+    day_vol = quote.day_volume if quote.day_volume > 0 else leader.volume
     structure = analyze_structure(candles, quote) if candles else Structure(data_ok=False, reason="no candles", setup_label="NO DATA")
 
     news = best_news(ticker) if should_check_news(ticker) else NewsResult(
@@ -2428,7 +2467,7 @@ def format_alert(d: CandidateDecision) -> str:
     n = d.news or NewsResult()
 
     gain = max(q.change_pct, d.leader.change_pct if d.leader else 0)
-    day_vol = max(q.day_volume, d.leader.volume if d.leader else 0)
+    day_vol = q.day_volume if q.day_volume > 0 else (d.leader.volume if d.leader else 0)
     float_m = d.leader.float_shares if d.leader else None
     float_txt = format_float_shares(float_m) + float_flag(float_m)
     setup_line = setup_alert_label(d)
