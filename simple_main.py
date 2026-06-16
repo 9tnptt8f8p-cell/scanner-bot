@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v61.3-live-candle-volume-fix"
+VERSION = "v61.4-hard-anti-spam-realert-fix"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -118,9 +118,12 @@ HOT_SECTOR_TERMS = [
 
 MIN_PRICE_MOVE_REPOST_PCT = float(os.getenv("MIN_PRICE_MOVE_REPOST_PCT", "7"))
 MEANINGFUL_NEW_HIGH_PCT = float(os.getenv("MEANINGFUL_NEW_HIGH_PCT", "5"))
-FRESH_LEADER_REPUSH_PCT = float(os.getenv("FRESH_LEADER_REPUSH_PCT", "5"))
-FRESH_LEADER_REALERT_SECONDS = int(os.getenv("FRESH_LEADER_REALERT_SECONDS", "300"))
+FRESH_LEADER_REPUSH_PCT = float(os.getenv("FRESH_LEADER_REPUSH_PCT", "7"))
+FRESH_LEADER_REALERT_SECONDS = int(os.getenv("FRESH_LEADER_REALERT_SECONDS", "1200"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
+HARD_TICKER_LOCK_SECONDS = int(os.getenv("HARD_TICKER_LOCK_SECONDS", "1200"))
+SETUP_UPGRADE_REALERT_SECONDS = int(os.getenv("SETUP_UPGRADE_REALERT_SECONDS", "1800"))
+REALERT_QUALITY_UPGRADE_DELTA = int(os.getenv("REALERT_QUALITY_UPGRADE_DELTA", "3"))
 
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
@@ -2174,6 +2177,14 @@ def update_baseline(ticker: str, price: float) -> AlertState:
 
 
 def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> bool:
+    """Hard anti-spam gate.
+
+    v61.4 fix:
+    - Never let HOD BREAK bypass cooldown every 60 seconds.
+    - A tiny new high/penny HOD is NOT a re-alert.
+    - Re-alert requires time + real price expansion.
+    - FAST SPIKE can re-alert earlier only after a fresh +10% move from last alert.
+    """
     st = ALERT_STATES.setdefault(ticker, AlertState())
     now = time.time()
 
@@ -2181,34 +2192,76 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
         return True
 
     seconds_since = now - st.last_alert_ts
-    price_push_pct = pct_change(quote.price, st.last_alert_price) if st.last_alert_price > 0 else 0.0
-    high_push_pct = pct_change(structure.hod or quote.price, st.last_alert_high) if st.last_alert_high > 0 else 0.0
-    quality_upgrade = quality >= st.last_quality + 2
+    last_price = st.last_alert_price or 0.0
+    last_high = st.last_alert_high or last_price
+    current_high = structure.hod or quote.price
 
-    # CRITICAL FIX:
-    # If a leader makes a real fresh +10% fast spike, do NOT let old market-leader
-    # cooldown logic hide it. This was blocking names like WCT in logs.
-    if alert_type in {"FAST SPIKE", "HOD BREAK"}:
-        if seconds_since < 60:
+    price_push_pct = pct_change(quote.price, last_price) if last_price > 0 else 0.0
+    high_push_pct = pct_change(current_high, last_high) if last_high > 0 else 0.0
+    quality_upgrade = quality >= st.last_quality + REALERT_QUALITY_UPGRADE_DELTA
+
+    # Absolute first line of defense: one ticker cannot alert repeatedly just
+    # because every scan sees the same setup again.
+    if seconds_since < HARD_TICKER_LOCK_SECONDS:
+        # Only a true fresh fast spike can override the hard lock.
+        fast_spike_realert = (
+            alert_type == "FAST SPIKE"
+            and seconds_since >= FAST_SPIKE_REALERT_SECONDS
+            and price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+        )
+        if not fast_spike_realert:
+            log.info(
+                "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% lock=%ss",
+                ticker,
+                alert_type,
+                int(seconds_since),
+                price_push_pct,
+                high_push_pct,
+                HARD_TICKER_LOCK_SECONDS,
+            )
             return False
-        return True
 
-    # Big leaders can re-alert faster on a fresh +5% push/new high.
-    if alert_type == "MARKET LEADER":
-        if seconds_since >= FRESH_LEADER_REALERT_SECONDS and (
-            price_push_pct >= FRESH_LEADER_REPUSH_PCT
-            or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
-            or quality_upgrade
-        ):
-            return True
+    # After the lock, require a real move. A ten-cent drift or penny HOD should
+    # not generate another Telegram message.
+    meaningful_price_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT
+    meaningful_high_push = high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
 
-    # Setup upgrade can re-alert after a shorter delay if the chart meaningfully improves.
-    setup_upgrade = alert_type in {"A+ VWAP HOLD", "BREAKOUT PUSH"} and st.last_alert_type not in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
+    if alert_type == "FAST SPIKE":
+        allowed = price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+    elif alert_type in {"HOD BREAK", "MONSTER LEADER", "ELITE RUNNER"}:
+        allowed = meaningful_price_push or meaningful_high_push or quality_upgrade
+    else:
+        setup_upgrade = (
+            alert_type in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
+            and st.last_alert_type not in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
+            and seconds_since >= SETUP_UPGRADE_REALERT_SECONDS
+        )
+        allowed = meaningful_price_push or meaningful_high_push or (quality_upgrade and seconds_since >= SETUP_UPGRADE_REALERT_SECONDS) or setup_upgrade
 
-    cooldown_done = seconds_since >= ALERT_COOLDOWN_SECONDS
-    meaningful_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT or high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
-    return (cooldown_done and (meaningful_push or quality_upgrade)) or (seconds_since >= 600 and setup_upgrade)
+    if not allowed:
+        log.info(
+            "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% quality=%s->%s",
+            ticker,
+            alert_type,
+            int(seconds_since),
+            price_push_pct,
+            high_push_pct,
+            st.last_quality,
+            quality,
+        )
+        return False
 
+    log.info(
+        "[REALERT OK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% quality=%s->%s",
+        ticker,
+        alert_type,
+        int(seconds_since),
+        price_push_pct,
+        high_push_pct,
+        st.last_quality,
+        quality,
+    )
+    return True
 
 def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> None:
     st = ALERT_STATES.setdefault(ticker, AlertState())
