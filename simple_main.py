@@ -52,7 +52,7 @@ except Exception:
 # CONFIG
 # =============================================================================
 
-VERSION = "v61.4-hard-anti-spam-realert-fix"
+VERSION = "v61.5-hard-ticker-lock-persistent"
 EASTERN_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone(timedelta(hours=-5))
 
 PORT = int(os.getenv("PORT", "10000"))
@@ -124,6 +124,8 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1200"))
 HARD_TICKER_LOCK_SECONDS = int(os.getenv("HARD_TICKER_LOCK_SECONDS", "1200"))
 SETUP_UPGRADE_REALERT_SECONDS = int(os.getenv("SETUP_UPGRADE_REALERT_SECONDS", "1800"))
 REALERT_QUALITY_UPGRADE_DELTA = int(os.getenv("REALERT_QUALITY_UPGRADE_DELTA", "3"))
+MIN_ABSOLUTE_REALERT_DOLLARS = float(os.getenv("MIN_ABSOLUTE_REALERT_DOLLARS", "0.15"))
+ALERT_STATE_FILE = os.getenv("ALERT_STATE_FILE", "/tmp/simple_main_alert_state.json")
 
 YAHOO_COOLDOWN_SECONDS = int(os.getenv("YAHOO_COOLDOWN_SECONDS", "300"))
 SOURCE_COOLDOWN_SECONDS = int(os.getenv("SOURCE_COOLDOWN_SECONDS", "120"))
@@ -304,6 +306,95 @@ LAST_GOOD_LEADERS_TRADE_DATE = ""
 
 
 # =============================================================================
+# ALERT STATE PERSISTENCE / MULTI-RESTART GUARD
+# =============================================================================
+
+def alert_state_to_dict(st: AlertState) -> Dict[str, Any]:
+    return {
+        "last_alert_ts": st.last_alert_ts,
+        "last_alert_price": st.last_alert_price,
+        "last_alert_high": st.last_alert_high,
+        "last_alert_type": st.last_alert_type,
+        "last_quality": st.last_quality,
+        "baseline_price": st.baseline_price,
+        "baseline_ts": st.baseline_ts,
+    }
+
+
+def alert_state_from_dict(row: Dict[str, Any]) -> AlertState:
+    return AlertState(
+        last_alert_ts=safe_float(row.get("last_alert_ts")),
+        last_alert_price=safe_float(row.get("last_alert_price")),
+        last_alert_high=safe_float(row.get("last_alert_high")),
+        last_alert_type=str(row.get("last_alert_type") or ""),
+        last_quality=safe_int(row.get("last_quality")),
+        baseline_price=safe_float(row.get("baseline_price")),
+        baseline_ts=safe_float(row.get("baseline_ts")),
+    )
+
+
+def load_alert_state_from_disk() -> None:
+    """Load today's alert memory from disk.
+
+    This protects against repeated alerts after a Render restart/redeploy. It is
+    not a database, but it stops the common spam case where the process restarts
+    and forgets it already alerted NMRA minutes ago.
+    """
+    try:
+        path = ALERT_STATE_FILE
+        if not path:
+            return
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or data.get("trade_date") != current_trade_date():
+            return
+        rows = data.get("alert_states") or {}
+        if not isinstance(rows, dict):
+            return
+        loaded = 0
+        for ticker, row in rows.items():
+            t = normalize_ticker(ticker)
+            if not t or not isinstance(row, dict):
+                continue
+            ALERT_STATES[t] = alert_state_from_dict(row)
+            loaded += 1
+        if loaded:
+            log.info("[ALERT STATE LOAD] loaded=%s file=%s", loaded, path)
+    except Exception as exc:
+        log.warning("[ALERT STATE LOAD ERROR] %s", exc)
+
+
+def save_alert_state_to_disk() -> None:
+    """Persist today's alert memory after each successful alert."""
+    try:
+        path = ALERT_STATE_FILE
+        if not path:
+            return
+        data = {
+            "trade_date": current_trade_date(),
+            "saved_at": time.time(),
+            "alert_states": {ticker: alert_state_to_dict(st) for ticker, st in ALERT_STATES.items()},
+        }
+        tmp = f"{path}.tmp"
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except Exception as exc:
+        log.warning("[ALERT STATE SAVE ERROR] %s", exc)
+
+
+def clear_alert_state_file() -> None:
+    try:
+        if ALERT_STATE_FILE and os.path.exists(ALERT_STATE_FILE):
+            os.remove(ALERT_STATE_FILE)
+    except Exception as exc:
+        log.warning("[ALERT STATE CLEAR ERROR] %s", exc)
+
+
+# =============================================================================
 # DAILY STATE / TODAY-ONLY GUARD
 # =============================================================================
 
@@ -331,6 +422,7 @@ def reset_daily_state_if_needed(force: bool = False) -> None:
     FIRST_SEEN.clear()
     FIRST_SEEN_INITIALIZED = False
     ALERT_STATES.clear()
+    clear_alert_state_file()
     LAST_GOOD_LEADERS = []
     LAST_GOOD_LEADERS_TS = 0.0
 
@@ -2179,10 +2271,11 @@ def update_baseline(ticker: str, price: float) -> AlertState:
 def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure: Structure, quality: int) -> bool:
     """Hard anti-spam gate.
 
-    v61.4 fix:
-    - Never let HOD BREAK bypass cooldown every 60 seconds.
-    - A tiny new high/penny HOD is NOT a re-alert.
-    - Re-alert requires time + real price expansion.
+    v61.5 rules:
+    - First alert is allowed.
+    - Same ticker is locked for HARD_TICKER_LOCK_SECONDS.
+    - HOD BREAK / MONSTER / ELITE cannot re-alert from quality upgrades alone.
+    - Repeat alert requires a real price move AND a minimum dollar move.
     - FAST SPIKE can re-alert earlier only after a fresh +10% move from last alert.
     """
     st = ALERT_STATES.setdefault(ticker, AlertState())
@@ -2198,68 +2291,83 @@ def is_meaningful_realert(ticker: str, alert_type: str, quote: Quote, structure:
 
     price_push_pct = pct_change(quote.price, last_price) if last_price > 0 else 0.0
     high_push_pct = pct_change(current_high, last_high) if last_high > 0 else 0.0
-    quality_upgrade = quality >= st.last_quality + REALERT_QUALITY_UPGRADE_DELTA
+    price_push_dollars = quote.price - last_price if last_price > 0 else 0.0
+    high_push_dollars = current_high - last_high if last_high > 0 else 0.0
 
-    # Absolute first line of defense: one ticker cannot alert repeatedly just
-    # because every scan sees the same setup again.
-    if seconds_since < HARD_TICKER_LOCK_SECONDS:
-        # Only a true fresh fast spike can override the hard lock.
-        fast_spike_realert = (
-            alert_type == "FAST SPIKE"
-            and seconds_since >= FAST_SPIKE_REALERT_SECONDS
-            and price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+    real_price_push = (
+        price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT
+        and price_push_dollars >= MIN_ABSOLUTE_REALERT_DOLLARS
+    )
+    real_high_push = (
+        high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
+        and high_push_dollars >= MIN_ABSOLUTE_REALERT_DOLLARS
+    )
+    real_fast_spike = (
+        alert_type == "FAST SPIKE"
+        and seconds_since >= FAST_SPIKE_REALERT_SECONDS
+        and price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+        and price_push_dollars >= max(0.10, MIN_ABSOLUTE_REALERT_DOLLARS)
+    )
+
+    # Hard lock: no repeat messages for the same ticker inside the lock unless
+    # there is a true new fast spike. This blocks same ticker/different setup spam.
+    if seconds_since < HARD_TICKER_LOCK_SECONDS and not real_fast_spike:
+        log.info(
+            "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%%/$%.2f high_push=%.1f%%/$%.2f lock=%ss last_type=%s",
+            ticker,
+            alert_type,
+            int(seconds_since),
+            price_push_pct,
+            price_push_dollars,
+            high_push_pct,
+            high_push_dollars,
+            HARD_TICKER_LOCK_SECONDS,
+            st.last_alert_type,
         )
-        if not fast_spike_realert:
-            log.info(
-                "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% lock=%ss",
-                ticker,
-                alert_type,
-                int(seconds_since),
-                price_push_pct,
-                high_push_pct,
-                HARD_TICKER_LOCK_SECONDS,
-            )
-            return False
-
-    # After the lock, require a real move. A ten-cent drift or penny HOD should
-    # not generate another Telegram message.
-    meaningful_price_push = price_push_pct >= MIN_PRICE_MOVE_REPOST_PCT
-    meaningful_high_push = high_push_pct >= MEANINGFUL_NEW_HIGH_PCT
+        return False
 
     if alert_type == "FAST SPIKE":
-        allowed = price_push_pct >= FAST_SPIKE_FROM_LAST_ALERT_PCT
+        allowed = real_fast_spike
     elif alert_type in {"HOD BREAK", "MONSTER LEADER", "ELITE RUNNER"}:
-        allowed = meaningful_price_push or meaningful_high_push or quality_upgrade
+        # No quality-upgrade-only repeat here. This is the NMRA spam fix.
+        allowed = real_price_push or real_high_push
     else:
         setup_upgrade = (
             alert_type in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
             and st.last_alert_type not in {"A+ VWAP HOLD", "BREAKOUT PUSH"}
             and seconds_since >= SETUP_UPGRADE_REALERT_SECONDS
+            and (real_price_push or real_high_push)
         )
-        allowed = meaningful_price_push or meaningful_high_push or (quality_upgrade and seconds_since >= SETUP_UPGRADE_REALERT_SECONDS) or setup_upgrade
+        allowed = real_price_push or real_high_push or setup_upgrade
 
     if not allowed:
         log.info(
-            "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% quality=%s->%s",
+            "[REALERT BLOCK] %s type=%s since=%ss price_push=%.1f%%/$%.2f high_push=%.1f%%/$%.2f quality=%s->%s last_type=%s",
             ticker,
             alert_type,
             int(seconds_since),
             price_push_pct,
+            price_push_dollars,
             high_push_pct,
+            high_push_dollars,
             st.last_quality,
             quality,
+            st.last_alert_type,
         )
         return False
 
     log.info(
-        "[REALERT OK] %s type=%s since=%ss price_push=%.1f%% high_push=%.1f%% quality=%s->%s",
+        "[REALERT OK] %s type=%s since=%ss price_push=%.1f%%/$%.2f high_push=%.1f%%/$%.2f quality=%s->%s last_type=%s",
         ticker,
         alert_type,
         int(seconds_since),
         price_push_pct,
+        price_push_dollars,
         high_push_pct,
+        high_push_dollars,
         st.last_quality,
         quality,
+        st.last_alert_type,
     )
     return True
 
@@ -2274,6 +2382,18 @@ def mark_alerted(ticker: str, alert_type: str, quote: Quote, structure: Structur
     st.last_quality = quality
     st.baseline_price = quote.price
     st.baseline_ts = now
+    save_alert_state_to_disk()
+
+
+def pre_send_guard(d: CandidateDecision) -> bool:
+    """Final gate immediately before Telegram send.
+
+    Decisions are made earlier in the cycle. This second check prevents a stale
+    decision from sending if the ticker state changed after decision creation.
+    """
+    if not d.quote or not d.structure or not d.alert_type:
+        return False
+    return is_meaningful_realert(d.ticker, d.alert_type, d.quote, d.structure, d.quality)
 
 
 def decide_candidate(leader: Leader) -> CandidateDecision:
@@ -2656,7 +2776,7 @@ def run_scan_cycle() -> Dict[str, Any]:
     alertable = [d for d in decisions if d.should_alert]
 
     def alert_priority(d: CandidateDecision) -> Tuple[int, float, int, float, int]:
-        type_rank = {"FAST SPIKE": 4, "MONSTER LEADER": 3, "ELITE RUNNER": 2}.get(d.alert_type, 0)
+        type_rank = {"FAST SPIKE": 4, "HOD BREAK": 3, "MONSTER LEADER": 3, "ELITE RUNNER": 2}.get(d.alert_type, 0)
         gain_rank = max(d.quote.change_pct if d.quote else 0, d.leader.change_pct if d.leader else 0)
         vol_rank = max(d.quote.day_volume if d.quote else 0, d.leader.volume if d.leader else 0)
         return (type_rank, d.spike_pct, d.quality, gain_rank, vol_rank)
@@ -2665,13 +2785,20 @@ def run_scan_cycle() -> Dict[str, Any]:
     attempted = min(len(alertable), MAX_ALERTS_PER_CYCLE)
 
     for d in alertable[:MAX_ALERTS_PER_CYCLE]:
+        if not pre_send_guard(d):
+            log.info("[PRE SEND BLOCK] %s type=%s blocked by final anti-spam gate", d.ticker, d.alert_type)
+            continue
+
+        # Mark before sending. If Telegram/API hiccups after the message gets
+        # accepted, we still do not spam the same ticker on the next cycle.
+        mark_alerted(d.ticker, d.alert_type, d.quote or Quote(d.ticker), d.structure or Structure(), d.quality)
+
         text = format_alert(d)
         if send_telegram(text):
-            mark_alerted(d.ticker, d.alert_type, d.quote or Quote(d.ticker), d.structure or Structure(), d.quality)
             alerts.append(d.ticker)
             sent += 1
         else:
-            log.error("[ALERT LOST] %s not delivered; cooldown not applied", d.ticker)
+            log.error("[ALERT LOST] %s not delivered; cooldown already applied to prevent retry spam", d.ticker)
 
     elapsed = round(time.time() - started, 2)
     summary = {
@@ -2733,6 +2860,8 @@ def scanner_loop() -> None:
         bool(ALPACA_API_KEY),
         bool(ALPACA_SECRET_KEY),
     )
+
+    load_alert_state_from_disk()
 
     while RUNNING:
         try:
